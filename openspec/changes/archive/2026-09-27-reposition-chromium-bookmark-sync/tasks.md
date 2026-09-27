@@ -28,7 +28,7 @@
 
 - [x] 5.1 Add extension icons and wire `action.default_icon` / manifest icons
 - [x] 5.2 Add a simple `npm run pack` (zip of loadable extension files)
-- [ ] 5.3 Rename GitHub repo to `bookmarks-raindrop-sync` and fix remote/clone references in README as needed
+- [x] 5.3 Rename GitHub repo to `bookmarks-raindrop-sync` and fix remote/clone references in README as needed
 
 ## 6. Verification
 

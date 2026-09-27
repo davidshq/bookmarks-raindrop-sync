@@ -53,6 +53,30 @@ When sync mode is `bidirectional`, the system SHALL periodically reconcile raind
 - **WHEN** a raindrop exists outside the configured root collection tree
 - **THEN** it is not created in Edge by reconcile
 
+### Requirement: Configurable quiet-time reconcile cadence
+When sync mode is `bidirectional`, periodic Raindrop→Edge reconcile on the heartbeat SHALL use the user-configured quiet-time interval (default 15 minutes) as the minimum gap between completed cycles, and SHALL defer starting a new cycle while competing Raindrop traffic is active as defined by the bookmark-sync-engine traffic-aware deferral rules. Manual "Pull now" SHALL still trigger an immediate reconcile subject to the global rate-limit pause.
+
+#### Scenario: Faster quiet polling when configured
+- **WHEN** bidirectional mode is on and the user has set the reconcile interval to 1 minute
+- **AND** the queue is idle
+- **AND** a reconcile cycle completed at least one minute ago
+- **THEN** the next heartbeat starts a new reconcile listing pass
+
+#### Scenario: Remote deletes wait while uploads drain
+- **WHEN** bidirectional mode is on and raindrops were deleted remotely
+- **AND** the durable queue still has upload jobs draining to Raindrop
+- **THEN** heartbeat does not start a new reconcile listing until the queue is quiet (or the user triggers Pull now)
+
+### Requirement: Pull placement respects canonical root aliases
+When sync mode is `bidirectional`, Raindrop→browser ingest and path existence checks SHALL use the same canonical toolbar/other alias rules as upload, so a raindrop under `Bookmarks bar/…` lands on the local toolbar root whether that root is titled `Bookmarks bar` or `Favorites bar`.
+
+#### Scenario: Chrome and Edge share one Raindrop bar tree
+- **WHEN** bidirectional mode is on
+- **AND** a raindrop exists under `Bookmarks/Bookmarks bar/Work`
+- **AND** the browser toolbar root is titled `Favorites bar`
+- **THEN** pull creates or updates the bookmark under `Favorites bar/Work`
+- **AND** does not create a parallel `Favorites bar/Bookmarks bar/Work` path
+
 ### Requirement: Pull respects Raindrop-to-Edge folder mode
 When sync mode is `bidirectional`, Raindrop→Edge ingest SHALL apply the configured Raindrop→Edge folder mode when deciding whether to create Edge folders or skip a raindrop whose mirrored path is incomplete in Edge.
 

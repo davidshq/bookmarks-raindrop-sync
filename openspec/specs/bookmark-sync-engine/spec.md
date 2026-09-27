@@ -49,20 +49,20 @@ The engine SHALL create the Raindrop bookmark and persist the `bookmarkId → ra
 - **AND** the job remains queued for retry (or is dead-lettered after the maximum attempt count)
 
 ### Requirement: Folder mirroring into nested Raindrop collections
-The engine SHALL recreate the Edge folder path of each synced bookmark as nested Raindrop collections under a user-chosen root collection, creating any missing collection (ensure-if-missing) and caching `path → collectionId` in storage. Both Edge roots SHALL be preserved under the chosen root.
+The engine SHALL recreate the browser bookmark folder path of each synced bookmark as nested Raindrop collections under a user-chosen root collection, creating any missing collection (ensure-if-missing) and caching `path → collectionId` in storage. Both Chromium top roots (toolbar and other) SHALL be preserved under the chosen root using **canonical** Raindrop titles `Bookmarks bar` and `Other bookmarks`, regardless of the local browser’s labels for those roots.
 
 #### Scenario: Bookmark in a nested folder
-- **WHEN** a bookmark located at `Favorites bar/Work/ProjectA` is synced with root collection `Edge`
-- **THEN** the collections `Edge`, `Edge/Favorites bar`, `Edge/Favorites bar/Work`, and `Edge/Favorites bar/Work/ProjectA` exist (created if missing)
-- **AND** the raindrop is placed in the `Edge/Favorites bar/Work/ProjectA` collection
+- **WHEN** a bookmark located at `Favorites bar/Work/ProjectA` (Edge) is synced with root collection `Bookmarks`
+- **THEN** the collections `Bookmarks`, `Bookmarks/Bookmarks bar`, `Bookmarks/Bookmarks bar/Work`, and `Bookmarks/Bookmarks bar/Work/ProjectA` exist (created if missing)
+- **AND** the raindrop is placed in the `Bookmarks/Bookmarks bar/Work/ProjectA` collection
 
 #### Scenario: Collection already exists
 - **WHEN** a path's collection has already been resolved and cached
 - **THEN** the cached `collectionId` is reused without an additional create or lookup request
 
-#### Scenario: Both Edge roots preserved
-- **WHEN** bookmarks exist under both the Favorites bar and Other favorites roots
-- **THEN** they map to `Edge/Favorites bar/…` and `Edge/Other favorites/…` respectively
+#### Scenario: Both Chromium roots preserved under canonical titles
+- **WHEN** bookmarks exist under both the local toolbar root and the local other-bookmarks root
+- **THEN** they map to `Bookmarks/Bookmarks bar/…` and `Bookmarks/Other bookmarks/…` respectively (for default root name `Bookmarks`)
 
 ### Requirement: Deduplication of already-synced bookmarks
 The engine SHALL maintain a persisted `bookmarkId → raindropId` map and SHALL skip creating a Raindrop bookmark for any bookmark id already present in the map.
@@ -218,13 +218,43 @@ The engine SHALL persist bidirectional pair mappings (`bookmarkId ↔ raindropId
 - **AND** the resulting `onChanged` does not echo an Edge→Raindrop `rename-collection`
 
 ### Requirement: Periodic reconcile trigger
-When sync mode is `bidirectional`, the engine SHALL run Raindrop reconciliation on the alarm heartbeat (and when explicitly requested) to discover new raindrops and remotely deleted raindrops under the configured root.
+When sync mode is `bidirectional`, the engine SHALL run Raindrop reconciliation on the alarm heartbeat (and when explicitly requested) to discover new raindrops and remotely deleted raindrops under the configured root. The minimum gap between *completed* heartbeat reconcile cycles SHALL be the user-configured quiet-time interval (default 15 minutes). In-progress cursors always continue; manual "Pull now" bypasses the quiet-time interval. Heartbeat starts of a new cycle SHALL also honor traffic-aware deferral defined for this engine.
 
 #### Scenario: Heartbeat reconcile
 - **WHEN** bidirectional mode is on and the alarm heartbeat fires
+- **AND** the quiet-time interval has elapsed
+- **AND** traffic-aware deferral does not apply
 - **THEN** reconcile runs for the configured root tree subject to rate-limit backoff
 
+#### Scenario: Configured quiet-time cooldown
+- **WHEN** a bidirectional reconcile cycle has completed successfully
+- **AND** the heartbeat fires again before the configured quiet-time interval elapses
+- **AND** no in-progress cursor remains
+- **THEN** the engine skips starting a new Raindrop listing pass with reason `cooldown`
+- **AND** a user-triggered "Pull now" still runs immediately (subject to rate-limit pause)
 
+### Requirement: Traffic-aware heartbeat reconcile deferral
+When sync mode is `bidirectional` and the heartbeat would start a *new* Raindrop reconcile cycle (no in-progress cursor), the engine SHALL skip starting that cycle when the durable queue still contains jobs that perform Raindrop API work. The skip result SHALL use machine-readable reason `busy`. In-progress reconcile cursors SHALL continue on subsequent heartbeats regardless of queue contention. A user-triggered "Pull now" SHALL NOT be deferred for queue contention (it SHALL still honor the global rate-limit pause). Low rate-limit remaining is handled by the existing hard pause (`rateLimitedUntil`), not a separate durable soft-busy snapshot.
+
+#### Scenario: Queue busy defers new listing
+- **WHEN** bidirectional mode is on and the quiet-time reconcile interval has elapsed
+- **AND** no in-progress reconcile cursor remains
+- **AND** the durable queue still contains at least one Raindrop-bound job
+- **AND** the heartbeat fires without `force`
+- **THEN** the engine skips starting a new Raindrop listing pass
+- **AND** the result reason is `busy`
+
+#### Scenario: Quiet install honors configured interval
+- **WHEN** bidirectional mode is on and the quiet-time reconcile interval has elapsed
+- **AND** no in-progress reconcile cursor remains
+- **AND** the durable queue has no Raindrop-bound jobs
+- **AND** the heartbeat fires without `force`
+- **THEN** the engine starts a Raindrop listing pass for the configured root tree
+
+#### Scenario: In-progress cursor ignores busy gate
+- **WHEN** a reconcile cycle is mid-cursor across heartbeats
+- **AND** Raindrop-bound jobs are also queued
+- **THEN** the engine continues the in-progress listing/finish work on the next heartbeat subject to rate-limit pause
 
 ### Requirement: Live capture of Edge bookmark moves
 The extension SHALL register a `chrome.bookmarks.onMoved` listener. When a URL bookmark's parent folder changes, the engine SHALL enqueue a durable upload job for that bookmark's id and signal drain. When a folder is moved, the engine SHALL walk the folder's live descendant tree, enqueue an upload job for each URL bookmark, and signal drain once. Same-parent moves (index-only reorders) SHALL NOT enqueue work. Folder nodes themselves SHALL NOT enqueue a job for the folder id.

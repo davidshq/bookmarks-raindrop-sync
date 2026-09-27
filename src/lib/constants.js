@@ -62,7 +62,9 @@ export const MSG = {
 // chrome.storage.local keys. Everything durable lives under these — the MV3
 // service worker holds no state across events.
 export const KEY = {
-  CONFIG: "config", // { token, rootName, defaultPolicy, pruneEmpty, syncMode, raindropFolderMode, raindropFolderAllowlist }
+  // { token, rootName, defaultPolicy, pruneEmpty, syncMode, raindropFolderMode,
+  //   raindropFolderAllowlist, keepLongTermLog, reconcileIntervalMinutes, rootsMigratedAt? }
+  CONFIG: "config",
   OVERRIDES: "overrides", // { [bookmarkFolderId]: { policy, path } }
   QUEUE: "queue", // [ { id, kind, attempts, nextAttemptAt, ... } ]
   /** Poison / exhausted jobs removed from QUEUE: [{ ...job, lastError, deadAt }] */
@@ -75,9 +77,15 @@ export const KEY = {
   COLLECTION_CACHE: "collectionCache", // { [collectionPath]: collectionId }
   /** Edge folder id → Raindrop collection id (for in-place folder renames). */
   FOLDER_COLLECTIONS: "folderCollections", // { [folderId]: collectionId }
-  STATUS: "status", // { pending, lastError, deletionsHalted, lastActivityAt, lastPushAt, rateLimitedUntil }
+  // { pending, lastError, deletionsHalted, lastActivityAt, lastPushAt, rateLimitedUntil }
+  STATUS: "status",
   LOG: "log", // [ { at, level, message } ] recent ring buffer (LOG_LIMIT)
 };
+
+/** Quiet-time bidirectional reconcile presets / clamps (minutes). */
+export const DEFAULT_RECONCILE_INTERVAL_MINUTES = 15;
+export const MIN_RECONCILE_INTERVAL_MINUTES = 1;
+export const MAX_RECONCILE_INTERVAL_MINUTES = 60;
 
 export const DEFAULT_CONFIG = {
   token: "",
@@ -90,6 +98,11 @@ export const DEFAULT_CONFIG = {
   raindropFolderAllowlist: {},
   /** When true, appendLog also writes to the IndexedDB long-term archive. */
   keepLongTermLog: false,
+  /**
+   * Minimum gap (minutes) between *completed* heartbeat reconcile cycles when
+   * the durable queue has no Raindrop-bound jobs. Bidirectional only.
+   */
+  reconcileIntervalMinutes: DEFAULT_RECONCILE_INTERVAL_MINUTES,
   /**
    * Set by one-shot roots migration (legacy Edge/Favorites → Bookmarks/…).
    * @type {number|undefined}
@@ -108,12 +121,19 @@ export const OUTSIDE_ROOT_MIRROR_FOLDER = "Raindrop";
 // The alarm that drives the drain heartbeat even with no bookmark activity.
 export const ALARM_NAME = "ers-heartbeat";
 export const HEARTBEAT_MINUTES = 1;
+
 /**
- * Minimum gap between *completed* bidirectional reconcile cycles on the
- * heartbeat. In-progress cursors always continue; manual "Pull now"
- * bypasses this. Keeps idle installs from re-listing Raindrop every minute.
+ * Quiet-time cooldown in ms from config (after normalizeConfig).
+ * @param {{ reconcileIntervalMinutes?: number }|null|undefined} config
  */
-export const MIN_RECONCILE_INTERVAL_MS = 15 * 60 * 1000;
+export function reconcileIntervalMs(config) {
+  const minutes =
+    typeof config?.reconcileIntervalMinutes === "number" &&
+    Number.isFinite(config.reconcileIntervalMinutes)
+      ? config.reconcileIntervalMinutes
+      : DEFAULT_RECONCILE_INTERVAL_MINUTES;
+  return minutes * 60 * 1000;
+}
 
 // Retry/backoff tuning. Backoff is capped; after MAX_JOB_ATTEMPTS the job
 // moves to the dead-letter list instead of retrying forever.

@@ -4,6 +4,9 @@ A Manifest V3 **Chromium** extension (Chrome, Edge, Brave, …) that syncs brows
 bookmarks with [Raindrop.io](https://raindrop.io) — one shared Raindrop tree
 across browsers.
 
+**Source:** [github.com/davidshq/bookmarks-raindrop-sync](https://github.com/davidshq/bookmarks-raindrop-sync)
+(`git clone https://github.com/davidshq/bookmarks-raindrop-sync.git`)
+
 Raindrop stores **canonical** root titles (`Bookmarks bar`, `Other bookmarks`)
 under a sync root you name (default `Bookmarks`). Local labels such as Edge’s
 `Favorites bar` / `Other favorites` map to those titles on upload and pull so
@@ -14,7 +17,7 @@ Chrome and Edge do not fork collections.
 | Mode | Behavior |
 | --- | --- |
 | **One-way** (default) | Browser → Raindrop only. Choose whether to **delete locally** after upload (offload) or **keep** a local copy. |
-| **Bidirectional** | Keeps bookmarks in **both** places: also pulls Raindrop → browser under your root, and propagates **user** deletes both ways. Global default is keep-both; use folder policies for Exclude or Offload exceptions. |
+| **Bidirectional** | Keeps bookmarks in **both** places: also pulls Raindrop → browser under your root, and propagates **user** deletes both ways. Global default is keep-both; use folder policies for Exclude or Offload exceptions. Quiet-time **Raindrop check interval** is configurable (default 15 minutes); heartbeat defers a new listing while the upload queue still has Raindrop work. **Pull now** still runs immediately. |
 
 ## What it does
 
@@ -42,6 +45,8 @@ Chrome and Edge do not fork collections.
   delete the Raindrop copy.
 - **Bidirectional pull** — raindrops under the root appear as browser bookmarks
   (files/documents skipped); deletes propagate both ways with tombstones.
+  Heartbeat reconcile uses your quiet-time interval when idle, and skips starting
+  a new listing while Raindrop-bound jobs are still queued.
   **Raindrop → browser folders** chooses create-as-needed / existing-only /
   mirror-all. Outside-root allowlist picks land under Other bookmarks / Raindrop
   (or Other favorites on Edge).

@@ -17,6 +17,9 @@
 import {
   KEY,
   DEFAULT_CONFIG,
+  DEFAULT_RECONCILE_INTERVAL_MINUTES,
+  MIN_RECONCILE_INTERVAL_MINUTES,
+  MAX_RECONCILE_INTERVAL_MINUTES,
   LOG_LIMIT,
   LOG_ATS_LIMIT,
   SUPPRESS_MS,
@@ -105,6 +108,20 @@ export async function getStorageUsage() {
 // stored coercion is persisted by healStoredConfig (service-worker start) and
 // by setConfig, never by a read.
 
+/**
+ * Clamp quiet-time reconcile interval to [1, 60] minutes; invalid → default 15.
+ * @param {unknown} value
+ * @returns {number}
+ */
+export function clampReconcileIntervalMinutes(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return DEFAULT_RECONCILE_INTERVAL_MINUTES;
+  return Math.min(
+    MAX_RECONCILE_INTERVAL_MINUTES,
+    Math.max(MIN_RECONCILE_INTERVAL_MINUTES, Math.round(n))
+  );
+}
+
 /** Force keep-both when bidirectional; folder Offload overrides still work. */
 export function normalizeConfig(config) {
   const next = { ...config };
@@ -115,6 +132,7 @@ export function normalizeConfig(config) {
     next.raindropFolderAllowlist = {};
   }
   next.keepLongTermLog = !!next.keepLongTermLog;
+  next.reconcileIntervalMinutes = clampReconcileIntervalMinutes(next.reconcileIntervalMinutes);
   return next;
 }
 

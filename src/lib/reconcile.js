@@ -10,12 +10,16 @@
 // Rate-limit posture: shared page budget for root + outside-root listing; capped
 // GET /raindrop confirms shared by delete detection + tombstone prune; stop early
 // when the client reports low X-RateLimit-Remaining (throws RateLimitError).
+// Heartbeat starts a *new* cycle only when the configured quiet-time interval has
+// elapsed and the durable queue has no Raindrop-bound jobs; in-progress cursors
+// always continue. Pull now (force) bypasses interval and queue-busy.
 
 import {
   SYNC_MODE,
   RAINDROP_FOLDER_MODE,
   MAX_RECONCILE_PAGES_PER_TICK,
-  MIN_RECONCILE_INTERVAL_MS,
+  JOB,
+  reconcileIntervalMs,
 } from "./constants.js";
 import {
   getConfig,
@@ -28,6 +32,7 @@ import {
   ensurePairsMigrated,
   isRateLimited,
 } from "./store.js";
+import * as queue from "./queue.js";
 import { getTopRoots, mirrorPathExists } from "./bookmarks.js";
 import {
   buildCollectionIndex,
@@ -42,6 +47,23 @@ import { maybeEnqueuePullCreate } from "./reconcile-enqueue.js";
 import { finishReconcileCycle } from "./reconcile-finish.js";
 
 const PER_PAGE = 50;
+
+/** Job kinds that hit the Raindrop API (compete with listing for rate budget). */
+const RAINDROP_BOUND_KINDS = new Set([
+  JOB.UPLOAD,
+  JOB.DELETE_RAINDROP,
+  JOB.DELETE_EDGE,
+  JOB.PULL_CREATE,
+  JOB.PULL_UPDATE,
+  JOB.PULL_RENAME_FOLDER,
+  JOB.RENAME_COLLECTION,
+]);
+
+/** True when the durable queue still has Raindrop API work pending. */
+export async function hasRaindropBoundQueueWork() {
+  const jobs = await queue.list();
+  return jobs.some((job) => RAINDROP_BOUND_KINDS.has(queue.jobKind(job)));
+}
 
 /** True when this list page is the last (short page or past total count). */
 function isListPageDone(page, perPage, items, count) {
@@ -100,15 +122,18 @@ async function reconcileOnce({ force }) {
   }
 
   const state = await getReconcileState();
-  // Idle cooldown: after a completed cycle, heartbeat waits before listing again.
-  // In-progress cursors always continue; manual reconcile uses force (default).
-  if (
-    !force &&
-    !isReconcileInProgress(state) &&
-    state.lastRunAt &&
-    Date.now() - state.lastRunAt < MIN_RECONCILE_INTERVAL_MS
-  ) {
-    return { enqueued: 0, pages: 0, done: true, skipped: true, reason: "cooldown" };
+  const inProgress = isReconcileInProgress(state);
+  // Heartbeat only: after in-progress continues, defer new cycles while the
+  // durable queue still has Raindrop work; then honor the configured quiet-time
+  // interval. Pull now (force) bypasses busy + cooldown; hard rateLimitedUntil
+  // already gated. (Hard pause covers low remaining — no separate soft snapshot.)
+  if (!force && !inProgress) {
+    if (await hasRaindropBoundQueueWork()) {
+      return { enqueued: 0, pages: 0, done: true, skipped: true, reason: "busy" };
+    }
+    if (state.lastRunAt && Date.now() - state.lastRunAt < reconcileIntervalMs(config)) {
+      return { enqueued: 0, pages: 0, done: true, skipped: true, reason: "cooldown" };
+    }
   }
 
   const client = new RaindropClient(config.token);

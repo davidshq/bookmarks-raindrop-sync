@@ -32,15 +32,23 @@ The extension SHALL provide a configuration field to enter and store a Raindrop 
 - **AND** the status view indicates that a token is required
 
 ### Requirement: Root collection name configuration
-The extension SHALL let the user set the name of the root Raindrop collection under which the Edge tree is mirrored, defaulting to `Edge`.
+The extension SHALL let the user set the name of the root Raindrop collection under which the browser bookmark tree is mirrored, defaulting to `Bookmarks`.
 
 #### Scenario: Default root name
 - **WHEN** the user has not changed the root collection name
-- **THEN** mirrored collections are created under a root named `Edge`
+- **THEN** mirrored collections are created under a root named `Bookmarks`
 
 #### Scenario: Custom root name
 - **WHEN** the user sets the root collection name to a custom value
-- **THEN** the Edge tree is mirrored under a collection of that name
+- **THEN** the browser bookmark tree is mirrored under a collection of that name
+
+### Requirement: Chromium product identity
+The extension’s user-visible name and description SHALL identify it as a Chromium bookmarks ↔ Raindrop sync product (Bookmarks ↔ Raindrop Sync), not as an Edge-only or Linux-sync-workaround extension. Options and popup copy SHALL refer to browser / local bookmarks rather than implying Edge exclusivity.
+
+#### Scenario: Manifest name is browser-neutral
+- **WHEN** the extension is loaded in a Chromium browser
+- **THEN** the extension name presented to the user is Bookmarks ↔ Raindrop Sync (or an equivalent bookmarks ↔ Raindrop label)
+- **AND** the description does not claim Edge-only support
 
 ### Requirement: Global default policy configuration
 The extension SHALL let the user choose the global default policy from `sync-and-delete`, `sync-and-keep`, and `exclude` when sync mode is `one-way`, defaulting to `sync-and-delete`. When sync mode is `bidirectional`, the options UI SHALL NOT present a global delete-vs-keep choice; saving bidirectional mode SHALL persist the global default as `sync-and-keep` (keep both sides). Per-folder overrides of `sync-and-delete` (offload) and `exclude` SHALL remain available in both modes.
@@ -229,6 +237,26 @@ The extension SHALL let the user choose Raindrop→Edge folder mode from `existi
 - **THEN** the UI explains that existing-only skips unmatched raindrops without a catch-all folder
 - **AND** explains that create-as-needed creates folders when pulling bookmarks
 - **AND** explains that mirror-all also creates folders for empty Raindrop collections under the root
+
+### Requirement: Bidirectional reconcile interval setting
+When sync mode is `bidirectional`, the extension SHALL let the user choose a quiet-time Raindrop reconcile interval in minutes from a fixed set of presets (at minimum including 1, 5, 15, 30, and 60), defaulting to 15, and SHALL persist the choice with the rest of settings. The control SHALL be hidden in one-way mode. Help text SHALL state that the interval applies when the sync queue is idle and that polling waits while other Raindrop work is still queued. Invalid or missing stored values SHALL normalize to the default (15) and values outside the allowed range SHALL be clamped.
+
+#### Scenario: Save reconcile interval with bidirectional
+- **WHEN** sync mode is `bidirectional` and the user selects a reconcile interval preset and saves settings
+- **THEN** the interval minutes are persisted
+- **AND** subsequent heartbeat reconcile uses that quiet-time interval
+
+#### Scenario: Control hidden in one-way
+- **WHEN** sync mode is `one-way`
+- **THEN** the options UI does not show the reconcile interval control
+
+#### Scenario: Default fifteen minutes
+- **WHEN** the user has never set a reconcile interval
+- **THEN** the effective stored/default interval is 15 minutes
+
+#### Scenario: Help text explains adaptive polling
+- **WHEN** bidirectional mode is selected and the user views the reconcile interval control
+- **THEN** the UI explains that frequent polling applies when idle and that a busy sync queue defers listing
 
 ### Requirement: Folder policies host Raindrop-only picker
 The extension SHALL place the Raindrop-only collections chooser as an expandable section at the bottom of Folder policies when bidirectional mode is on, and SHALL persist allowlist drafts via the folder-policies apply/discard flow. Help text SHALL clarify that the Edge tree above is Edge-only and the expandable is for Raindrop-only opt-in, and that changes take effect with **Apply folder policies**.

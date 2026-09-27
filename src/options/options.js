@@ -8,7 +8,14 @@
 // deeper parents start closed (session expand state in treeExpandedIds).
 // Top tabs (Status / Settings / Manual Sync / Folder policies) show one panel at a time.
 
-import { ALL_POLICIES, MSG, POLICY, SYNC_MODE, RAINDROP_FOLDER_MODE } from "../lib/constants.js";
+import {
+  ALL_POLICIES,
+  MSG,
+  POLICY,
+  SYNC_MODE,
+  RAINDROP_FOLDER_MODE,
+  DEFAULT_RECONCILE_INTERVAL_MINUTES,
+} from "../lib/constants.js";
 import {
   getConfig,
   setConfig,
@@ -178,6 +185,9 @@ async function loadSettings() {
   $("keepLongTermLog").checked = !!config.keepLongTermLog;
   $("raindropFolderMode").value =
     config.raindropFolderMode || RAINDROP_FOLDER_MODE.CREATE_AS_NEEDED;
+  $("reconcileIntervalMinutes").value = String(
+    config.reconcileIntervalMinutes ?? DEFAULT_RECONCILE_INTERVAL_MINUTES
+  );
 
   const mode = $("syncMode").value;
   if (mode === SYNC_MODE.ONE_WAY) {
@@ -207,6 +217,8 @@ async function saveSettings() {
     pruneEmpty: $("pruneEmpty").checked,
     keepLongTermLog: $("keepLongTermLog").checked,
     raindropFolderMode: $("raindropFolderMode").value || RAINDROP_FOLDER_MODE.CREATE_AS_NEEDED,
+    reconcileIntervalMinutes:
+      Number($("reconcileIntervalMinutes").value) || DEFAULT_RECONCILE_INTERVAL_MINUTES,
   });
   updateSyncModeUi(syncMode);
   if (syncMode === SYNC_MODE.BIDIRECTIONAL) {

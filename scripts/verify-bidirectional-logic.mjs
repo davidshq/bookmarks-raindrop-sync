@@ -26,8 +26,12 @@ import {
   SYNC_MODE,
   LOG_LIMIT,
   LOG_ARCHIVE_LIMIT,
+  DEFAULT_RECONCILE_INTERVAL_MINUTES,
+  MIN_RECONCILE_INTERVAL_MINUTES,
+  MAX_RECONCILE_INTERVAL_MINUTES,
+  reconcileIntervalMs,
 } from "../src/lib/constants.js";
-import { normalizeConfig } from "../src/lib/store.js";
+import { normalizeConfig, clampReconcileIntervalMinutes } from "../src/lib/store.js";
 import { runPullNow } from "../src/lib/pull-now.js";
 import {
   isAllowlistActive,
@@ -556,24 +560,37 @@ console.log("== outside-root forest list ids ==");
   console.log("  ✔ forest roots only");
 }
 
+console.log("== reconcile interval config ==");
+{
+  assert.equal(DEFAULT_CONFIG.reconcileIntervalMinutes, DEFAULT_RECONCILE_INTERVAL_MINUTES);
+  assert.equal(DEFAULT_RECONCILE_INTERVAL_MINUTES, 15);
+  assert.equal(clampReconcileIntervalMinutes(undefined), 15);
+  assert.equal(clampReconcileIntervalMinutes("nope"), 15);
+  assert.equal(clampReconcileIntervalMinutes(0), MIN_RECONCILE_INTERVAL_MINUTES);
+  assert.equal(clampReconcileIntervalMinutes(99), MAX_RECONCILE_INTERVAL_MINUTES);
+  assert.equal(normalizeConfig({}).reconcileIntervalMinutes, 15);
+  assert.equal(normalizeConfig({ reconcileIntervalMinutes: 1 }).reconcileIntervalMinutes, 1);
+  assert.equal(reconcileIntervalMs({ reconcileIntervalMinutes: 2 }), 2 * 60_000);
+  console.log("  ✔ default / clamp / reconcileIntervalMs");
+}
+
 console.log("== rate-limit constants ==");
 {
   const {
-    RATE_LIMIT_RESERVE,
+    RATE_LIMIT_RESERVE: reserve,
     MAX_ALIVE_CHECKS_PER_TICK,
     MAX_JOBS_PER_DRAIN,
     MAX_RECONCILE_PAGES_PER_TICK,
     MAX_TRASH_PAGES_PER_TICK,
     RAINDROP_TRASH_COLLECTION_ID,
-    MIN_RECONCILE_INTERVAL_MS,
   } = await import("../src/lib/constants.js");
-  assert.ok(RATE_LIMIT_RESERVE >= 1);
+  assert.ok(reserve >= 1);
   assert.ok(MAX_ALIVE_CHECKS_PER_TICK >= 1);
   assert.ok(MAX_JOBS_PER_DRAIN >= 1);
   assert.ok(MAX_RECONCILE_PAGES_PER_TICK >= 1);
   assert.ok(MAX_TRASH_PAGES_PER_TICK >= 1);
   assert.equal(RAINDROP_TRASH_COLLECTION_ID, -99);
-  assert.ok(MIN_RECONCILE_INTERVAL_MS >= 60_000);
+  assert.ok(reconcileIntervalMs(DEFAULT_CONFIG) >= 60_000);
   const { RateLimitError } = await import("../src/lib/raindrop.js");
   const err = new RateLimitError(Date.now() + 1000, { proactive: true });
   assert.equal(err.proactive, true);

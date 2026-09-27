@@ -1114,6 +1114,7 @@ async function scenario68_rateLimitBudget() {
 
   // Heartbeat cooldown: after a completed cycle, force:false skips re-listing.
   await eng.store.clearRateLimit();
+  await eng.queue.clear(); // leftover deferred upload must not look like traffic-busy
   await eng.store.setReconcileState({
     cursorPage: 0,
     outsideCursor: null,
@@ -1128,6 +1129,51 @@ async function scenario68_rateLimitBudget() {
   const forced = await eng.reconcile.reconcile({ force: true });
   assert.notEqual(forced.skipped, true, "manual reconcile bypasses cooldown");
 
+  // Adaptive: quiet install honors a short configured interval.
+  await eng.store.setConfig({ reconcileIntervalMinutes: 1 });
+  await eng.store.setReconcileState({
+    cursorPage: 0,
+    outsideCursor: null,
+    seenAcc: null,
+    running: false,
+    lastRunAt: Date.now() - 90_000,
+    lastError: null,
+  });
+  const quiet = await eng.reconcile.reconcile({ force: false });
+  assert.notEqual(quiet.skipped, true, "quiet + short interval starts a new listing");
+
+  // Adaptive: queued Raindrop-bound job defers a new cycle (busy).
+  await eng.queue.enqueue(bm.id);
+  await eng.store.setReconcileState({
+    cursorPage: 0,
+    outsideCursor: null,
+    seenAcc: null,
+    running: false,
+    lastRunAt: Date.now() - 90_000,
+    lastError: null,
+  });
+  const queuedBusy = await eng.reconcile.reconcile({ force: false });
+  assert.equal(queuedBusy.skipped, true, "queued upload defers new listing");
+  assert.equal(queuedBusy.reason, "busy", "queue contention reason is busy");
+  const forceBusy = await eng.reconcile.reconcile({ force: true });
+  assert.notEqual(forceBusy.skipped, true, "Pull now bypasses queue-busy");
+  await eng.queue.clear();
+
+  // Adaptive: in-progress cursor continues even with queue contention.
+  await eng.queue.enqueue(bm.id);
+  await eng.store.setReconcileState({
+    cursorPage: 1,
+    outsideCursor: null,
+    seenAcc: ["1"],
+    running: false,
+    lastRunAt: Date.now() - 90_000,
+    lastError: null,
+  });
+  const midCycle = await eng.reconcile.reconcile({ force: false });
+  assert.notEqual(midCycle.reason, "busy", "in-progress cursor ignores busy gate");
+  assert.notEqual(midCycle.skipped, true, "in-progress cursor continues listing");
+  await eng.queue.clear();
+
   // Manual reconcileNow must set the global gate on RateLimitError (not only fail the UI).
   await eng.store.clearRateLimit();
   const prevRoot = Proto.getRootCollections;
@@ -1141,7 +1187,7 @@ async function scenario68_rateLimitBudget() {
   assert.equal(await eng.store.isRateLimited(), true, "reconcileNow 429 sets global pause");
 
   console.log(
-    "  ✔ global gate, capped confirms, round-robin, skip reasons, cooldown, reconcileNow gate"
+    "  ✔ global gate, capped confirms, round-robin, skip reasons, cooldown, queue-busy, reconcileNow gate"
   );
 }
 
