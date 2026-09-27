@@ -129,12 +129,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         }
         case MSG.GET_STATUS: {
           const config = await getConfig();
-          const pending = await queue.size();
+          const pendingByDirection = await queue.sizeByDirection();
+          const pending = pendingByDirection.total;
           const bulkPrompt = await noteQueueDepthForBulkPrompt(pending);
           sendResponse({
             ok: true,
             status: await getStatus(),
             pending,
+            pendingByDirection,
             deadLetter: await queue.deadLetterSize(),
             storage: await getStorageUsage(),
             log: await getLog(),

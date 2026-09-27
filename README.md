@@ -36,7 +36,8 @@ Chrome and Edge do not fork collections.
   applies the reverse for **bookmarks and folders** (in-place title rename;
   Raindrop collection *reparents* still do not move the Edge folder node). Recent
   activity logs `Moved: … → …`, `Updated: …`, `Pulled update: …`,
-  `Pulled move: …`, `Pulled folder rename: …`, or `Renamed folder: …` as
+  `Pulled move: … (fromParent → toParent; raindrop path #id)`,
+  `Pulled folder rename: …`, or `Renamed folder: …` as
   appropriate (creates still log `Synced: …` / `Pulled: …`). Moving into an
   **Exclude** folder skips the Raindrop write.
 - **Folder mirroring** — your bookmark folder tree is recreated as nested
@@ -52,7 +53,8 @@ Chrome and Edge do not fork collections.
   (files/documents skipped); deletes propagate both ways with tombstones.
   Heartbeat reconcile uses your quiet-time interval when idle, and skips starting
   a new listing while Raindrop-bound jobs are still queued. Options → Status shows
-  why a Raindrop check was deferred (queue busy, cooldown, or bulk-queue pause).
+  pending jobs split by Edge→Raindrop vs Raindrop→Edge, and why a Raindrop check
+  was deferred (queue busy, cooldown, or bulk-queue pause).
   **Raindrop → browser folders** chooses create-as-needed / existing-only /
   mirror-all. Outside-root allowlist picks land under Other bookmarks / Raindrop
   (or Other favorites on Edge). Pull learns folder→collection maps (and heals

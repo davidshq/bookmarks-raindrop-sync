@@ -44,6 +44,7 @@ import {
   formatBulkCandidatePrompt,
 } from "../lib/bulk-candidate.js";
 import { formatBulkQueueNotice, BULK_PROMPT_NEEDS_CHOICE } from "../lib/queue-bulk-prompt.js";
+import { formatPendingByDirection } from "../lib/queue.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -275,6 +276,13 @@ async function refreshStatus() {
   if (!resp?.ok) return;
 
   $("pending").textContent = resp.pending ?? 0;
+  const dirs = resp.pendingByDirection;
+  const dirEl = $("pendingByDirection");
+  if (dirs && (resp.pending ?? 0) > 0) {
+    dirEl.textContent = ` (${formatPendingByDirection(dirs)})`;
+  } else {
+    dirEl.textContent = "";
+  }
   const deadCount = resp.deadLetter ?? 0;
   $("deadLetter").textContent = String(deadCount);
   const dlRow = $("deadLetterRow");

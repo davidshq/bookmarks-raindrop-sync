@@ -23,7 +23,13 @@ import {
   collectionsForAllowlistPicker,
   raindropUploadSegments,
 } from "../src/lib/collections.js";
-import { jobKind, drainJobPriority } from "../src/lib/queue.js";
+import {
+  jobKind,
+  drainJobPriority,
+  jobDirection,
+  countByDirection,
+  formatPendingByDirection,
+} from "../src/lib/queue.js";
 import {
   POLICY,
   JOB,
@@ -354,6 +360,50 @@ console.log("== job kind defaults ==");
   );
   assert.equal(drainJobPriority(JOB.UPLOAD), drainJobPriority(JOB.PULL_CREATE));
   console.log("  ✔ legacy jobs are upload; rename before upload");
+}
+
+console.log("== pending direction breakdown ==");
+{
+  assert.equal(jobDirection(JOB.UPLOAD), "edgeToRaindrop");
+  assert.equal(jobDirection(JOB.DELETE_RAINDROP), "edgeToRaindrop");
+  assert.equal(jobDirection(JOB.RENAME_COLLECTION), "edgeToRaindrop");
+  assert.equal(jobDirection(JOB.PULL_CREATE), "raindropToEdge");
+  assert.equal(jobDirection(JOB.PULL_UPDATE), "raindropToEdge");
+  assert.equal(jobDirection(JOB.PULL_RENAME_FOLDER), "raindropToEdge");
+  assert.equal(jobDirection(JOB.DELETE_EDGE), "raindropToEdge");
+  // Legacy jobs without kind follow upload → Edge→Raindrop.
+  assert.equal(jobDirection(jobKind({ id: "legacy" })), "edgeToRaindrop");
+
+  const counts = countByDirection([
+    { id: "a" },
+    { id: "b", kind: JOB.UPLOAD },
+    { id: "c", kind: JOB.PULL_CREATE },
+    { id: "d", kind: JOB.DELETE_EDGE },
+    { id: "e", kind: JOB.RENAME_COLLECTION },
+  ]);
+  assert.deepEqual(counts, { total: 5, edgeToRaindrop: 3, raindropToEdge: 2 });
+  assert.equal(
+    formatPendingByDirection(counts),
+    "Edge → Raindrop: 3 · Raindrop → Edge: 2"
+  );
+
+  const optionsHtml = fs.readFileSync(
+    path.join(REPO_ROOT, "src/options/options.html"),
+    "utf8"
+  );
+  assert.ok(
+    optionsHtml.includes('id="pendingByDirection"'),
+    "Options Status exposes pendingByDirection"
+  );
+  const popupHtml = fs.readFileSync(
+    path.join(REPO_ROOT, "src/popup/popup.html"),
+    "utf8"
+  );
+  assert.ok(
+    popupHtml.includes('id="pendingByDirection"'),
+    "popup exposes pendingByDirection"
+  );
+  console.log("  ✔ Edge→Raindrop vs Raindrop→Edge counts + Status markup");
 }
 
 console.log("== raindrop folder allowlist ==");

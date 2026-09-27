@@ -583,8 +583,31 @@ async function processPullUpdate(job, ctx) {
 
   if (targetParent != null && String(node.parentId) !== String(targetParent)) {
     await suppressChange(bookmarkId); // move may fire separately from update
+    const fromParentId = node.parentId != null ? String(node.parentId) : "";
+    const toParentId = String(targetParent);
+    const fromParent = fromParentId ? await getNodeOrNull(fromParentId) : null;
+    const toParent = await getNodeOrNull(toParentId);
+    const pathLabel = (relative || []).join("/") || "(root)";
     await moveBookmark(bookmarkId, { parentId: targetParent });
-    await appendLog("info", `Pulled move: ${wantTitle || wantLink}`);
+    // from→to + Raindrop path: diagnose non-convergent pull-move loops (same
+    // title every cycle) without guessing whether parentDiff was real.
+    await appendLog(
+      "info",
+      `Pulled move: ${wantTitle || wantLink} (${fromParentId || "?"}${
+        fromParent?.title ? `:${fromParent.title}` : ""
+      } → ${toParentId}${toParent?.title ? `:${toParent.title}` : ""}; ` +
+        `raindrop ${pathLabel}` +
+        (job.collectionId != null ? ` #${job.collectionId}` : "") +
+        `)`
+    );
+    const after = await getNodeOrNull(bookmarkId);
+    if (after && String(after.parentId) !== toParentId) {
+      await appendLog(
+        "warn",
+        `Pulled move did not stick for ${wantTitle || wantLink}: ` +
+          `wanted parent ${toParentId}, now ${after.parentId}`
+      );
+    }
   } else if (titleDiff || urlDiff) {
     await appendLog("info", `Pulled update: ${wantTitle || wantLink}`);
   }

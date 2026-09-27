@@ -2,6 +2,7 @@
 
 import { MSG, SYNC_MODE } from "../lib/constants.js";
 import { runPullNow } from "../lib/pull-now.js";
+import { formatPendingByDirection } from "../lib/queue.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -15,6 +16,13 @@ async function refresh() {
   if (!resp?.ok) return;
 
   $("pending").textContent = resp.pending ?? 0;
+  const dirs = resp.pendingByDirection;
+  const dirEl = $("pendingByDirection");
+  if (dirs && (resp.pending ?? 0) > 0) {
+    dirEl.textContent = ` (${formatPendingByDirection(dirs)})`;
+  } else {
+    dirEl.textContent = "";
+  }
   const last = resp.status?.lastActivityAt;
   $("lastActivity").textContent = last
     ? `Last sync ${new Date(last).toLocaleTimeString()}`

@@ -45,6 +45,53 @@ export function jobKind(job) {
   return job.kind || JOB.UPLOAD;
 }
 
+/** Raindrop→Edge jobs (pull creates/updates/renames, remote-delete → local delete). */
+const RAINDROP_TO_EDGE_KINDS = new Set([
+  JOB.PULL_CREATE,
+  JOB.PULL_UPDATE,
+  JOB.PULL_RENAME_FOLDER,
+  JOB.DELETE_EDGE,
+]);
+
+/**
+ * Sync direction for a job kind. Legacy jobs without `kind` default to upload
+ * (Edge→Raindrop), matching {@link jobKind}.
+ * @param {string} [kind]
+ * @returns {"edgeToRaindrop"|"raindropToEdge"}
+ */
+export function jobDirection(kind) {
+  return RAINDROP_TO_EDGE_KINDS.has(kind) ? "raindropToEdge" : "edgeToRaindrop";
+}
+
+/**
+ * Count queued jobs by direction (Edge→Raindrop vs Raindrop→Edge).
+ * @param {Array<{ kind?: string }>} jobs
+ * @returns {{ total: number, edgeToRaindrop: number, raindropToEdge: number }}
+ */
+export function countByDirection(jobs) {
+  let edgeToRaindrop = 0;
+  let raindropToEdge = 0;
+  for (const job of jobs) {
+    if (jobDirection(jobKind(job)) === "raindropToEdge") raindropToEdge++;
+    else edgeToRaindrop++;
+  }
+  return {
+    total: edgeToRaindrop + raindropToEdge,
+    edgeToRaindrop,
+    raindropToEdge,
+  };
+}
+
+/**
+ * Human-readable pending breakdown for Status / popup.
+ * @param {{ edgeToRaindrop?: number, raindropToEdge?: number }} counts
+ */
+export function formatPendingByDirection(counts) {
+  const e2r = Number(counts?.edgeToRaindrop) || 0;
+  const r2e = Number(counts?.raindropToEdge) || 0;
+  return `Edge → Raindrop: ${e2r} · Raindrop → Edge: ${r2e}`;
+}
+
 /**
  * Drain ordering: lower runs first. Folder renames (Edge→Raindrop and
  * Raindrop→Edge) before uploads/pull-updates so a pending child job does not
@@ -61,6 +108,11 @@ export async function list() {
 
 export async function size() {
   return (await readQueue()).length;
+}
+
+/** Pending depth plus Edge→Raindrop / Raindrop→Edge splits. */
+export async function sizeByDirection() {
+  return countByDirection(await readQueue());
 }
 
 export async function listDeadLetter() {

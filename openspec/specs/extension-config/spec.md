@@ -7,7 +7,7 @@ Provide the configuration and status surfaces of the extension via a tabbed opti
 ## Requirements
 
 ### Requirement: Options page tabs
-The options UI SHALL present four top-level tabs and SHALL show only the selected tab’s panel at a time: **Status** (pending queue, dead-lettered count and controls, last activity, local storage usage, recent activity, long-term archive export/clear), **Settings** (token, root name, sync mode and mode-dependent defaults, prune, long-term log toggle, save settings), **Manual Sync** (Import to Raindrop / sync-to-Raindrop action, and Pull from Raindrop when bidirectional), and **Folder policies** (Edge tree overrides draft and Raindrop-only allowlist). The Status tab SHALL be the default when Options opens with no hash. Hash fragments `#settings`, `#sync`, and `#folders` SHALL open the matching tab.
+The options UI SHALL present four top-level tabs and SHALL show only the selected tab’s panel at a time: **Status** (pending queue with Edge→Raindrop / Raindrop→Edge breakdown, dead-lettered count and controls, last activity, local storage usage, recent activity, long-term archive export/clear), **Settings** (token, root name, sync mode and mode-dependent defaults, prune, long-term log toggle, save settings), **Manual Sync** (Import to Raindrop / sync-to-Raindrop action, and Pull from Raindrop when bidirectional), and **Folder policies** (Edge tree overrides draft and Raindrop-only allowlist). The Status tab SHALL be the default when Options opens with no hash. Hash fragments `#settings`, `#sync`, and `#folders` SHALL open the matching tab.
 
 #### Scenario: Switch to Settings
 - **WHEN** the user activates the Settings tab
@@ -145,13 +145,18 @@ The extension SHALL provide an "Import to Raindrop" control that starts a backfi
 - **THEN** the Manual Sync panel's "Last push" timestamp reflects that run
 
 ### Requirement: Sync status and log display
-The extension SHALL display sync status, including pending queue size, dead-lettered job count (with Retry / Clear when non-empty), approximate `chrome.storage.local` usage, recent sync activity (up to 500 entries retained in local storage), and any errors such as authentication failures, storage write failures, or rate-limit backoff. The status view SHALL offer controls for an opt-in long-term activity archive (enable with settings, export, clear) as specified by the activity-log-archive capability.
+The extension SHALL display sync status, including pending queue size with a breakdown of how many jobs are Edge→Raindrop versus Raindrop→Edge when the queue is non-empty, dead-lettered job count (with Retry / Clear when non-empty), approximate `chrome.storage.local` usage, recent sync activity (up to 500 entries retained in local storage), and any errors such as authentication failures, storage write failures, or rate-limit backoff. The status view SHALL offer controls for an opt-in long-term activity archive (enable with settings, export, clear) as specified by the activity-log-archive capability.
 
 When a new activity line has the same level and message as the newest recent-log entry, the extension SHALL update that entry instead of inserting another. The updated entry SHALL set `at` to the latest occurrence and SHALL record kept occurrence times in `ats` (oldest first, including the latest), capped so older times beyond the cap are dropped. A first occurrence SHALL omit `ats`. A line that does not match the newest entry SHALL be inserted as a new row. The status view SHALL show the latest time and, when `ats` has more than one time, a repeat count. It SHALL NOT require a control to expand the time list. Entries recorded before coalescing (no `ats`) SHALL still render as a single line.
 
 #### Scenario: Pending work shown
 - **WHEN** jobs are queued and being processed
 - **THEN** the status view reflects the pending count and recent activity
+
+#### Scenario: Pending direction breakdown
+- **WHEN** the durable queue contains both Edge→Raindrop jobs (upload, delete-raindrop, rename-collection) and Raindrop→Edge jobs (pull-create, pull-update, pull-rename-folder, delete-edge)
+- **THEN** Status (and the compact popup) show the total pending count plus separate Edge→Raindrop and Raindrop→Edge counts
+- **AND** when pending is zero, the direction breakdown is omitted
 
 #### Scenario: Error surfaced
 - **WHEN** a Raindrop authentication error occurs
