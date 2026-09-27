@@ -1,7 +1,7 @@
 // Queue drain loop: processes due jobs with rate-limit / auth gates.
 // Job kind handlers live in job-processors.js; Auth/429 handling in client-errors.js.
 
-import { JOB, MAX_JOBS_PER_DRAIN } from "./constants.js";
+import { JOB, drainJobsCap } from "./constants.js";
 import {
   getConfig,
   getOverrides,
@@ -62,12 +62,14 @@ async function drainLoop() {
     // Logged inside ensureRootsMigrated; continue so queue still drains.
   }
 
+  const pending = await queue.size();
   const dueJobs = await queue.due(Date.now());
   if (dueJobs.length === 0) {
-    await setStatus({ pending: await queue.size() });
+    await setStatus({ pending });
     return;
   }
 
+  const jobCap = drainJobsCap(pending);
   const overrides = await getOverrides();
   const cache = await getCollectionCache();
   let index = null;
@@ -75,10 +77,11 @@ async function drainLoop() {
 
   let processed = 0;
   for (const job of dueJobs) {
-    if (processed >= MAX_JOBS_PER_DRAIN) {
+    if (processed >= jobCap) {
       await appendLog(
         "info",
-        `Drain paused after ${MAX_JOBS_PER_DRAIN} jobs; ${dueJobs.length - processed} remain for later.`
+        `Drain paused after ${jobCap} jobs (pending ${pending}); ` +
+          `${dueJobs.length - processed} remain for later.`
       );
       break;
     }

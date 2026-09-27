@@ -37,6 +37,11 @@ import {
 import { isCollectionAllowed, pruneAllowlist } from "../lib/allowlist.js";
 import { RaindropClient, RateLimitError } from "../lib/raindrop.js";
 import { runPullNow } from "../lib/pull-now.js";
+import {
+  assessImportBulkCandidate,
+  assessPullBulkCandidate,
+  formatBulkCandidatePrompt,
+} from "../lib/bulk-candidate.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -397,7 +402,105 @@ async function clearArchiveConfirmed() {
   }, 2500);
 }
 
-async function runBackfill() {
+/**
+ * @param {import('../lib/bulk-candidate.js').BulkCandidateAssessment} assessment
+ * @param {string} opLabel
+ * @param {'import' | 'pull'} op
+ * @returns {'match' | 'continue' | 'cancel'}
+ */
+function promptBulkGate(assessment, opLabel, op) {
+  const body = formatBulkCandidatePrompt(assessment, op);
+  const matchFirst = window.confirm(
+    `${opLabel}\n\n${body}\n\n` +
+      "OK = Match from export first (recommended)\n" +
+      "Cancel = other options"
+  );
+  if (matchFirst) return "match";
+  const cont = window.confirm(
+    `Continue ${opLabel} without matching?\n\n` +
+      "OK = continue without Match\n" +
+      "Cancel = abort"
+  );
+  return cont ? "continue" : "cancel";
+}
+
+function formatMatchPlanSummary(plan) {
+  const would = plan.matched?.length ?? 0;
+  return (
+    `Would pair ${would}; already paired ${plan.alreadyPaired}; ` +
+    `ambiguous ${plan.ambiguous}; conflicts ${plan.conflicts}; ` +
+    `Edge-only ${plan.edgeOnly}; Raindrop-only ${plan.raindropOnly} ` +
+    `(export ${plan.raindropCount}, Edge ${plan.edgeScanned}).`
+  );
+}
+
+/**
+ * Run Match existing. Guided flows may skip the dry-run confirm.
+ * @param {{ statusEl: HTMLElement, offerDryRun: boolean }} opts
+ * @returns {Promise<'applied' | 'nothing' | 'cancelled' | 'failed' | 'rate_limited'>}
+ */
+async function runMatchExistingFlow({ statusEl, offerDryRun }) {
+  statusEl.textContent = "Downloading Raindrop export + matching (may take a minute)…";
+  try {
+    const plan = await chrome.runtime.sendMessage({ type: MSG.MATCH_EXISTING_PLAN });
+    if (plan?.reason === "rate_limited") {
+      statusEl.textContent = "Paused for Raindrop rate limits — wait a minute, then try again.";
+      return "rate_limited";
+    }
+    if (!plan?.ok) {
+      statusEl.textContent = `Match failed: ${plan?.error ?? "unknown error"}`;
+      return "failed";
+    }
+    const summary = formatMatchPlanSummary(plan);
+    statusEl.textContent = summary;
+    const would = plan.matched?.length ?? 0;
+    if (would === 0) {
+      return "nothing";
+    }
+
+    let apply = true;
+    if (offerDryRun) {
+      const wantDry = window.confirm(
+        `Show dry-run counts before recording ${would} pair(s)?\n\n` +
+          "OK = review counts, then confirm Apply\n" +
+          "Cancel = record pairs now (pairs only; no deletes/moves)"
+      );
+      if (wantDry) {
+        apply = window.confirm(
+          `Match existing — record ${would} pair(s)?\n\n${summary}\n\n` +
+            "This only updates the pair map. It does not upload, pull, move, or delete bookmarks."
+        );
+      }
+    } else {
+      // Power-user button: always dry-run summary then confirm.
+      apply = window.confirm(
+        `Match existing — record ${would} pair(s)?\n\n${summary}\n\n` +
+          "This only updates the pair map. It does not upload, pull, move, or delete bookmarks."
+      );
+    }
+    if (!apply) {
+      statusEl.textContent = `${summary} (apply cancelled)`;
+      return "cancelled";
+    }
+
+    statusEl.textContent = `Recording ${would} pair(s)…`;
+    const resp = await chrome.runtime.sendMessage({
+      type: MSG.MATCH_EXISTING_APPLY,
+      matched: plan.matched,
+    });
+    if (!resp?.ok) {
+      statusEl.textContent = `Apply failed: ${resp?.error ?? "unknown error"}`;
+      return "failed";
+    }
+    statusEl.textContent = `Recorded ${resp.paired} pair(s). ${summary}`;
+    return "applied";
+  } catch (err) {
+    statusEl.textContent = `Match failed: ${err.message}`;
+    return "failed";
+  }
+}
+
+async function runBackfillCore() {
   const out = $("importStatus");
   out.textContent = "Queuing browser bookmarks…";
   try {
@@ -411,7 +514,31 @@ async function runBackfill() {
   refreshStatus();
 }
 
-async function runReconcile(pendingMsg) {
+async function runBackfill() {
+  const out = $("importStatus");
+  out.textContent = "Checking library size…";
+  const assessment = await assessImportBulkCandidate();
+  if (assessment.suggest) {
+    const choice = promptBulkGate(assessment, "Import to Raindrop", "import");
+    if (choice === "cancel") {
+      out.textContent = "Import cancelled.";
+      return;
+    }
+    if (choice === "match") {
+      const matchOut = $("matchExistingStatus");
+      const result = await runMatchExistingFlow({ statusEl: matchOut, offerDryRun: true });
+      if (result === "cancelled" || result === "failed" || result === "rate_limited") {
+        out.textContent = "Import not started (Match did not finish).";
+        refreshStatus();
+        return;
+      }
+      // applied | nothing → continue Import
+    }
+  }
+  await runBackfillCore();
+}
+
+async function runReconcileCore(pendingMsg) {
   const out = $("pullStatus");
   out.textContent = pendingMsg || "Pulling from Raindrop…";
   try {
@@ -426,6 +553,35 @@ async function runReconcile(pendingMsg) {
   } catch (err) {
     out.textContent = `Failed: ${err.message}`;
   }
+  refreshStatus();
+}
+
+async function runReconcile(pendingMsg) {
+  const out = $("pullStatus");
+  // First-pull auto path may pass pendingMsg — still allow bulk gate.
+  out.textContent = "Checking library size…";
+  const assessment = await assessPullBulkCandidate();
+  if (assessment.suggest) {
+    const choice = promptBulkGate(assessment, "Pull from Raindrop", "pull");
+    if (choice === "cancel") {
+      out.textContent = "Pull cancelled.";
+      return;
+    }
+    if (choice === "match") {
+      const matchOut = $("matchExistingStatus");
+      const result = await runMatchExistingFlow({ statusEl: matchOut, offerDryRun: true });
+      if (result === "cancelled" || result === "failed" || result === "rate_limited") {
+        out.textContent = "Pull not started (Match did not finish).";
+        refreshStatus();
+        return;
+      }
+    }
+  }
+  await runReconcileCore(pendingMsg);
+}
+
+async function runMatchExistingUi() {
+  await runMatchExistingFlow({ statusEl: $("matchExistingStatus"), offerDryRun: false });
   refreshStatus();
 }
 
@@ -1049,6 +1205,7 @@ $("save").addEventListener("click", saveSettings);
 $("testToken").addEventListener("click", testToken);
 $("backfill").addEventListener("click", runBackfill);
 $("reconcile").addEventListener("click", () => runReconcile());
+$("matchExisting").addEventListener("click", () => void runMatchExistingUi());
 $("retryDeadLetter").addEventListener("click", async () => {
   const out = $("deadLetterStatus");
   out.textContent = "Retrying…";

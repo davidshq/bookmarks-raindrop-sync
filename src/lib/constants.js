@@ -57,6 +57,10 @@ export const MSG = {
   DRAIN_NOW: "drainNow",
   RETRY_DEAD_LETTER: "retryDeadLetter",
   CLEAR_DEAD_LETTER: "clearDeadLetter",
+  /** Bulk lane: dry-run Match existing from Raindrop export.csv. */
+  MATCH_EXISTING_PLAN: "matchExistingPlan",
+  /** Bulk lane: apply Match existing and record pairs from a dry-run plan. */
+  MATCH_EXISTING_APPLY: "matchExistingApply",
 };
 
 // chrome.storage.local keys. Everything durable lives under these — the MV3
@@ -146,10 +150,33 @@ export const DEAD_LETTER_LIMIT = 200;
 export const RATE_LIMIT_FALLBACK_MS = 60 * 1000; // if no Retry-After header
 /** Fallback when chrome.storage.local.QUOTA_BYTES is unavailable (typical Chromium). */
 export const STORAGE_QUOTA_FALLBACK_BYTES = 10_485_760;
-/** Stop Raindrop work early when X-RateLimit-Remaining falls to this. */
-export const RATE_LIMIT_RESERVE = 8;
-/** Cap queue drains per tick so a large backlog cannot burn the whole minute budget. */
-export const MAX_JOBS_PER_DRAIN = 20;
+/**
+ * Stop Raindrop work early when X-RateLimit-Remaining falls to this.
+ * Kept low so we use most of the ~120/min budget; too high felt like
+ * "almost no traffic" then a full-minute pause (proactive RateLimitError).
+ */
+export const RATE_LIMIT_RESERVE = 4;
+/**
+ * Soft per-heartbeat drain cap when the queue is small. Large backlogs use
+ * {@link MAX_JOBS_PER_DRAIN_BUSY} via {@link drainJobsCap}.
+ */
+export const MAX_JOBS_PER_DRAIN = 25;
+/** Pending queue size at which drain uses the busy (higher) per-tick cap. */
+export const DRAIN_BUSY_PENDING_THRESHOLD = 100;
+/**
+ * Per-heartbeat drain cap when pending ≥ DRAIN_BUSY_PENDING_THRESHOLD.
+ * Still well under ~120/min; leaves headroom for collection ensures / Pull.
+ */
+export const MAX_JOBS_PER_DRAIN_BUSY = 55;
+
+/**
+ * How many queue jobs this drain pass may complete.
+ * @param {number} pending total durable queue size (not only due)
+ */
+export function drainJobsCap(pending) {
+  const n = Number(pending) || 0;
+  return n >= DRAIN_BUSY_PENDING_THRESHOLD ? MAX_JOBS_PER_DRAIN_BUSY : MAX_JOBS_PER_DRAIN;
+}
 /**
  * Cap GET /raindrop/{id} confirms per reconcile finish, shared by
  * delete-detection and tombstone prune (delete-confirm runs first; prune
@@ -167,6 +194,13 @@ export const RAINDROP_TRASH_COLLECTION_ID = -99;
 export const MAX_TRASH_PAGES_PER_TICK = 3;
 /** Raindrop list page size (API max 50). */
 export const RAINDROP_LIST_PER_PAGE = 50;
+
+/** Import is a bulk candidate when would-queue unpaired count is at least this. */
+export const BULK_UNPAIRED_IMPORT_THRESHOLD = 200;
+/** Min Edge URL bookmarks before low pair-coverage can trigger a bulk prompt. */
+export const BULK_EDGE_COUNT_THRESHOLD = 100;
+/** Suggest bulk when paired/edge is below this (and edge count ≥ BULK_EDGE_COUNT_THRESHOLD). */
+export const BULK_PAIR_COVERAGE_THRESHOLD = 0.3;
 
 /**
  * True when a Raindrop list page is the last (short page or past total count).

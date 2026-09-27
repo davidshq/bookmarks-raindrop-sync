@@ -75,7 +75,9 @@ Chrome and Edge do not fork collections.
    **Save settings**. Legacy installs with an `Edge` / Favorites Raindrop tree are
    renamed once in place to `Bookmarks` / `Bookmarks bar` / `Other bookmarks`
    (collection ids preserved).
-5. Optional: **Manual Sync** → **Import to Raindrop**. Bidirectional: **Pull now**.
+5. Optional: **Manual Sync** → **Import to Raindrop** / **Pull now**. Large or thinly paired
+   libraries prompt to **Match from Raindrop export** first (optional dry-run, then record pairs).
+   A Manual Sync Match control remains for power users. See [`docs/export-bulk-sync.md`](docs/export-bulk-sync.md).
 
 ## Tests
 

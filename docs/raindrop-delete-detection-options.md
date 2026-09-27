@@ -34,7 +34,7 @@ That is safe but expensive. Logs like “postponed N missing-raindrop check(s)�
 | C | Park out-of-scope alives | After GET says alive + collection outside sync/allowlist, stop re-candidating | Stops the “postpone N forever” tax | Needs policy: keep Edge, unpair, or delete-local |
 | D | Occasional `collectionId=0` | Full-library list as presence oracle | Account-wide gone/alive | Heavier ticks (`ceil(N/50)` pages) |
 | E | `lastUpdate` search | `search=lastUpdate:>since` on list | Creates/edits | **Not deletes** (gone ids do not appear) |
-| F | Export dump | `…/export.csv` etc. | Rare full rebuild | Awkward for heartbeat |
+| F | Export dump | `…/export.csv` etc. | Bulk lane presence / Match existing (record pairs); rare full rebuild | No collection path in CSV; awkward for heartbeat; see `docs/export-bulk-sync.md` |
 | G | Status quo (GET confirms only) | `GET /raindrop/{id}` | Definite gone/trash/404 | O(candidates) over many cycles; fights upload budget |
 
 ```
@@ -63,7 +63,7 @@ Raindrop moved out of sync tree
 2. **C — Park out-of-scope alives** if large “postponed N checks” logs remain after A (those are usually not trash).
 3. **B and/or D** if hard-delete / emptied-trash latency matters.
 4. **E** as a separate pull (create/update) optimization — not a delete strategy.
-5. **F** only for repair/migration.
+5. **F** as the opt-in **bulk lane** (Match existing / future plan modes) — not heartbeat.
 
 ## Working assumption
 

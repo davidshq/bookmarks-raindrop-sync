@@ -251,7 +251,8 @@
             <p class="action-title">Sync to Raindrop</p>
             <p class="hint action-help">
               Uploads bookmarks already in the browser that are not synced yet, and skips folders set to
-              Exclude. Run anytime. Does not pull from Raindrop.
+              Exclude. Large or thinly paired libraries are detected and you may be asked to Match from
+              Raindrop export first. Does not pull from Raindrop.
             </p>
             <p class="status-line muted">Last push: <span id="lastPush">—</span></p>
             <div class="row">
@@ -263,8 +264,8 @@
             <p class="action-title">Pull from Raindrop</p>
             <p class="hint action-help">
               Brings new and changed Raindrop bookmarks into the browser, and removes local bookmarks whose
-              Raindrop copy is gone. Also runs about every 15 minutes. Does not upload your existing
-              browser bookmarks.
+              Raindrop copy is gone. Quiet-time pulls also run on your interval. Large libraries with low
+              pair coverage may prompt to Match from export first. Does not upload existing browser bookmarks.
             </p>
             <p id="reconcileLine" class="status-line muted">
               Last pull: <span id="lastReconcile">—</span>
@@ -272,6 +273,20 @@
             <div class="row">
               <button id="reconcile" type="button">Pull now</button>
               <span id="pullStatus" class="hint" role="status"></span>
+            </div>
+          </div>
+          <div class="manual-action">
+            <p class="action-title">Match existing from export</p>
+            <p class="hint action-help">
+              Power-user: download Raindrop <code>export.csv</code>, match by URL, record pairs only.
+              Import/Pull usually prompt automatically when the library looks like a bulk candidate.
+              Does not upload, pull, move, or delete bookmarks.
+            </p>
+            <div class="row">
+              <button id="matchExisting" type="button" class="secondary">
+                Match existing
+              </button>
+              <span id="matchExistingStatus" class="hint" role="status"></span>
             </div>
           </div>
         </div>

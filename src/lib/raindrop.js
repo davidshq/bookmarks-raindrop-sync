@@ -277,4 +277,16 @@ export class RaindropClient {
   async deleteRaindrop(id) {
     await this.request("DELETE", `/raindrop/${id}`);
   }
+
+  /**
+   * Full-library CSV dump (`collectionId` 0 = all except Trash). One request;
+   * columns include id/url but not collection path — use for presence only.
+   * @param {number|string} [collectionId=0]
+   * @returns {Promise<string>} raw CSV text
+   */
+  async exportRaindropsCsv(collectionId = 0) {
+    const data = await this.request("GET", `/raindrops/${collectionId}/export.csv`);
+    if (typeof data?.raw === "string" && data.raw.length) return data.raw;
+    throw new RaindropError("Raindrop export.csv did not return CSV text");
+  }
 }

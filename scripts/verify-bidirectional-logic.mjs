@@ -585,13 +585,21 @@ console.log("== rate-limit constants ==");
     RATE_LIMIT_RESERVE: reserve,
     MAX_ALIVE_CHECKS_PER_TICK,
     MAX_JOBS_PER_DRAIN,
+    MAX_JOBS_PER_DRAIN_BUSY,
+    DRAIN_BUSY_PENDING_THRESHOLD,
+    drainJobsCap,
     MAX_RECONCILE_PAGES_PER_TICK,
     MAX_TRASH_PAGES_PER_TICK,
     RAINDROP_TRASH_COLLECTION_ID,
   } = await import("../src/lib/constants.js");
   assert.ok(reserve >= 1);
+  assert.ok(reserve <= 8);
   assert.ok(MAX_ALIVE_CHECKS_PER_TICK >= 1);
   assert.ok(MAX_JOBS_PER_DRAIN >= 1);
+  assert.ok(MAX_JOBS_PER_DRAIN_BUSY > MAX_JOBS_PER_DRAIN);
+  assert.equal(drainJobsCap(0), MAX_JOBS_PER_DRAIN);
+  assert.equal(drainJobsCap(DRAIN_BUSY_PENDING_THRESHOLD - 1), MAX_JOBS_PER_DRAIN);
+  assert.equal(drainJobsCap(DRAIN_BUSY_PENDING_THRESHOLD), MAX_JOBS_PER_DRAIN_BUSY);
   assert.ok(MAX_RECONCILE_PAGES_PER_TICK >= 1);
   assert.ok(MAX_TRASH_PAGES_PER_TICK >= 1);
   assert.equal(RAINDROP_TRASH_COLLECTION_ID, -99);
@@ -599,7 +607,143 @@ console.log("== rate-limit constants ==");
   const { RateLimitError } = await import("../src/lib/raindrop.js");
   const err = new RateLimitError(Date.now() + 1000, { proactive: true });
   assert.equal(err.proactive, true);
-  console.log("  ✔ reserve / caps / cooldown / proactive RateLimitError");
+  console.log("  ✔ reserve / adaptive drain caps / cooldown / proactive RateLimitError");
+}
+
+console.log("== bulk candidate heuristics ==");
+{
+  const { assessFromScope, assessPullFromScope, formatBulkCandidatePrompt } = await import(
+    "../src/lib/bulk-candidate.js"
+  );
+  const { BULK_UNPAIRED_IMPORT_THRESHOLD, BULK_EDGE_COUNT_THRESHOLD } = await import(
+    "../src/lib/constants.js"
+  );
+  const small = assessFromScope({ unpaired: 10, paired: 50, edgeScanned: 60 });
+  assert.equal(small.suggest, false);
+  const largeUnpaired = assessFromScope({
+    unpaired: BULK_UNPAIRED_IMPORT_THRESHOLD,
+    paired: 0,
+    edgeScanned: BULK_UNPAIRED_IMPORT_THRESHOLD,
+  });
+  assert.equal(largeUnpaired.suggest, true);
+  assert.equal(largeUnpaired.reason, "large_unpaired");
+  // Pull must NOT use Import's unpaired threshold alone
+  const pullIgnoresUnpaired = assessPullFromScope({
+    unpaired: BULK_UNPAIRED_IMPORT_THRESHOLD,
+    paired: BULK_UNPAIRED_IMPORT_THRESHOLD, // high coverage
+    edgeScanned: BULK_UNPAIRED_IMPORT_THRESHOLD * 2,
+  });
+  assert.equal(pullIgnoresUnpaired.suggest, false);
+  const lowScope = {
+    unpaired: BULK_EDGE_COUNT_THRESHOLD,
+    paired: 5,
+    edgeScanned: BULK_EDGE_COUNT_THRESHOLD + 5,
+  };
+  const lowCoverage = assessFromScope(lowScope);
+  assert.equal(lowCoverage.suggest, true);
+  assert.equal(lowCoverage.reason, "low_pair_coverage");
+  assert.equal(assessPullFromScope(lowScope).suggest, true);
+  const pullCopy = formatBulkCandidatePrompt(lowCoverage, "pull");
+  assert.ok(pullCopy.includes("before Pull"));
+  assert.ok(!pullCopy.includes("re-uploaded"));
+  console.log("  ✔ assessFromScope / assessPullFromScope / prompt copy");
+}
+
+console.log("== export URL match + Match existing planner ==");
+{
+  const { urlMatchKeys } = await import("../src/lib/url-match.js");
+  const { parseCsvRows, indexExportByUrl } = await import("../src/lib/export-csv.js");
+  const { planMatchFromExport } = await import("../src/lib/match-existing.js");
+
+  const keys = urlMatchKeys("https://www.Example.com/a/?utm=1#frag");
+  assert.ok(keys.some((k) => k.includes("example.com/a") && !k.includes("utm")));
+  assert.ok(keys.every((k) => !k.includes("#frag")));
+
+  const rows = parseCsvRows('id,url\n1,"https://ex.com/a,b"\n2,https://ex.com/c\n');
+  assert.deepEqual(rows[1], ["1", "https://ex.com/a,b"]);
+  const indexed = indexExportByUrl("id,title,url\n99,Hi,https://www.Example.com/x/\n");
+  assert.equal(indexed.raindropCount, 1);
+  assert.ok(indexed.byKey.get("https://example.com/x")?.includes("99"));
+
+  const csv =
+    "id,url\n" +
+    "10,https://a.example/one\n" +
+    "20,https://b.example/two\n" +
+    "30,https://c.example/dup\n" +
+    "31,https://c.example/dup\n";
+  const edge = [
+    { id: "b1", url: "https://a.example/one" },
+    { id: "b2", url: "https://b.example/two" },
+    { id: "b3", url: "https://c.example/dup" },
+    { id: "b4", url: "https://only.edge/local" },
+    { id: "b5", url: "https://b.example/two?utm=1" }, // same bare key as b2 → ambiguous
+  ];
+  const pairs = {
+    byBookmark: { b2: "20" },
+    byRaindrop: { "20": "b2" },
+  };
+  const plan = planMatchFromExport(csv, edge, pairs);
+  assert.equal(plan.matched.length, 1);
+  assert.equal(plan.matched[0].bookmarkId, "b1");
+  assert.equal(plan.matched[0].raindropId, "10");
+  assert.equal(plan.alreadyPaired, 0); // b2/b5 collide on URL → ambiguous, not alreadyPaired
+  assert.ok(plan.ambiguous >= 1);
+  assert.ok(plan.edgeOnly >= 1);
+  assert.ok(plan.raindropOnly >= 1);
+
+  // Ambiguous: two Edge bookmarks, one raindrop URL
+  const amb = planMatchFromExport(
+    "id,url\n1,https://same.example/\n",
+    [
+      { id: "x1", url: "https://same.example/" },
+      { id: "x2", url: "https://same.example/" },
+    ],
+    { byBookmark: {}, byRaindrop: {} }
+  );
+  assert.equal(amb.matched.length, 0);
+  assert.equal(amb.ambiguous, 2);
+
+  // Conflict: bookmark paired to different raindrop
+  const conflict = planMatchFromExport(
+    "id,url\n99,https://z.example/\n",
+    [{ id: "z1", url: "https://z.example/" }],
+    { byBookmark: { z1: "1" }, byRaindrop: { "1": "z1" } }
+  );
+  assert.equal(conflict.matched.length, 0);
+  assert.equal(conflict.conflicts, 1);
+
+  const pairedOk = planMatchFromExport(
+    "id,url\n5,https://ok.example/\n",
+    [{ id: "p1", url: "https://ok.example/" }],
+    { byBookmark: { p1: "5" }, byRaindrop: { "5": "p1" } }
+  );
+  assert.equal(pairedOk.alreadyPaired, 1);
+  assert.equal(pairedOk.matched.length, 0);
+
+  // Stale reverse pair (old bookmark id gone) → re-pair to new id
+  const staleReverse = planMatchFromExport(
+    "id,url\n77,https://rebind.example/\n",
+    [{ id: "new1", url: "https://rebind.example/" }],
+    { byBookmark: { oldGone: "77" }, byRaindrop: { "77": "oldGone" } }
+  );
+  assert.equal(staleReverse.matched.length, 1);
+  assert.equal(staleReverse.matched[0].bookmarkId, "new1");
+  assert.equal(staleReverse.matched[0].raindropId, "77");
+  assert.equal(staleReverse.conflicts, 0);
+
+  // Live reverse conflict: another live bookmark still owns the raindrop
+  const liveReverseConflict = planMatchFromExport(
+    "id,url\n88,https://taken.example/\n",
+    [
+      { id: "want", url: "https://taken.example/" },
+      { id: "owner", url: "https://other.example/" },
+    ],
+    { byBookmark: { owner: "88" }, byRaindrop: { "88": "owner" } }
+  );
+  assert.equal(liveReverseConflict.matched.length, 0);
+  assert.equal(liveReverseConflict.conflicts, 1);
+
+  console.log("  ✔ urlMatchKeys / export CSV / planMatchFromExport");
 }
 
 console.log("\nAll offline checks passed.");

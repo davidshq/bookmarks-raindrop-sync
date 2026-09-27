@@ -19,6 +19,12 @@ import {
   handleBookmarkChanged,
 } from "../lib/sync.js";
 import { startBackfill } from "../lib/backfill.js";
+import {
+  runMatchExistingDryRun,
+  applyMatchExisting,
+  RateLimitError,
+} from "../lib/match-existing.js";
+import { handleClientError } from "../lib/client-errors.js";
 import * as queue from "../lib/queue.js";
 import {
   getStatus,
@@ -135,6 +141,44 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         case MSG.CLEAR_DEAD_LETTER: {
           await queue.clearDeadLetter();
           sendResponse({ ok: true });
+          break;
+        }
+        case MSG.MATCH_EXISTING_PLAN: {
+          try {
+            const plan = await runMatchExistingDryRun();
+            // Do not send the full matched list in the status string path —
+            // Options keeps it for Apply. Cap is fine for typical libraries.
+            sendResponse(plan);
+          } catch (err) {
+            if (await handleClientError(err)) {
+              if (err instanceof RateLimitError) {
+                sendResponse({
+                  ok: true,
+                  matched: [],
+                  alreadyPaired: 0,
+                  ambiguous: 0,
+                  conflicts: 0,
+                  edgeOnly: 0,
+                  raindropOnly: 0,
+                  edgeScanned: 0,
+                  raindropCount: 0,
+                  reason: "rate_limited",
+                });
+                break;
+              }
+            }
+            throw err;
+          }
+          break;
+        }
+        case MSG.MATCH_EXISTING_APPLY: {
+          const matched = msg?.matched;
+          if (!Array.isArray(matched)) {
+            sendResponse({ ok: false, paired: 0, error: "Missing matched list from dry-run" });
+            break;
+          }
+          const result = await applyMatchExisting(matched);
+          sendResponse(result);
           break;
         }
         default:
