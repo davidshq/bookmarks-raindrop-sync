@@ -19,22 +19,43 @@ The extension SHALL provide a bulk lane that fetches Raindrop `export.csv` (coll
 - **THEN** it does not download export CSV as part of that heartbeat
 
 ### Requirement: Local heuristics detect bulk candidates
-The extension SHALL evaluate local heuristics (Edge bookmarks, pair map, folder policy) before starting Import or Pull to decide whether to suggest Match existing. Heuristics SHALL NOT require downloading export.csv. Import SHALL be treated as a bulk candidate when the count of bookmarks that would be queued is at or above a documented unpaired threshold, or when Edge URL count is large and pair coverage is low. Pull SHALL be treated as a bulk candidate in bidirectional mode when Edge URL count is large and pair coverage is low.
+The extension SHALL evaluate local heuristics (browser bookmarks, pair map, folder policy) before Options starts Import or Pull to decide whether to suggest Match existing. Heuristics SHALL NOT require downloading export.csv. Import SHALL be treated as a bulk candidate when the count of bookmarks that would be queued is at or above **200**, or when scanned Edge URL count (`edgeScanned`, including excluded) is at or above **100** and pair coverage is below **0.3**. Pair coverage SHALL be `paired / (unpaired + paired)` over **in-scope** (non-excluded) URLs from the same walk as Import enqueue — not `paired / edgeScanned`. Pull SHALL be treated as a bulk candidate in bidirectional mode when `edgeScanned` ≥ **100** and pair coverage &lt; **0.3** (not the unpaired Import threshold alone).
 
 #### Scenario: Large unpaired Import suggests bulk
-- **WHEN** the user starts Import to Raindrop
-- **AND** the number of unpaired non-excluded bookmarks is at or above the unpaired threshold
+- **WHEN** the user starts Import to Raindrop from Options Manual Sync
+- **AND** the number of unpaired non-excluded bookmarks is at or above 200
 - **THEN** the extension prompts before enqueueing Import
 
 #### Scenario: Low pair coverage suggests bulk
-- **WHEN** the user starts Import or Pull
-- **AND** Edge has a large URL count with low pair coverage per the documented thresholds
+- **WHEN** the user starts Import or Pull from Options Manual Sync
+- **AND** `edgeScanned` is at least 100 and in-scope pair coverage is below 30%
 - **THEN** the extension prompts before continuing that live operation
 
 #### Scenario: Small Import skips prompt
-- **WHEN** the user starts Import
+- **WHEN** the user starts Import from Options Manual Sync
 - **AND** heuristics do not mark a bulk candidate
 - **THEN** Import proceeds without a Match prompt
+
+#### Scenario: Pull ignores unpaired-only threshold
+- **WHEN** sync mode is bidirectional and the user starts Pull from Options Manual Sync
+- **AND** unpaired count is high but `edgeScanned` is below 100
+- **THEN** Pull is not treated as a bulk candidate solely for the Import unpaired threshold
+
+#### Scenario: Coverage ignores excluded URLs
+- **WHEN** many Edge URLs are under effective `exclude` and `edgeScanned` is large
+- **AND** in-scope paired/(unpaired+paired) is at or above 0.3 with unpaired below 200
+- **THEN** Import is not treated as a bulk candidate solely because excluded URLs inflate `edgeScanned`
+
+### Requirement: Guided Match gate is Options-scoped
+The ask → optional dry-run → Match-from-export gate before Import/Pull SHALL apply to the Options Manual Sync controls (and Match from the Status bulk-queue notice). The compact action popup MAY start Import or Pull without that guided Match prompt; queue-depth bulk-prompt pause SHALL still apply to drain/reconcile when pending crosses the threshold.
+
+#### Scenario: Options Import is gated
+- **WHEN** Options Manual Sync Import is a bulk candidate
+- **THEN** the user is asked before enqueueing
+
+#### Scenario: Popup Import may skip Match prompt
+- **WHEN** the user clicks Import in the extension popup
+- **THEN** backfill may start without the Options Match ask/dry-run chain
 
 ### Requirement: Guided ask, optional dry-run, then apply
 When heuristics mark a bulk candidate, the extension SHALL ask the user to Match from export first, continue the live operation without matching, or cancel. If the user chooses Match first, the extension SHALL ask whether to show a dry-run summary before applying. Dry-run SHALL report at least: would pair, already paired, ambiguous, conflicts, Edge-only, Raindrop-only. Apply SHALL record unambiguous pairs only and SHALL NOT delete, move, or create bookmarks/raindrops. After a successful Match path (or user skip), the extension SHALL continue the original Import or Pull unless the user cancelled.

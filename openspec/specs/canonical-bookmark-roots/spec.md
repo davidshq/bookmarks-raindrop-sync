@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD — Canonical Chromium toolbar/other root titles in Raindrop, alias-aware pull placement, and one-time legacy tree migration.
+Canonical Chromium toolbar/other root titles in Raindrop (`Bookmarks bar`, `Other bookmarks`), alias-aware pull placement onto local Favorites/Bookmarks roots, and one-time legacy `Edge`/`Favorites bar` tree migration.
 
 ## Requirements
 

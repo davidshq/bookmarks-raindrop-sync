@@ -1,10 +1,4 @@
-# queue-bulk-prompt Specification
-
-## Purpose
-
-Detect a bulk-sized durable sync queue (e.g. after Edge HTML import), pause Raindrop drain until the user chooses Match from export or continue drip, and surface that choice on Options Status — without requiring Import/Pull clicks.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Detect bulk queue depth
 The extension SHALL evaluate the durable sync queue size against a configured pending threshold defaulting to **150**. When the size is at or above the threshold and the user is not in an active snooze for that backlog, the engine SHALL set a durable bulk-prompt state indicating that user choice is needed. The clear watermark SHALL default to **half** the pending threshold (75 when threshold is 150).
@@ -55,10 +49,3 @@ The user SHALL be able to run Match existing from export from the bulk-queue pro
 - **WHEN** the user finishes Match from the queue prompt
 - **AND** no Raindrop-bound jobs remain
 - **THEN** reconcile-skip reason is cleared
-
-### Requirement: Follow-on bulk file transfer out of scope
-This capability SHALL NOT require implementing Edge↔Raindrop file-based bulk transfer. Documentation MAY describe file bulk transfer as a future enhancement.
-
-#### Scenario: v1 ships without file bulk
-- **WHEN** this change is implemented
-- **THEN** users can Match or continue drip from the queue prompt without a file-import path
