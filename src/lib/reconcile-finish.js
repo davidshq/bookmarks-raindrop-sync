@@ -1,7 +1,19 @@
-// Reconcile cycle finish: delete-detect, tombstone prune, folder-rename pull.
+// Reconcile cycle finish: trash soft-delete fast path, delete-confirm GET,
+// tombstone prune, folder-rename pull.
+//
+// Soft-deletes: list Raindrop Trash (-99) first (paginated). Confirm GETs remain
+// for permanent deletes / non-trash absence. Follow-on strategies (park
+// out-of-scope, collection 0, lastUpdate): docs/raindrop-delete-detection-options.md
+//
 // Delete-confirm and tombstone-prune share rotateConfirmWindow for GET-budget fairness.
 
-import { JOB, MAX_ALIVE_CHECKS_PER_TICK } from "./constants.js";
+import {
+  JOB,
+  MAX_ALIVE_CHECKS_PER_TICK,
+  MAX_TRASH_PAGES_PER_TICK,
+  RAINDROP_LIST_PER_PAGE,
+  RAINDROP_TRASH_COLLECTION_ID,
+} from "./constants.js";
 import { rootTitlesEqual } from "./bookmark-roots.js";
 import {
   hasTombstone,
@@ -60,13 +72,75 @@ export async function finishReconcileCycle({
 }
 
 /**
- * Shared GET budget for delete-confirm then tombstone prune (at most
- * MAX_ALIVE_CHECKS_PER_TICK total). Remaining budget after deletes goes to prune.
+ * Trash soft-delete fast path, then shared GET budget for delete-confirm and
+ * tombstone prune (at most MAX_ALIVE_CHECKS_PER_TICK total).
  */
 async function finishConfirmGets(client, seenIds, pairs) {
+  const trashHandled = await finishTrashDeleteDetection(client, pairs);
   let remaining = MAX_ALIVE_CHECKS_PER_TICK;
-  remaining = await finishDeleteDetection(client, seenIds, pairs, remaining);
+  remaining = await finishDeleteDetection(
+    client,
+    seenIds,
+    pairs,
+    remaining,
+    trashHandled
+  );
   await finishTombstonePrune(client, seenIds, remaining);
+}
+
+/**
+ * List Raindrop Trash and enqueue delete-edge for paired ids.
+ * Delete-detection only — never pull-create/update from trash.
+ * Always starts at page 0 (newest first under Raindrop's default sort) so
+ * recent soft-deletes are not starved by a forward cursor; overflow beyond
+ * MAX_TRASH_PAGES_PER_TICK falls through to confirm-GET.
+ * @returns {Promise<Set<string>>} raindrop ids handled this pass (skip confirm GET)
+ */
+async function finishTrashDeleteDetection(client, pairs) {
+  const handled = new Set();
+  let page = 0;
+  let pages = 0;
+  let deleteJobs = 0;
+
+  while (pages < MAX_TRASH_PAGES_PER_TICK) {
+    const { items, count } = await client.listRaindrops(RAINDROP_TRASH_COLLECTION_ID, {
+      page,
+      perPage: RAINDROP_LIST_PER_PAGE,
+      nested: false,
+    });
+    pages++;
+    client.throwIfShouldPause();
+
+    for (const item of items) {
+      const rid = String(item._id ?? item.id);
+      const bookmarkId = pairs.byRaindrop[rid];
+      if (bookmarkId == null) continue;
+      if (await hasTombstone(rid)) {
+        handled.add(rid);
+        continue;
+      }
+      handled.add(rid);
+      const added = await queue.enqueueJob({
+        id: `de-${rid}`,
+        kind: JOB.DELETE_EDGE,
+        raindropId: rid,
+        bookmarkId,
+      });
+      if (added) deleteJobs++;
+    }
+
+    const fetched = (page + 1) * RAINDROP_LIST_PER_PAGE;
+    if (items.length < RAINDROP_LIST_PER_PAGE || fetched >= count) break;
+    page++;
+  }
+
+  if (deleteJobs > 0) {
+    await appendLog(
+      "info",
+      `Pull queued ${deleteJobs} local delete(s) for raindrops found in Trash.`
+    );
+  }
+  return handled;
 }
 
 /**
@@ -110,7 +184,11 @@ async function seenAccWithLive(seenIds) {
   return acc;
 }
 
-async function finishDeleteDetection(client, seenIds, pairs, maxGets) {
+/**
+ * Confirm-GET fallback for pairs missing from scoped listing (permanent deletes,
+ * emptied trash, etc.). Skips ids already handled by the Trash fast path.
+ */
+async function finishDeleteDetection(client, seenIds, pairs, maxGets, skipIds) {
   const acc = await seenAccWithLive(seenIds);
 
   // Build the full candidate list first, then walk a rotating window so pairs
@@ -118,6 +196,7 @@ async function finishDeleteDetection(client, seenIds, pairs, maxGets) {
   const candidates = [];
   for (const [rid, bookmarkId] of Object.entries(pairs.byRaindrop)) {
     if (acc.has(String(rid))) continue;
+    if (skipIds?.has(String(rid))) continue;
     if (await hasTombstone(rid)) continue;
     candidates.push([rid, bookmarkId]);
   }
@@ -251,7 +330,9 @@ async function raindropStillAlive(client, rid) {
     const item = await client.getRaindrop(rid);
     if (!item) return false;
     const col = item.collection?.$id ?? item.collection?.id;
-    if (col === -99 || col === "-99") return false;
+    if (col === RAINDROP_TRASH_COLLECTION_ID || col === String(RAINDROP_TRASH_COLLECTION_ID)) {
+      return false;
+    }
     return true;
   } catch (err) {
     if (err instanceof AuthError || err instanceof RateLimitError) throw err;

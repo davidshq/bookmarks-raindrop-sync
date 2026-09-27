@@ -563,12 +563,16 @@ console.log("== rate-limit constants ==");
     MAX_ALIVE_CHECKS_PER_TICK,
     MAX_JOBS_PER_DRAIN,
     MAX_RECONCILE_PAGES_PER_TICK,
+    MAX_TRASH_PAGES_PER_TICK,
+    RAINDROP_TRASH_COLLECTION_ID,
     MIN_RECONCILE_INTERVAL_MS,
   } = await import("../src/lib/constants.js");
   assert.ok(RATE_LIMIT_RESERVE >= 1);
   assert.ok(MAX_ALIVE_CHECKS_PER_TICK >= 1);
   assert.ok(MAX_JOBS_PER_DRAIN >= 1);
   assert.ok(MAX_RECONCILE_PAGES_PER_TICK >= 1);
+  assert.ok(MAX_TRASH_PAGES_PER_TICK >= 1);
+  assert.equal(RAINDROP_TRASH_COLLECTION_ID, -99);
   assert.ok(MIN_RECONCILE_INTERVAL_MS >= 60_000);
   const { RateLimitError } = await import("../src/lib/raindrop.js");
   const err = new RateLimitError(Date.now() + 1000, { proactive: true });

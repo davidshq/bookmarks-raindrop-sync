@@ -237,6 +237,7 @@ export class RaindropClient {
 
   /**
    * List raindrops in a collection (paginated).
+   * Use collectionId `-99` for Trash (soft-deleted items); `0` for all except Trash.
    * @param {number|string} collectionId
    * @param {{ page?: number, perPage?: number, nested?: boolean }} [opts]
    */

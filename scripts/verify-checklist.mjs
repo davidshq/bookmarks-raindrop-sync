@@ -120,7 +120,14 @@ function makeMockRaindrop() {
       raindrops.set(_id, item);
       return item;
     },
-    async listRaindrops(collectionId, { nested = false } = {}) {
+    async listRaindrops(collectionId, { nested = false, page = 0, perPage = 50 } = {}) {
+      // Trash is a system collection — items live in `_trash`, not under a real parent.
+      if (Number(collectionId) === -99) {
+        const all = [...trash.values()];
+        const start = page * perPage;
+        const items = all.slice(start, start + perPage);
+        return { items, count: all.length };
+      }
       const under = new Set();
       const walk = (id) => {
         under.add(Number(id));
@@ -130,8 +137,10 @@ function makeMockRaindrop() {
       };
       if (nested) walk(collectionId);
       else under.add(Number(collectionId));
-      const items = [...raindrops.values()].filter((r) => under.has(Number(r.collection?.$id)));
-      return { items, count: items.length };
+      const all = [...raindrops.values()].filter((r) => under.has(Number(r.collection?.$id)));
+      const start = page * perPage;
+      const items = all.slice(start, start + perPage);
+      return { items, count: all.length };
     },
     async getRaindrop(id) {
       // Live items only — trashed ids are "gone" for delete-detection confirms.
@@ -156,7 +165,7 @@ function makeMockRaindrop() {
       const item = raindrops.get(Number(id));
       if (item) {
         raindrops.delete(Number(id));
-        trash.set(Number(id), item);
+        trash.set(Number(id), { ...item, collection: { $id: -99 } });
       }
     },
     // test helpers
@@ -1136,6 +1145,88 @@ async function scenario68_rateLimitBudget() {
   );
 }
 
+async function scenario68b_trashFastPath() {
+  console.log("\n== 6.8b Trash listing soft-delete fast path ==");
+  const eng = await importEngine();
+  const { POLICY, SYNC_MODE, JOB } = eng.constants;
+  await resetAll(eng.store);
+
+  const mock = makeMockRaindrop();
+  let getRaindropCalls = 0;
+  const origGet = mock.getRaindrop.bind(mock);
+  mock.getRaindrop = async (id) => {
+    getRaindropCalls++;
+    return origGet(id);
+  };
+  patchClient(eng.raindropMod, mock);
+
+  await eng.store.setConfig({
+    token: "mock",
+    rootName: "ERS-Verify-Trash",
+    syncMode: SYNC_MODE.BIDIRECTIONAL,
+    defaultPolicy: POLICY.SYNC_KEEP,
+  });
+  const root = await mock.createCollection("ERS-Verify-Trash", null);
+
+  // Paired soft-delete → Trash list enqueues delete-edge without confirm GET.
+  const live = mock._seedRich(root._id, {
+    link: "https://example.com/ers-trash-paired",
+    title: "trash-paired",
+  });
+  await eng.store.recordSynced("bm-trash-paired", String(live._id));
+  await mock.deleteRaindrop(live._id);
+
+  // Unpaired trash item must be ignored.
+  const stray = mock._seedRich(root._id, {
+    link: "https://example.com/ers-trash-unpaired",
+    title: "trash-unpaired",
+  });
+  await mock.deleteRaindrop(stray._id);
+
+  getRaindropCalls = 0;
+  await eng.reconcile.reconcile({ force: true });
+  assert.equal(
+    (await eng.queue.list()).filter(
+      (j) => j.kind === JOB.DELETE_EDGE && String(j.raindropId) === String(live._id)
+    ).length,
+    1,
+    "paired trash id enqueues delete-edge"
+  );
+  assert.equal(
+    (await eng.queue.list()).filter((j) => String(j.raindropId) === String(stray._id)).length,
+    0,
+    "unpaired trash id ignored"
+  );
+  assert.equal(getRaindropCalls, 0, "trash fast path skips confirm GET for handled ids");
+
+  // Permanent delete (not in Trash) still uses confirm-GET fallback.
+  const jobs = await eng.queue.list();
+  await chrome.storage.local.set({
+    queue: jobs.filter((j) => j.id !== `de-${live._id}`),
+  });
+  const hardRid = 91001;
+  mock._raindrops.set(hardRid, {
+    _id: hardRid,
+    link: "https://example.com/ers-hard-gone",
+    title: "hard-gone",
+    collection: { $id: root._id },
+  });
+  await eng.store.recordSynced("bm-hard-gone", String(hardRid));
+  mock._raindrops.delete(hardRid); // hard gone — not moved to trash
+
+  getRaindropCalls = 0;
+  await eng.reconcile.reconcile({ force: true });
+  assert.ok(getRaindropCalls >= 1, "confirm GET still runs for non-trash absence");
+  assert.ok(
+    (await eng.queue.list()).some(
+      (j) => j.kind === JOB.DELETE_EDGE && String(j.raindropId) === String(hardRid)
+    ),
+    "confirm-GET fallback enqueues delete-edge for permanent delete"
+  );
+
+  console.log("  ✔ paired trash → delete-edge; unpaired ignored; confirm fallback for hard delete");
+}
+
 async function scenario69_bookmarkMoves() {
   console.log("\n== 6.9 Edge bookmark moves update Raindrop placement ==");
   const eng = await importEngine();
@@ -2081,6 +2172,7 @@ async function main() {
   await scenario66_raindropFolderModes();
   await scenario67_raindropFolderAllowlist();
   await scenario68_rateLimitBudget();
+  await scenario68b_trashFastPath();
   await scenario69_bookmarkMoves();
   await scenario70_onChangedAndFolderRename();
   await scenario71_tombstonePruneAndPullUpdate();

@@ -138,6 +138,15 @@ export const MAX_JOBS_PER_DRAIN = 20;
 export const MAX_ALIVE_CHECKS_PER_TICK = 8;
 /** Cap Raindrop list pages (root + outside-root) per reconcile tick. */
 export const MAX_RECONCILE_PAGES_PER_TICK = 5;
+/** Raindrop system collection for soft-deleted raindrops. */
+export const RAINDROP_TRASH_COLLECTION_ID = -99;
+/**
+ * Cap Trash list pages per reconcile finish (soft-delete fast path).
+ * Always starts at page 0 each finish (newest soft-deletes first).
+ */
+export const MAX_TRASH_PAGES_PER_TICK = 3;
+/** Raindrop list page size (API max 50). */
+export const RAINDROP_LIST_PER_PAGE = 50;
 
 // Suppression windows for extension-authored bookmark create/remove events.
 export const SUPPRESS_MS = 15_000;
