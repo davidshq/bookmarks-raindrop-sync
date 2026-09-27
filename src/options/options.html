@@ -2,15 +2,15 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Edge ↔ Raindrop Sync — Options</title>
+    <title>Bookmarks ↔ Raindrop Sync — Options</title>
     <link rel="stylesheet" href="options.css" />
   </head>
   <body>
     <main>
-      <h1>Edge ↔ Raindrop Sync</h1>
+      <h1>Bookmarks ↔ Raindrop Sync</h1>
       <p class="lede">
-        Sync Edge bookmarks with Raindrop.io, mirroring your folder shape. Choose how traffic flows;
-        one-way mode also asks what to do with the Edge copy after upload.
+        Sync browser bookmarks with Raindrop.io, mirroring your folder shape. Choose how traffic flows;
+        one-way mode also asks what to do with the local copy after upload.
       </p>
 
       <nav class="tabs" role="tablist" aria-label="Options">
@@ -115,28 +115,28 @@
         </div>
         <label>
           Root collection name
-          <input id="rootName" type="text" placeholder="Edge" />
+          <input id="rootName" type="text" placeholder="Bookmarks" />
         </label>
         <label>
           Sync mode
           <select id="syncMode" aria-describedby="oneWayModeHelp">
-            <option value="one-way">One-way (Edge → Raindrop)</option>
+            <option value="one-way">One-way (Browser → Raindrop)</option>
             <option value="bidirectional">Bidirectional Sync</option>
           </select>
         </label>
         <p id="oneWayModeHelp" class="field-help hint">
-          Uploads Edge → Raindrop only. Below, choose whether Edge keeps a local copy after a
-          confirmed upload, or offloads (deletes locally).
+          Uploads browser bookmarks → Raindrop only. Below, choose whether to keep a local copy after a
+          confirmed upload, or offload (delete locally).
         </p>
         <p id="bidirectionalModeHelp" class="field-help hint hidden">
-          Keeps bookmarks in <em>both</em> Edge and Raindrop: pulls Raindrop → Edge under your root,
+          Keeps bookmarks in <em>both</em> the browser and Raindrop: pulls Raindrop → browser under your root,
           and propagates <strong>user</strong> deletes both ways. Raindrop-only metadata (tags,
-          notes, highlights) is never overwritten from Edge.
+          notes, highlights) is never overwritten from the browser.
         </p>
         <p id="bidirectionalWarn" class="banner warn hidden">
-          Deleting a bookmark in Edge or Raindrop removes the paired item in the other system. To
-          offload a specific folder (upload then remove from Edge only), set that folder’s policy to
-          <strong>Offload (delete from Edge)</strong> under Folder policies — that cleanup does not
+          Deleting a bookmark in the browser or Raindrop removes the paired item in the other system. To
+          offload a specific folder (upload then remove locally only), set that folder’s policy to
+          <strong>Offload (delete locally)</strong> under Folder policies — that cleanup does not
           delete Raindrop.
         </p>
 
@@ -144,18 +144,18 @@
           <label>
             After upload
             <select id="defaultPolicy" aria-describedby="defaultPolicyHelp">
-              <option value="sync-and-delete">Delete from Edge (offload)</option>
-              <option value="sync-and-keep">Keep in Edge</option>
+              <option value="sync-and-delete">Delete locally (offload)</option>
+              <option value="sync-and-keep">Keep locally</option>
               <option value="exclude">Exclude (don't sync)</option>
             </select>
           </label>
           <ul id="defaultPolicyHelp" class="policy-help hint">
             <li>
-              <strong>Delete from Edge</strong> — After a confirmed upload, remove the Edge
+              <strong>Delete locally</strong> — After a confirmed upload, remove the local
               bookmark. Raindrop keeps the copy. This is the default for one-way offload.
             </li>
             <li>
-              <strong>Keep in Edge</strong> — Leave the Edge bookmark after upload (mirror, don’t
+              <strong>Keep locally</strong> — Leave the browser bookmark after upload (mirror, don’t
               clear local).
             </li>
             <li>
@@ -169,29 +169,29 @@
           <p class="field-help hint">
             Global default is <strong>keep in both places</strong>. Use folder policies for
             exceptions: <strong>Exclude</strong> a subtree, or
-            <strong>Offload (delete from Edge)</strong> for folders you still want cleared locally
+            <strong>Offload (delete locally)</strong> for folders you still want cleared locally
             after upload.
           </p>
           <label>
-            Raindrop → Edge folders
+            Raindrop → browser folders
             <select id="raindropFolderMode" aria-describedby="folderModeHelpExisting">
-              <option value="existing-only">Existing Edge folders only</option>
+              <option value="existing-only">Existing browser folders only</option>
               <option value="create-as-needed">Create folders as needed</option>
               <option value="mirror-all">Mirror all collections (incl. empty)</option>
             </select>
           </label>
           <p id="folderModeHelpExisting" class="field-help hint">
-            Pull bookmarks only into folder paths that already exist in Edge, unless you opt in
+            Pull bookmarks only into folder paths that already exist in the browser, unless you opt in
             Raindrop-only collections under Folder policies. Unchecked Raindrop-only paths are
             skipped (no catch-all).
           </p>
           <p id="folderModeHelpCreate" class="field-help hint hidden">
-            When pulling a bookmark, create missing Edge folders along its collection path. Empty
+            When pulling a bookmark, create missing browser folders along its collection path. Empty
             Raindrop collections stay invisible unless you check them under Folder policies. Once
             any Raindrop-only collection is checked, only checked ones sync.
           </p>
           <p id="folderModeHelpMirror" class="field-help hint hidden">
-            Like create-as-needed, and also create Edge folders for empty Raindrop collections under
+            Like create-as-needed, and also create browser folders for empty Raindrop collections under
             your root—unless a Raindrop-only allowlist is set under Folder policies, which then
             limits sync to checked collections.
           </p>
@@ -199,7 +199,7 @@
 
         <label class="checkbox">
           <input id="pruneEmpty" type="checkbox" />
-          Prune empty folders in Edge after their bookmarks are deleted
+          Prune empty folders in the browser after their bookmarks are deleted
         </label>
         <label class="checkbox">
           <input id="keepLongTermLog" type="checkbox" />
@@ -234,7 +234,7 @@
           <div class="manual-action">
             <p class="action-title">Sync to Raindrop</p>
             <p class="hint action-help">
-              Uploads bookmarks already in Edge that are not synced yet, and skips folders set to
+              Uploads bookmarks already in the browser that are not synced yet, and skips folders set to
               Exclude. Run anytime. Does not pull from Raindrop.
             </p>
             <p class="status-line muted">Last push: <span id="lastPush">—</span></p>
@@ -246,9 +246,9 @@
           <div id="pullAction" class="manual-action hidden">
             <p class="action-title">Pull from Raindrop</p>
             <p class="hint action-help">
-              Brings new and changed Raindrop bookmarks into Edge, and removes Edge bookmarks whose
+              Brings new and changed Raindrop bookmarks into the browser, and removes local bookmarks whose
               Raindrop copy is gone. Also runs about every 15 minutes. Does not upload your existing
-              Edge bookmarks.
+              browser bookmarks.
             </p>
             <p id="reconcileLine" class="status-line muted">
               Last pull: <span id="lastReconcile">—</span>
@@ -273,11 +273,11 @@
         <h2 class="visually-hidden">Folder policies</h2>
         <p class="hint">
           Override the default for a folder and everything beneath it (nearest folder wins).
-          Options: Keep in Edge, Offload (delete from Edge after upload), or Exclude. Nested folders
-          start collapsed (Favorites bar / Other favorites stay open). Use Expand all / Collapse all
+          Options: Keep locally, Offload (delete locally after upload), or Exclude. Nested folders
+          start collapsed (toolbar / other bookmarks roots stay open). Use Expand all / Collapse all
           or the filter to find deeper folders. Overrides survive renames. Edits stay local until
           you apply (sticky bar below). Raindrop-only collections are opted in via the section at
-          the bottom (bidirectional only)—not in this Edge tree.
+          the bottom (bidirectional only)—not in this browser tree.
         </p>
         <div class="tree-toolbar">
           <input
@@ -290,15 +290,15 @@
           <button id="collapseTree" type="button" class="secondary">Collapse all</button>
           <span id="treeMeta" class="hint tree-meta"></span>
         </div>
-        <div id="tree" class="tree" role="group" aria-label="Edge folders"></div>
+        <div id="tree" class="tree" role="group" aria-label="Browser folders"></div>
 
         <details id="raindropOnlySection" class="rd-expand hidden">
           <summary>Choose Raindrop-only collections to sync</summary>
           <div class="rd-body">
             <p class="hint intro">
-              All Raindrop collections that are not fully present in Edge (entire account, not only
+              All Raindrop collections that are not fully present in the browser (entire account, not only
               under the sync root). Check to create the folder and pull items. Folders outside the
-              sync root land under Other favorites / Raindrop; bookmarks you add there upload back
+              sync root land under Other bookmarks / Raindrop; bookmarks you add there upload back
               to that Raindrop collection. New collections stay unchecked. Once any are checked,
               only checked Raindrop-only paths sync. <strong>Select all</strong> checks every listed
               collection; <strong>Clear selection</strong> exits selective mode (then apply).

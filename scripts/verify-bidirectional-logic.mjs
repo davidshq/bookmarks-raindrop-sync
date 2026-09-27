@@ -35,6 +35,180 @@ import {
   canCreateRaindropOnlyPath,
   pruneAllowlist,
 } from "../src/lib/allowlist.js";
+import {
+  rootRole,
+  canonicalRootTitle,
+  rootTitlesEqual,
+  canonicalizeUploadSegments,
+  CANONICAL_TOOLBAR,
+  CANONICAL_OTHER,
+  DEFAULT_ROOT_NAME,
+} from "../src/lib/bookmark-roots.js";
+
+console.log("== canonical bookmark roots ==");
+{
+  assert.equal(rootRole("Favorites bar"), "toolbar");
+  assert.equal(rootRole("Bookmarks bar"), "toolbar");
+  assert.equal(rootRole("Other favorites"), "other");
+  assert.equal(rootRole("Other bookmarks"), "other");
+  assert.equal(rootRole("Work"), null);
+  assert.equal(canonicalRootTitle("Favorites bar"), CANONICAL_TOOLBAR);
+  assert.equal(canonicalRootTitle("Other favorites"), CANONICAL_OTHER);
+  assert.equal(rootTitlesEqual("Favorites bar", "Bookmarks bar"), true);
+  assert.equal(rootTitlesEqual("Favorites bar", "Other favorites"), false);
+  assert.deepEqual(canonicalizeUploadSegments(["Favorites bar", "Work"]), [
+    CANONICAL_TOOLBAR,
+    "Work",
+  ]);
+  assert.equal(DEFAULT_CONFIG.rootName, DEFAULT_ROOT_NAME);
+  console.log("  ✔ roles, aliases, upload canonicalize, default root");
+}
+
+console.log("== roots migration (mock client) ==");
+{
+  const { migrateLegacyRaindropRoots } = await import("../src/lib/migrate-roots.js");
+  const harness = await import("./lib/test-harness.mjs");
+  harness.storage.clear();
+  harness.seedEdge();
+  harness.installChromeMocks();
+  const { setConfig, getConfig, getCollectionCache } = await import("../src/lib/store.js");
+  await setConfig({ token: "mock", rootName: "Edge" });
+  // Ensure migration flag is absent for this run.
+  const stored = await chrome.storage.local.get("config");
+  delete stored.config.rootsMigratedAt;
+  await chrome.storage.local.set({ config: stored.config });
+  await chrome.storage.local.set({
+    collectionCache: {
+      Edge: 1,
+      "Edge/Favorites bar": 2,
+      "Edge/Favorites bar/Work": 3,
+    },
+  });
+
+  const cols = new Map([
+    [1, { _id: 1, title: "Edge", parent: null }],
+    [2, { _id: 2, title: "Favorites bar", parent: { $id: 1 } }],
+    [3, { _id: 3, title: "Work", parent: { $id: 2 } }],
+  ]);
+  const client = {
+    async getRootCollections() {
+      return [...cols.values()].filter((c) => !c.parent);
+    },
+    async getChildCollections() {
+      return [...cols.values()].filter((c) => c.parent);
+    },
+    async updateCollection(id, { title }) {
+      const c = cols.get(Number(id));
+      c.title = title;
+      return c;
+    },
+  };
+
+  const first = await migrateLegacyRaindropRoots(client);
+  assert.equal(first.ran, true);
+  assert.ok(first.renamed.some((r) => r.includes("Bookmarks")));
+  assert.equal(cols.get(1).title, "Bookmarks");
+  assert.equal(cols.get(2).title, "Bookmarks bar");
+  const cfg = await getConfig();
+  assert.equal(cfg.rootName, "Bookmarks");
+  assert.ok(cfg.rootsMigratedAt);
+  const cache = await getCollectionCache();
+  assert.equal(cache.Bookmarks, 1);
+  assert.equal(cache["Bookmarks/Bookmarks bar"], 2);
+
+  const second = await migrateLegacyRaindropRoots(client);
+  assert.equal(second.ran, false, "second pass is no-op");
+  console.log("  ✔ rename Edge/Favorites → Bookmarks/Bookmarks bar + cache rewrite");
+
+  // Conflict: both Edge and Bookmarks exist — must not set rootsMigratedAt.
+  harness.storage.clear();
+  harness.seedEdge();
+  await setConfig({ token: "mock", rootName: "Edge" });
+  const stored2 = await chrome.storage.local.get("config");
+  delete stored2.config.rootsMigratedAt;
+  await chrome.storage.local.set({ config: stored2.config });
+  const conflictCols = new Map([
+    [1, { _id: 1, title: "Edge", parent: null }],
+    [10, { _id: 10, title: "Bookmarks", parent: null }],
+    [2, { _id: 2, title: "Favorites bar", parent: { $id: 1 } }],
+  ]);
+  const conflictClient = {
+    async getRootCollections() {
+      return [...conflictCols.values()].filter((c) => !c.parent);
+    },
+    async getChildCollections() {
+      return [...conflictCols.values()].filter((c) => c.parent);
+    },
+    async updateCollection(id, { title }) {
+      const c = conflictCols.get(Number(id));
+      c.title = title;
+      return c;
+    },
+  };
+  const blocked = await migrateLegacyRaindropRoots(conflictClient);
+  assert.equal(blocked.blocked, true);
+  assert.equal(conflictCols.get(1).title, "Edge", "root not renamed on conflict");
+  const cfgBlocked = await getConfig();
+  assert.equal(cfgBlocked.rootName, "Edge");
+  assert.equal(cfgBlocked.rootsMigratedAt, undefined);
+  console.log("  ✔ conflict leaves flag unset for retry");
+
+  // Partial: root renamed, child conflict — bump rootName, leave flag unset.
+  harness.storage.clear();
+  harness.seedEdge();
+  await setConfig({ token: "mock", rootName: "Edge" });
+  const stored3 = await chrome.storage.local.get("config");
+  delete stored3.config.rootsMigratedAt;
+  await chrome.storage.local.set({ config: stored3.config });
+  const partialCols = new Map([
+    [1, { _id: 1, title: "Edge", parent: null }],
+    [2, { _id: 2, title: "Favorites bar", parent: { $id: 1 } }],
+    [3, { _id: 3, title: "Bookmarks bar", parent: { $id: 1 } }],
+  ]);
+  const partialClient = {
+    async getRootCollections() {
+      return [...partialCols.values()].filter((c) => !c.parent);
+    },
+    async getChildCollections() {
+      return [...partialCols.values()].filter((c) => c.parent);
+    },
+    async updateCollection(id, { title }) {
+      const c = partialCols.get(Number(id));
+      c.title = title;
+      return c;
+    },
+  };
+  const partial = await migrateLegacyRaindropRoots(partialClient);
+  assert.equal(partial.blocked, true);
+  assert.equal(partialCols.get(1).title, "Bookmarks");
+  const cfgPartial = await getConfig();
+  assert.equal(cfgPartial.rootName, "Bookmarks");
+  assert.ok(!cfgPartial.rootsMigratedAt);
+  console.log("  ✔ partial root rename persists rootName for retry");
+}
+
+console.log("== mirror placement aliases ==");
+{
+  const harness = await import("./lib/test-harness.mjs");
+  harness.storage.clear();
+  harness.seedEdge();
+  harness.installChromeMocks();
+  const { resolveMirrorPlacement } = await import("../src/lib/bookmarks.js");
+  const tops = await chrome.bookmarks.getChildren("0");
+  const edgePlan = await resolveMirrorPlacement(["Bookmarks bar", "Work"], "Bookmarks", tops);
+  assert.equal(edgePlan.startId, "1", "canonical bar → Favorites bar root");
+  assert.deepEqual(edgePlan.titles, ["Work"]);
+  harness.seedChrome();
+  const chromeTops = await chrome.bookmarks.getChildren("0");
+  const chromePlan = await resolveMirrorPlacement(
+    ["Bookmarks bar", "Work"],
+    "Bookmarks",
+    chromeTops
+  );
+  assert.equal(chromePlan.startId, "1");
+  assert.deepEqual(chromePlan.titles, ["Work"]);
+  console.log("  ✔ Bookmarks bar lands on Edge Favorites bar and Chrome Bookmarks bar");
+}
 
 console.log("== policy resolution ==");
 {
@@ -224,20 +398,26 @@ console.log("== raindrop folder allowlist ==");
   byParent.get("root").set("favorites bar", fakeBar);
   assert.deepEqual(mirrorRelativeSegments(index, 30, 1), ["Raindrop", "Favorites bar"]);
   assert.deepEqual(
-    raindropUploadSegments(["Other favorites", "Raindrop", "Indie", "Child"], "Edge"),
+    raindropUploadSegments(["Other favorites", "Raindrop", "Indie", "Child"], "Bookmarks"),
     ["Indie", "Child"],
-    "outside-root Edge path uploads to account-level collection"
+    "outside-root path uploads to account-level collection"
   );
   assert.deepEqual(
-    raindropUploadSegments(["Favorites bar", "Work"], "Edge"),
-    ["Edge", "Favorites bar", "Work"],
-    "under-root Edge path still nests under sync root"
+    raindropUploadSegments(["Favorites bar", "Work"], "Bookmarks"),
+    ["Bookmarks", "Bookmarks bar", "Work"],
+    "under-root path nests under sync root with canonical bar title"
   );
   assert.deepEqual(
-    raindropUploadSegments(["Other favorites", "Raindrop"], "Edge"),
-    ["Edge", "Other favorites", "Raindrop"],
-    "bare Raindrop container falls back under sync root"
+    raindropUploadSegments(["Bookmarks bar", "Work"], "Bookmarks"),
+    ["Bookmarks", "Bookmarks bar", "Work"],
+    "Chrome bar title stays canonical"
   );
+  assert.deepEqual(
+    raindropUploadSegments(["Other favorites", "Raindrop"], "Bookmarks"),
+    ["Bookmarks", "Other bookmarks", "Raindrop"],
+    "bare Raindrop container falls back under sync root with canonical other"
+  );
+  assert.equal(rootRole("Other"), null, "bare Other is not a top-root alias");
   const picker = collectionsForAllowlistPicker(index, 1);
   assert.ok(picker.some((p) => p.collectionId === 20 && !p.underSyncRoot));
   assert.ok(picker.some((p) => p.collectionId === 4 && p.underSyncRoot));

@@ -2,11 +2,11 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Edge ↔ Raindrop Sync</title>
+    <title>Bookmarks ↔ Raindrop Sync</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <h1 id="title">Edge → Raindrop</h1>
+    <h1 id="title">Bookmarks → Raindrop</h1>
     <div id="halt" class="banner hidden" role="alert"></div>
     <p class="status">
       Pending: <strong id="pending">0</strong><br />
@@ -16,15 +16,15 @@
     <div class="actions">
       <div class="action">
         <p class="action-copy">
-          One-time upload of bookmarks already in Edge. Does not pull from Raindrop.
+          One-time upload of bookmarks already in the browser. Does not pull from Raindrop.
         </p>
         <button id="backfill" type="button">Import to Raindrop</button>
         <p id="importStatus" class="muted action-status" role="status"></p>
       </div>
       <div id="pullAction" class="action hidden">
         <p class="action-copy">
-          Bring Raindrop changes into Edge. Also runs about every 15 minutes. Does not upload
-          existing Edge bookmarks.
+          Bring Raindrop changes into the browser. Also runs about every 15 minutes. Does not upload
+          existing browser bookmarks.
         </p>
         <button id="reconcile" type="button" class="secondary">Pull now</button>
         <p id="pullStatus" class="muted action-status" role="status"></p>

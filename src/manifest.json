@@ -1,10 +1,16 @@
 {
   "manifest_version": 3,
-  "name": "Edge → Raindrop Sync",
+  "name": "Bookmarks ↔ Raindrop Sync",
   "version": "0.1.0",
-  "description": "Sync Microsoft Edge bookmarks with Raindrop.io (one-way or bidirectional), captured as you create them.",
+  "description": "Sync Chromium browser bookmarks with Raindrop.io (one-way or bidirectional), captured as you create them.",
   "permissions": ["bookmarks", "storage", "alarms"],
   "host_permissions": ["https://api.raindrop.io/*"],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "background": {
     "service_worker": "background/service-worker.js",
     "type": "module"
@@ -12,6 +18,11 @@
   "options_page": "options/options.html",
   "action": {
     "default_popup": "popup/popup.html",
-    "default_title": "Edge → Raindrop Sync"
+    "default_title": "Bookmarks ↔ Raindrop Sync",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png"
+    }
   }
 }

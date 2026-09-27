@@ -101,8 +101,8 @@ function initTabs() {
 // Folder-policy labels. "Offload" is sync-and-delete: useful as a per-folder
 // exception under bidirectional, not as the bidirectional global default.
 const POLICY_LABELS = {
-  [POLICY.SYNC_DELETE]: "Offload (delete from Edge)",
-  [POLICY.SYNC_KEEP]: "Keep in Edge",
+  [POLICY.SYNC_DELETE]: "Offload (delete locally)",
+  [POLICY.SYNC_KEEP]: "Keep locally",
   [POLICY.EXCLUDE]: "Exclude",
 };
 
@@ -201,7 +201,7 @@ async function saveSettings() {
   }
   await setConfig({
     token: $("token").value.trim(),
-    rootName: $("rootName").value.trim() || "Edge",
+    rootName: $("rootName").value.trim() || "Bookmarks",
     syncMode,
     defaultPolicy,
     pruneEmpty: $("pruneEmpty").checked,
@@ -387,7 +387,7 @@ async function clearArchiveConfirmed() {
 
 async function runBackfill() {
   const out = $("importStatus");
-  out.textContent = "Queuing Edge bookmarks…";
+  out.textContent = "Queuing browser bookmarks…";
   try {
     const resp = await chrome.runtime.sendMessage({ type: MSG.RUN_BACKFILL });
     out.textContent = resp?.ok
@@ -862,7 +862,7 @@ async function refreshRaindropOnlyList() {
   const config = await getConfig();
   // Prefer form values so an unsaved root/token rename still loads the right tree.
   const token = ($("token").value || "").trim() || config.token;
-  const rootName = ($("rootName").value || "").trim() || config.rootName || "Edge";
+  const rootName = ($("rootName").value || "").trim() || config.rootName || "Bookmarks";
   if (!token) {
     status.textContent = "Add a Raindrop token in Settings to load collections.";
     raindropOnlyRows = [];
@@ -940,7 +940,7 @@ async function refreshRaindropOnlyList() {
         pruneNote;
     } else {
       status.textContent =
-        `None Raindrop-only — every Raindrop folder path already matches Edge.` + pruneNote;
+        `None Raindrop-only — every Raindrop folder path already matches the browser.` + pruneNote;
     }
     paintRaindropOnlyList();
   } catch (err) {

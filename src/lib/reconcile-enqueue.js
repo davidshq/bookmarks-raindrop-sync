@@ -163,7 +163,7 @@ export async function ensureAllowlistedOrMirrorAll(
     const label = isAllowlistActive(allowlist)
       ? "Verified allowlisted"
       : "Verified mirrored";
-    await appendLog("info", `${label} Edge folder path(s): ${ensured}.`);
+    await appendLog("info", `${label} local folder path(s): ${ensured}.`);
   }
 }
 

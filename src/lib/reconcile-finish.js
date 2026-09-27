@@ -2,6 +2,7 @@
 // Delete-confirm and tombstone-prune share rotateConfirmWindow for GET-budget fairness.
 
 import { JOB, MAX_ALIVE_CHECKS_PER_TICK } from "./constants.js";
+import { rootTitlesEqual } from "./bookmark-roots.js";
 import {
   hasTombstone,
   getTombstones,
@@ -147,7 +148,7 @@ async function finishDeleteDetection(client, seenIds, pairs, maxGets) {
   if (deleteJobs > 0) {
     await appendLog(
       "info",
-      `Pull queued ${deleteJobs} Edge delete(s) for raindrops confirmed gone.`
+      `Pull queued ${deleteJobs} local delete(s) for raindrops confirmed gone.`
     );
   }
   if (maxGets > 0) {
@@ -219,6 +220,8 @@ async function finishFolderRenamePull(index, config, overrides) {
 
     const wantTitle = col.title || "";
     if ((node.title || "") === wantTitle) continue;
+    // Do not push canonical bar/other titles onto local Favorites/Other roots.
+    if (rootTitlesEqual(node.title, wantTitle)) continue;
 
     const ancestorIds = await folderPolicyAncestorIds(folderId, node.parentId);
     if (isExcluded(ancestorIds, overrides, config.defaultPolicy)) continue;
@@ -234,7 +237,7 @@ async function finishFolderRenamePull(index, config, overrides) {
   }
 
   if (enqueued > 0) {
-    await appendLog("info", `Pull queued ${enqueued} Edge folder rename(s) from Raindrop.`);
+    await appendLog("info", `Pull queued ${enqueued} local folder rename(s) from Raindrop.`);
   }
 }
 

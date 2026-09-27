@@ -483,6 +483,11 @@ export async function getCollectionCache() {
   return read(KEY.COLLECTION_CACHE, {});
 }
 
+/** Replace the entire path→collectionId cache (used by roots migration). */
+export async function setCollectionCache(cache) {
+  await write(KEY.COLLECTION_CACHE, cache && typeof cache === "object" ? cache : {});
+}
+
 export async function cacheCollection(path, collectionId) {
   const cache = await getCollectionCache();
   cache[path] = collectionId;

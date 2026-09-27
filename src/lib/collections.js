@@ -10,6 +10,7 @@
 // Index maps store dual keys (id + String(id)); use getById / getByParent so
 // call sites never miss a collection due to number/string mismatch.
 
+import { canonicalizeUploadSegments } from "./bookmark-roots.js";
 import { OUTSIDE_ROOT_MIRROR_FOLDER } from "./constants.js";
 
 const ROOT = "root"; // sentinel parent key for top-level collections
@@ -167,7 +168,8 @@ export function raindropUploadSegments(edgeSegments, rootName) {
     const rest = segs.slice(2);
     if (rest.length) return rest;
   }
-  return [rootName, ...segs];
+  // Toolbar/other top roots → Chrome-style canonical titles in Raindrop.
+  return [rootName, ...canonicalizeUploadSegments(segs)];
 }
 
 /**

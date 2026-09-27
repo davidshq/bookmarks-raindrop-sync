@@ -16,8 +16,22 @@ import { RaindropClient } from "./raindrop.js";
 import { buildCollectionIndex } from "./collections.js";
 import { handleClientError } from "./client-errors.js";
 import { processJob } from "./job-processors.js";
+import { migrateLegacyRaindropRoots } from "./migrate-roots.js";
 
 let draining = false; // best-effort in-memory reentrancy guard (idempotent anyway)
+/** @type {Promise<unknown>|null} */
+let rootsMigration = null;
+
+async function ensureRootsMigrated(client) {
+  if (!rootsMigration) {
+    rootsMigration = migrateLegacyRaindropRoots(client).catch(async (err) => {
+      rootsMigration = null;
+      await appendLog("error", `Roots migration failed: ${err.message}`);
+      throw err;
+    });
+  }
+  await rootsMigration;
+}
 
 export async function drain() {
   if (draining) return;
@@ -41,13 +55,19 @@ async function drainLoop() {
     return;
   }
 
+  const client = new RaindropClient(config.token);
+  try {
+    await ensureRootsMigrated(client);
+  } catch {
+    // Logged inside ensureRootsMigrated; continue so queue still drains.
+  }
+
   const dueJobs = await queue.due(Date.now());
   if (dueJobs.length === 0) {
     await setStatus({ pending: await queue.size() });
     return;
   }
 
-  const client = new RaindropClient(config.token);
   const overrides = await getOverrides();
   const cache = await getCollectionCache();
   let index = null;

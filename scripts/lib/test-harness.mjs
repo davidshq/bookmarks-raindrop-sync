@@ -36,13 +36,22 @@ export function bmNode(partial) {
   return node;
 }
 
-/** Seed Favorites bar + Other favorites only. */
+/** Seed Favorites bar + Other favorites only (Edge-shaped titles). */
 export function seedEdge() {
   bookmarks.clear();
   bmSeq = 100;
   bmNode({ id: "0", title: "", parentId: undefined, children: undefined });
   bmNode({ id: "1", title: "Favorites bar", parentId: "0" });
   bmNode({ id: "2", title: "Other favorites", parentId: "0" });
+}
+
+/** Seed Bookmarks bar + Other bookmarks (Chrome-shaped titles). */
+export function seedChrome() {
+  bookmarks.clear();
+  bmSeq = 100;
+  bmNode({ id: "0", title: "", parentId: undefined, children: undefined });
+  bmNode({ id: "1", title: "Bookmarks bar", parentId: "0" });
+  bmNode({ id: "2", title: "Other bookmarks", parentId: "0" });
 }
 
 /**

@@ -20,6 +20,7 @@
 // restarts and survives renames/moves within the profile — which is exactly the
 // rename-survival property the design wanted from a GUID.
 
+import { findTopRootByAlias } from "./bookmark-roots.js";
 import { OUTSIDE_ROOT_MIRROR_FOLDER } from "./constants.js";
 
 export async function getNode(id) {
@@ -110,9 +111,12 @@ export async function ensureFolderPath(parentId, titles) {
 }
 
 /**
- * Map a Raindrop-relative collection path to an Edge placement plan.
+ * Map a Raindrop-relative collection path to a browser placement plan.
  * `relativeSegments` is under the Raindrop root (root title already stripped),
- * e.g. ["Favorites bar", "Work"] or ["Inbox"].
+ * e.g. ["Bookmarks bar", "Work"] or ["Inbox"].
+ *
+ * Toolbar/other first segments match local top roots by alias
+ * (Favorites bar ↔ Bookmarks bar, Other favorites ↔ Other bookmarks).
  *
  * Returns `{ startId, titles }` such that `ensureFolderPath(startId, titles)`
  * is the parent for a pull-create. Policy checks walk the same plan without
@@ -122,7 +126,7 @@ export async function resolveMirrorPlacement(relativeSegments, rootName, topRoot
   const tops = topRoots ?? (await getTopRoots());
   const other =
     tops.find((t) => /other/i.test(t.title || "")) ||
-    tops.find((t) => !/bar|toolbar|favorites bar/i.test(t.title || "")) ||
+    tops.find((t) => !/bar|toolbar/i.test(t.title || "")) ||
     tops[0];
   const bar =
     tops.find((t) => /bar|toolbar/i.test(t.title || "")) ||
@@ -130,19 +134,19 @@ export async function resolveMirrorPlacement(relativeSegments, rootName, topRoot
     tops[0];
 
   if (!other && !bar) {
-    throw new Error("No Edge bookmark roots found");
+    throw new Error("No browser bookmark roots found");
   }
 
   const base = other || bar;
 
   if (relativeSegments.length === 0) {
-    // Directly under Raindrop root → Other favorites/<rootName>
+    // Directly under Raindrop root → Other bookmarks/<rootName>
     return { startId: base.id, titles: [rootName] };
   }
 
   const [first, ...rest] = relativeSegments;
   // Sync-root mirror folder and outside-root Raindrop container both live under
-  // Other favorites; match either prefix so we do not nest Edge/Raindrop/….
+  // the other-bookmarks root; match either prefix so we do not nest oddly.
   const firstLower = (first || "").toLowerCase();
   if (
     firstLower === (rootName || "").toLowerCase() ||
@@ -151,12 +155,18 @@ export async function resolveMirrorPlacement(relativeSegments, rootName, topRoot
     return { startId: base.id, titles: relativeSegments };
   }
 
-  const match = tops.find((t) => (t.title || "").toLowerCase() === firstLower);
+  const match = findTopRootByAlias(tops, first);
   if (match) {
     return { startId: match.id, titles: rest };
   }
 
-  // Unrecognized first segment → Other favorites/<rootName>/<segments…>
+  // Exact title under a top root (non-alias) — rare but keep prior behavior.
+  const exact = tops.find((t) => (t.title || "").toLowerCase() === firstLower);
+  if (exact) {
+    return { startId: exact.id, titles: rest };
+  }
+
+  // Unrecognized first segment → Other bookmarks/<rootName>/<segments…>
   return { startId: base.id, titles: [rootName, ...relativeSegments] };
 }
 

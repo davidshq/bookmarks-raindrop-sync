@@ -21,7 +21,7 @@ async function refresh() {
     : "No syncs yet";
 
   const bi = resp.syncMode === SYNC_MODE.BIDIRECTIONAL;
-  $("title").textContent = bi ? "Edge ↔ Raindrop" : "Edge → Raindrop";
+  $("title").textContent = bi ? "Bookmarks ↔ Raindrop" : "Bookmarks → Raindrop";
   $("modeLine").textContent = bi ? "Mode: bidirectional" : "Mode: one-way";
   $("pullAction").classList.toggle("hidden", !bi);
 
@@ -41,11 +41,11 @@ async function refresh() {
 
 $("backfill").addEventListener("click", async () => {
   const out = $("importStatus");
-  out.textContent = "Queuing Edge bookmarks…";
+  out.textContent = "Queuing browser bookmarks…";
   try {
     const resp = await chrome.runtime.sendMessage({ type: MSG.RUN_BACKFILL });
     out.textContent = resp?.ok
-      ? `Queued ${resp.queued} Edge bookmark(s).`
+      ? `Queued ${resp.queued} bookmark(s).`
       : `Failed: ${resp?.error}`;
   } catch (err) {
     out.textContent = `Failed: ${err.message}`;

@@ -224,7 +224,7 @@ async function scenario62_oneWay() {
     raindropId: "999",
     link: "https://example.com/should-not-pull",
     title: "nope",
-    relativeSegments: ["Favorites bar", "ERS-Verify-Folder"],
+    relativeSegments: ["Bookmarks bar", "ERS-Verify-Folder"],
   });
   await eng.sync.drain();
   assert.equal(
@@ -261,7 +261,7 @@ async function scenario63_bidirectional() {
   });
 
   const root = await mock.createCollection(rootName, null);
-  const bar = await mock.createCollection("Favorites bar", root._id);
+  const bar = await mock.createCollection("Bookmarks bar", root._id);
   const folder = await mock.createCollection("ERS-Verify-Folder", bar._id);
 
   // Raindrop-origin item → should pull into Edge
@@ -305,7 +305,7 @@ async function scenario63_bidirectional() {
     raindropId: String(remote._id),
     link: "https://example.com/ers-verify-pull",
     title: "ERS pull me",
-    relativeSegments: ["Favorites bar", "ERS-Verify-Folder"],
+    relativeSegments: ["Bookmarks bar", "ERS-Verify-Folder"],
   });
   await eng.sync.drain();
   assert.equal(
@@ -322,7 +322,7 @@ async function scenario63_bidirectional() {
     raindropId: pendingRid,
     link: "https://example.com/ers-verify-pending-del",
     title: "should not pull",
-    relativeSegments: ["Favorites bar", "ERS-Verify-Folder"],
+    relativeSegments: ["Bookmarks bar", "ERS-Verify-Folder"],
   });
   await eng.queue.enqueueJob({
     id: `dr-${pendingRid}`,
@@ -548,7 +548,7 @@ async function scenario65_exclude() {
   assert.equal(mock._raindrops.size, 0, "exclude not uploaded");
 
   const root = await mock.createCollection(rootName, null);
-  const bar = await mock.createCollection("Favorites bar", root._id);
+  const bar = await mock.createCollection("Bookmarks bar", root._id);
   const remoteFolder = await mock.createCollection("ERS-Verify-Exclude", bar._id);
   mock._seedRich(remoteFolder._id, {
     link: "https://example.com/ers-verify-exclude-remote",
@@ -1689,7 +1689,7 @@ async function scenario71_tombstonePruneAndPullUpdate() {
   });
 
   const root = await mock.createCollection(rootName, null);
-  const bar = await mock.createCollection("Favorites bar", root._id);
+  const bar = await mock.createCollection("Bookmarks bar", root._id);
   const folder = await mock.createCollection("ERS-Prune-Folder", bar._id);
 
   // --- Tombstone prune: gone raindrop drops tombstone; living offload keeps it ---

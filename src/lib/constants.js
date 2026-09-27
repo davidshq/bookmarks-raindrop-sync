@@ -1,4 +1,4 @@
-// Shared constants and defaults for the Edge ↔ Raindrop sync extension.
+// Shared constants and defaults for the Bookmarks ↔ Raindrop sync extension.
 
 export const RAINDROP_API = "https://api.raindrop.io/rest/v1";
 
@@ -81,21 +81,26 @@ export const KEY = {
 
 export const DEFAULT_CONFIG = {
   token: "",
-  rootName: "Edge",
+  rootName: "Bookmarks",
   defaultPolicy: POLICY.SYNC_DELETE,
   pruneEmpty: false,
   syncMode: SYNC_MODE.ONE_WAY,
   raindropFolderMode: RAINDROP_FOLDER_MODE.CREATE_AS_NEEDED,
-  /** @type {Record<string, { path: string }>} Raindrop collection ids opted in for Edge sync */
+  /** @type {Record<string, { path: string }>} Raindrop collection ids opted in for browser sync */
   raindropFolderAllowlist: {},
   /** When true, appendLog also writes to the IndexedDB long-term archive. */
   keepLongTermLog: false,
+  /**
+   * Set by one-shot roots migration (legacy Edge/Favorites → Bookmarks/…).
+   * @type {number|undefined}
+   */
+  // rootsMigratedAt omitted until migration runs
 };
 
 /**
- * Edge folder title that holds allowlisted Raindrop collections outside the
+ * Local folder title that holds allowlisted Raindrop collections outside the
  * sync root. Prefixed onto mirror paths so they land under
- * Other favorites / Raindrop / … instead of colliding with Edge top roots or
+ * Other bookmarks / Raindrop / … instead of colliding with browser top roots or
  * looking like children of the sync-root mirror folder.
  */
 export const OUTSIDE_ROOT_MIRROR_FOLDER = "Raindrop";

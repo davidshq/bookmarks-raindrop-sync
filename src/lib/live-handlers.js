@@ -100,7 +100,7 @@ export async function handleBookmarkRemoved(bookmarkId, removeInfo) {
     if (isExcluded(ancestorIds, overrides, config.defaultPolicy)) {
       await appendLog(
         "info",
-        `Skipped Raindrop delete for excluded Edge bookmark ${bookmarkLogLabel(target)}.`
+        `Skipped Raindrop delete for excluded local bookmark ${bookmarkLogLabel(target)}.`
       );
       continue;
     }
@@ -118,7 +118,7 @@ export async function handleBookmarkRemoved(bookmarkId, removeInfo) {
       queued++;
       await appendLog(
         "info",
-        `Queued Raindrop delete for removed Edge bookmark ${bookmarkLogLabel(target)}.`
+        `Queued Raindrop delete for removed local bookmark ${bookmarkLogLabel(target)}.`
       );
     }
   }
@@ -210,6 +210,10 @@ export async function handleBookmarkChanged(id, changeInfo) {
   }
 
   // Folder title change → in-place Raindrop collection rename when mapped.
+  // Never rename Raindrop from browser top roots (parent "0") — their Raindrop
+  // titles stay canonical (Bookmarks bar / Other bookmarks).
+  if (node.parentId === "0") return;
+
   const collectionId = await getFolderCollectionId(id);
   if (collectionId == null) return;
 

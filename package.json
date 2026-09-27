@@ -1,13 +1,14 @@
 {
-  "name": "edge-raindrop-sync",
+  "name": "bookmarks-raindrop-sync",
   "private": true,
   "type": "module",
-  "description": "Manifest V3 Edge extension: sync bookmarks with Raindrop.io",
+  "description": "Manifest V3 Chromium extension: sync browser bookmarks with Raindrop.io",
   "scripts": {
     "test": "node scripts/verify-bidirectional-logic.mjs && node scripts/verify-checklist.mjs",
     "test:live": "node scripts/verify-bidirectional-logic.mjs && node scripts/verify-checklist.mjs --live",
     "test:integration": "node scripts/verify-integration.mjs",
     "spike": "node scripts/spike-raindrop.mjs",
+    "pack": "node scripts/pack-extension.mjs",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write \"src/**/*.{js,html,css,json}\" \"scripts/**/*.{js,mjs}\" eslint.config.js",

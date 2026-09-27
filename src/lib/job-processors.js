@@ -2,6 +2,7 @@
 // Invoked only from drain.js. Confirm-before-act and suppress rules live here.
 
 import { POLICY, JOB, SYNC_MODE, RAINDROP_FOLDER_MODE } from "./constants.js";
+import { rootTitlesEqual } from "./bookmark-roots.js";
 import {
   getCollectionCache,
   cacheCollection,
@@ -251,6 +252,11 @@ async function processRenameCollection(job, ctx) {
     await queue.remove(job.id);
     return;
   }
+  // Browser top roots keep local titles; Raindrop stays on canonical bar/other.
+  if (node.parentId === "0") {
+    await queue.remove(job.id);
+    return;
+  }
 
   const ancestorIds = await folderPolicyAncestorIds(folderId, node.parentId);
   if (resolvePolicy(ancestorIds, overrides, config.defaultPolicy) === POLICY.EXCLUDE) {
@@ -490,6 +496,12 @@ async function processPullRenameFolder(job, ctx) {
     return;
   }
 
+  // Alias-only drift (Favorites bar ↔ Bookmarks bar) must not rename local roots.
+  if (rootTitlesEqual(node.title, wantTitle)) {
+    await queue.remove(job.id);
+    return;
+  }
+
   const ancestorIds = await folderPolicyAncestorIds(folderId, node.parentId);
   if (resolvePolicy(ancestorIds, overrides, config.defaultPolicy) === POLICY.EXCLUDE) {
     await queue.remove(job.id);
@@ -543,7 +555,7 @@ async function processDeleteRaindrop(job, ctx) {
   }
   await clearPairWithTombstone(rid, "edge-user-delete");
   const label = job.title || job.url || rid;
-  await appendLog("info", `Deleted from Raindrop: ${label} (propagated from Edge).`);
+  await appendLog("info", `Deleted from Raindrop: ${label} (propagated from browser).`);
   await queue.remove(job.id);
 }
 
@@ -566,7 +578,7 @@ async function processDeleteEdge(job, ctx) {
       if (isExcluded(ancestorIds, overrides, config.defaultPolicy)) {
         await appendLog(
           "info",
-          `Skipped Edge delete for excluded bookmark ${label} (raindrop gone).`
+          `Skipped local delete for excluded bookmark ${label} (raindrop gone).`
         );
       } else {
         await suppressRemove(bookmarkId);
@@ -574,7 +586,7 @@ async function processDeleteEdge(job, ctx) {
         if (config.pruneEmpty) await pruneIfEmpty(parentId, config, overrides);
         await appendLog(
           "info",
-          `Deleted Edge bookmark ${label} (propagated from Raindrop).`
+          `Deleted local bookmark ${label} (propagated from Raindrop).`
         );
       }
     } catch {

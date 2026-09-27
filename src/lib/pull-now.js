@@ -42,7 +42,7 @@ export async function runPullNow(send, { pendingMsg, onProgress } = {}) {
       text =
         totalQueued > 0
           ? `Pull finished: queued ${totalQueued} Raindrop change(s).`
-          : "Pull finished. Nothing new to bring into Edge.";
+          : "Pull finished. Nothing new to bring into the browser.";
       break;
     }
     if (passes >= MAX_PULL_PASSES) {
