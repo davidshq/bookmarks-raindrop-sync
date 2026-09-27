@@ -1,6 +1,7 @@
 /**
  * Shared in-memory Edge / chrome.storage mocks for verify scripts.
- * Used by verify-checklist.mjs and verify-integration.mjs — keep mocks here, not duplicated.
+ * Used by verify-checklist.mjs, verify-integration.mjs, and smoke-bulk-options.mjs
+ * (token/ROOT only for smoke) — keep mocks here, not duplicated.
  * Never touches the real Edge bookmark tree.
  */
 

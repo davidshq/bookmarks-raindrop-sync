@@ -563,27 +563,50 @@ async function runBackfillCore() {
   refreshStatus();
 }
 
-async function runBackfill() {
-  const out = $("importStatus");
-  out.textContent = "Checking library size…";
-  const assessment = await assessImportBulkCandidate();
-  if (assessment.suggest) {
-    const choice = promptBulkGate(assessment, "Import to Raindrop", "import");
-    if (choice === "cancel") {
-      out.textContent = "Import cancelled.";
-      return;
-    }
-    if (choice === "match") {
-      const matchOut = $("matchExistingStatus");
-      const result = await runMatchExistingFlow({ statusEl: matchOut, offerDryRun: true });
-      if (result === "cancelled" || result === "failed" || result === "rate_limited") {
-        out.textContent = "Import not started (Match did not finish).";
-        refreshStatus();
-        return;
-      }
-      // applied | nothing → continue Import
-    }
+/**
+ * Shared Import/Pull bulk gate: assess → ask → optional Match → proceed or abort.
+ * Queue-depth Status banner uses a separate path (matchFromBulkQueueBanner).
+ * @param {{
+ *   assess: () => Promise<import('../lib/bulk-candidate.js').BulkCandidateAssessment>,
+ *   opLabel: string,
+ *   op: 'import' | 'pull',
+ *   statusEl: HTMLElement,
+ * }} opts
+ * @returns {Promise<boolean>} true if the live op should continue
+ */
+async function withBulkMatchGate({ assess, opLabel, op, statusEl }) {
+  const short = op === "import" ? "Import" : "Pull";
+  statusEl.textContent = "Checking library size…";
+  const assessment = await assess();
+  if (!assessment.suggest) return true;
+  const choice = promptBulkGate(assessment, opLabel, op);
+  if (choice === "cancel") {
+    statusEl.textContent = `${short} cancelled.`;
+    return false;
   }
+  if (choice === "match") {
+    const result = await runMatchExistingFlow({
+      statusEl: $("matchExistingStatus"),
+      offerDryRun: true,
+    });
+    if (result === "cancelled" || result === "failed" || result === "rate_limited") {
+      statusEl.textContent = `${short} not started (Match did not finish).`;
+      refreshStatus();
+      return false;
+    }
+    // applied | nothing → continue live op
+  }
+  return true;
+}
+
+async function runBackfill() {
+  const proceed = await withBulkMatchGate({
+    assess: assessImportBulkCandidate,
+    opLabel: "Import to Raindrop",
+    op: "import",
+    statusEl: $("importStatus"),
+  });
+  if (!proceed) return;
   await runBackfillCore();
 }
 
@@ -606,26 +629,14 @@ async function runReconcileCore(pendingMsg) {
 }
 
 async function runReconcile(pendingMsg) {
-  const out = $("pullStatus");
   // First-pull auto path may pass pendingMsg — still allow bulk gate.
-  out.textContent = "Checking library size…";
-  const assessment = await assessPullBulkCandidate();
-  if (assessment.suggest) {
-    const choice = promptBulkGate(assessment, "Pull from Raindrop", "pull");
-    if (choice === "cancel") {
-      out.textContent = "Pull cancelled.";
-      return;
-    }
-    if (choice === "match") {
-      const matchOut = $("matchExistingStatus");
-      const result = await runMatchExistingFlow({ statusEl: matchOut, offerDryRun: true });
-      if (result === "cancelled" || result === "failed" || result === "rate_limited") {
-        out.textContent = "Pull not started (Match did not finish).";
-        refreshStatus();
-        return;
-      }
-    }
-  }
+  const proceed = await withBulkMatchGate({
+    assess: assessPullBulkCandidate,
+    opLabel: "Pull from Raindrop",
+    op: "pull",
+    statusEl: $("pullStatus"),
+  });
+  if (!proceed) return;
   await runReconcileCore(pendingMsg);
 }
 

@@ -17,20 +17,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { loadToken, scriptsRoot } from "./lib/test-harness.mjs";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, "..");
-const EXT_PATH = path.join(ROOT, "src");
+const EXT_PATH = path.join(scriptsRoot, "src");
 const HEADED = process.env.SMOKE_HEADED === "1" || process.env.SMOKE_HEADED === "true";
-
-function loadToken() {
-  if (process.env.RAINDROP_TOKEN) return process.env.RAINDROP_TOKEN.trim();
-  const p = path.join(ROOT, ".tmp", "raindrop_token");
-  if (fs.existsSync(p)) return fs.readFileSync(p, "utf8").trim();
-  return "";
-}
 
 async function loadPuppeteer() {
   const require = createRequire(import.meta.url);
@@ -40,7 +31,7 @@ async function loadPuppeteer() {
     /* not in project deps */
   }
   const { execSync } = await import("node:child_process");
-  const npmPrefix = path.join(ROOT, ".tmp", "smoke-npm");
+  const npmPrefix = path.join(scriptsRoot, ".tmp", "smoke-npm");
   if (!fs.existsSync(path.join(npmPrefix, "node_modules", "puppeteer-core"))) {
     console.log("Installing puppeteer-core into .tmp/smoke-npm…");
     // ≥25: Chrome 137+ removed --load-extension; use browser.installExtension.
