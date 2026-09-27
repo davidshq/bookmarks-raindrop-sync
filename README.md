@@ -30,9 +30,11 @@ Chrome and Edge do not fork collections.
   Editing a bookmark **title or URL** updates those browser-owned fields on the
   paired raindrop.
   Renaming a folder renames the mirrored Raindrop collection **in place**
-  (same collection id) once that folder has been synced. Browser top roots are
-  never renamed to match Raindrop’s canonical titles. In bidirectional mode,
-  reconcile also applies the reverse for **bookmarks and folders**. Recent
+  (same collection id) once that folder has been synced (upload or pull both
+  record the folder→collection map). Browser top roots are never renamed to
+  match Raindrop’s canonical titles. In bidirectional mode, reconcile also
+  applies the reverse for **bookmarks and folders** (in-place title rename;
+  Raindrop collection *reparents* still do not move the Edge folder node). Recent
   activity logs `Moved: … → …`, `Updated: …`, `Pulled update: …`,
   `Pulled move: …`, `Pulled folder rename: …`, or `Renamed folder: …` as
   appropriate (creates still log `Synced: …` / `Pulled: …`). Moving into an
@@ -49,10 +51,12 @@ Chrome and Edge do not fork collections.
 - **Bidirectional pull** — raindrops under the root appear as browser bookmarks
   (files/documents skipped); deletes propagate both ways with tombstones.
   Heartbeat reconcile uses your quiet-time interval when idle, and skips starting
-  a new listing while Raindrop-bound jobs are still queued.
+  a new listing while Raindrop-bound jobs are still queued. Options → Status shows
+  why a Raindrop check was deferred (queue busy, cooldown, or bulk-queue pause).
   **Raindrop → browser folders** chooses create-as-needed / existing-only /
   mirror-all. Outside-root allowlist picks land under Other bookmarks / Raindrop
-  (or Other favorites on Edge).
+  (or Other favorites on Edge). Pull learns folder→collection maps (and heals
+  missing maps on rename) so Raindrop folder renames can update Edge in place.
 - **Metadata ownership** — the browser only writes URL, title, and collection
   placement. Raindrop tags, notes, highlights, covers, and excerpts are never
   overwritten from the browser.

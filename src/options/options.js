@@ -24,6 +24,7 @@ import {
   getRaindropFolderAllowlist,
   setRaindropFolderAllowlist,
   isRateLimited,
+  formatReconcileSkipNotice,
 } from "../lib/store.js";
 import { countArchiveEntries, exportArchiveEntries, clearArchive } from "../lib/log-archive.js";
 import { getTree, mirrorPathExists, getTopRoots } from "../lib/bookmarks.js";
@@ -303,6 +304,16 @@ async function refreshStatus() {
   $("lastReconcile").textContent = rec ? new Date(rec).toLocaleString() : "—";
   if (resp.reconcile?.lastError) {
     $("lastReconcile").textContent += ` (error: ${resp.reconcile.lastError})`;
+  }
+
+  const skipLine = $("reconcileSkipLine");
+  const skipText = formatReconcileSkipNotice(resp.status, resp.pending);
+  if (skipText) {
+    skipLine.textContent = skipText;
+    skipLine.classList.remove("hidden");
+  } else {
+    skipLine.textContent = "";
+    skipLine.classList.add("hidden");
   }
 
   const banner = $("haltBanner");

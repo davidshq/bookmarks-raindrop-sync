@@ -1,7 +1,13 @@
 // Durable queue job processors (upload, pull, delete, folder rename).
 // Invoked only from drain.js. Confirm-before-act and suppress rules live here.
 
-import { POLICY, JOB, SYNC_MODE, RAINDROP_FOLDER_MODE } from "./constants.js";
+import {
+  POLICY,
+  JOB,
+  SYNC_MODE,
+  RAINDROP_FOLDER_MODE,
+  OUTSIDE_ROOT_MIRROR_FOLDER,
+} from "./constants.js";
 import { rootTitlesEqual } from "./bookmark-roots.js";
 import {
   getCollectionCache,
@@ -53,8 +59,10 @@ import {
   ensureCollectionPath,
   findRootCollection,
   collectionIdFromRelative,
+  collectionPathFromRoot,
   raindropUploadSegments,
   recordFolderCollectionsAlongPath,
+  recordFolderCollectionsForPulledPath,
   applyCollectionTitleInIndex,
 } from "./collections.js";
 import { canCreateRaindropOnlyPath } from "./allowlist.js";
@@ -442,8 +450,63 @@ async function processPullCreate(job, ctx) {
   await suppressCreate(node.id);
   releaseExtensionCreate(node.id);
   await recordSynced(node.id, rid);
+  // Learn folder→collection so later Raindrop renames can pull-rename in place.
+  await recordPulledFolderCollections({
+    getIndex,
+    index,
+    rootId,
+    collectionId,
+    relative,
+    rootName: config.rootName,
+    edgeLeafFolderId: node.parentId,
+  });
   await appendLog("info", `Pulled: ${job.title || job.link}`);
   await queue.remove(job.id);
+}
+
+/**
+ * Best-effort folderCollections write after pull-create / pull-update placement.
+ * Missing index/collectionId is a no-op — bookmark sync already succeeded.
+ */
+async function recordPulledFolderCollections({
+  getIndex,
+  index: indexIn,
+  rootId: rootIdIn,
+  collectionId: collectionIdIn,
+  relative,
+  rootName,
+  edgeLeafFolderId,
+}) {
+  if (!edgeLeafFolderId || edgeLeafFolderId === "0" || !(relative || []).length) return;
+  try {
+    const index = indexIn || (await getIndex());
+    const root = rootIdIn != null ? { _id: rootIdIn } : findRootCollection(index, rootName);
+    const rootId = root?._id ?? null;
+    let collectionId = collectionIdIn ?? null;
+    if (collectionId == null && rootId != null) {
+      collectionId = collectionIdFromRelative(index, rootId, relative);
+    }
+    if (collectionId == null) return;
+    const ancestors = await ancestorIdsFromFolder(edgeLeafFolderId);
+    await recordFolderCollectionsForPulledPath(
+      index,
+      rootId,
+      collectionId,
+      relative,
+      ancestors,
+      recordFolderCollection
+    );
+    // Warm path cache so rename-heal can disambiguate siblings without a map.
+    const path =
+      rootId != null && collectionPathFromRoot(index, collectionId, rootId).length
+        ? [rootName, ...relative].join("/")
+        : (relative[0] || "").toLowerCase() === OUTSIDE_ROOT_MIRROR_FOLDER.toLowerCase()
+          ? relative.slice(1).join("/")
+          : relative.join("/");
+    if (path) await cacheCollection(path, collectionId);
+  } catch {
+    // Pairing already done; rename pull can still no-op until a later upload maps.
+  }
 }
 
 /**
@@ -524,6 +587,21 @@ async function processPullUpdate(job, ctx) {
     await appendLog("info", `Pulled move: ${wantTitle || wantLink}`);
   } else if (titleDiff || urlDiff) {
     await appendLog("info", `Pulled update: ${wantTitle || wantLink}`);
+  }
+
+  // Learn/refresh folder→collection on every applied pull-update so folders that
+  // were pulled before mapping existed still gain rename sync after any edit.
+  const mapLeaf = targetParent ?? plan.existingParent ?? node.parentId;
+  if (mapLeaf) {
+    await recordPulledFolderCollections({
+      getIndex,
+      index,
+      rootId: root?._id ?? null,
+      collectionId: job.collectionId,
+      relative,
+      rootName: config.rootName,
+      edgeLeafFolderId: mapLeaf,
+    });
   }
 
   await queue.remove(job.id);

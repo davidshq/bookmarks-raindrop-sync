@@ -348,6 +348,10 @@ console.log("== job kind defaults ==");
     drainJobPriority(JOB.RENAME_COLLECTION) < drainJobPriority(JOB.UPLOAD),
     "rename-collection drains before upload"
   );
+  assert.ok(
+    drainJobPriority(JOB.PULL_RENAME_FOLDER) < drainJobPriority(JOB.PULL_UPDATE),
+    "pull-rename-folder drains before pull-update"
+  );
   assert.equal(drainJobPriority(JOB.UPLOAD), drainJobPriority(JOB.PULL_CREATE));
   console.log("  ✔ legacy jobs are upload; rename before upload");
 }
@@ -811,6 +815,48 @@ console.log("== move URL rebind picker ==");
 
   assert.equal(pickMoveRebindCandidate("bm1", [], emptyPairs, live).kind, "none");
   console.log("  ✔ filterUrlMatchingItems / pickMoveRebindCandidate");
+}
+
+console.log("== reconcile skip Status copy ==");
+{
+  const { formatReconcileSkipNotice } = await import("../src/lib/store.js");
+  assert.equal(formatReconcileSkipNotice(null), null);
+  assert.ok(formatReconcileSkipNotice({ reconcileSkipReason: "busy", reconcileSkipPending: 40 }).includes("40"));
+  assert.ok(formatReconcileSkipNotice({ reconcileSkipReason: "busy", reconcileSkipPending: 40 }).includes("Pull now"));
+  assert.ok(formatReconcileSkipNotice({ reconcileSkipReason: "cooldown" }).includes("cooldown"));
+  assert.ok(formatReconcileSkipNotice({ reconcileSkipReason: "bulk_pause" }).includes("Continue"));
+  console.log("  ✔ busy / cooldown / bulk_pause notices");
+}
+
+console.log("== pulled-path folderCollections zip ==");
+{
+  const { recordFolderCollectionsForPulledPath } = await import("../src/lib/collections.js");
+  // Minimal fake index: Bookmarks / Bookmarks bar / Leaf
+  const byId = new Map();
+  const add = (col) => {
+    byId.set(col._id, col);
+    byId.set(String(col._id), col);
+  };
+  add({ _id: 1, title: "Bookmarks", parent: null });
+  add({ _id: 2, title: "Bookmarks bar", parent: { $id: 1 } });
+  add({ _id: 3, title: "Leaf", parent: { $id: 2 } });
+  const index = { byId };
+  const recorded = [];
+  await recordFolderCollectionsForPulledPath(
+    index,
+    1,
+    3,
+    ["Bookmarks bar", "Leaf"],
+    ["edge-leaf", "edge-bar", "edge-other"],
+    async (folderId, colId) => {
+      recorded.push([folderId, colId]);
+    }
+  );
+  assert.deepEqual(recorded, [
+    ["edge-leaf", 3],
+    ["edge-bar", 2],
+  ]);
+  console.log("  ✔ under-root pull path maps leaf+ancestors");
 }
 
 console.log("== queue-depth bulk prompt ==");

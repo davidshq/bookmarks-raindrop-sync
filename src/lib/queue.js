@@ -46,12 +46,13 @@ export function jobKind(job) {
 }
 
 /**
- * Drain ordering: lower runs first. Folder renames before uploads so a pending
- * child upload does not ensureCollectionPath on the new title and orphan the
- * mapped collection (create-new instead of in-place rename).
+ * Drain ordering: lower runs first. Folder renames (Edge→Raindrop and
+ * Raindrop→Edge) before uploads/pull-updates so a pending child job does not
+ * ensureCollectionPath / ensureMirrorFolderPath on the new title and orphan
+ * the mapped collection (create-new instead of in-place rename).
  */
 export function drainJobPriority(kind) {
-  return kind === JOB.RENAME_COLLECTION ? 0 : 1;
+  return kind === JOB.RENAME_COLLECTION || kind === JOB.PULL_RENAME_FOLDER ? 0 : 1;
 }
 
 export async function list() {

@@ -8,12 +8,20 @@
 // deletion. Policy-driven Edge cleanup never cascades into a Raindrop delete.
 
 import { SYNC_MODE } from "./constants.js";
-import { getConfig, appendLog, isRateLimited, clearRateLimit } from "./store.js";
+import {
+  getConfig,
+  appendLog,
+  isRateLimited,
+  clearRateLimit,
+  noteReconcileSkip,
+  clearReconcileSkip,
+} from "./store.js";
 import { RateLimitError } from "./raindrop.js";
 import { reconcile } from "./reconcile.js";
 import { handleClientError } from "./client-errors.js";
 import { drain } from "./drain.js";
 import { isBulkDrainPausedNow } from "./queue-bulk-prompt.js";
+import * as queue from "./queue.js";
 
 export { drain } from "./drain.js";
 export {
@@ -32,15 +40,22 @@ export {
 export async function reconcileNow() {
   try {
     if (await isRateLimited()) {
+      await noteReconcileSkip("rate_limited", { pending: await queue.size() });
       return { enqueued: 0, pages: 0, done: false, skipped: true, reason: "rate_limited" };
     }
     const result = await reconcile({ force: true });
+    if (result?.skipped && result.reason) {
+      await noteReconcileSkip(result.reason, { pending: await queue.size() });
+    } else if (!result?.skipped) {
+      await clearReconcileSkip();
+    }
     if (await isRateLimited()) return result;
     await drain();
     return result;
   } catch (err) {
     if (await handleClientError(err)) {
       if (err instanceof RateLimitError) {
+        await noteReconcileSkip("rate_limited", { pending: await queue.size() });
         return { enqueued: 0, pages: 0, done: false, skipped: true, reason: "rate_limited" };
       }
       throw err;
@@ -53,22 +68,35 @@ export async function reconcileNow() {
 /** Heartbeat entry: drain queue, then reconcile when bidirectional. */
 export async function tick() {
   if (await isRateLimited()) {
-    // Stay quiet — status.rateLimitedUntil is the signal; avoid log spam each minute.
+    // rateLimitedUntil banner is primary; still stamp skip for Status copy.
+    await noteReconcileSkip("rate_limited", { pending: await queue.size() });
     return;
   }
   await drain();
-  if (await isRateLimited()) return;
+  if (await isRateLimited()) {
+    await noteReconcileSkip("rate_limited", { pending: await queue.size() });
+    return;
+  }
   // Queue bulk prompt: skip Raindrop-heavy reconcile so we do not dig deeper
   // while Status awaits Match / Continue drip. Live enqueue still works.
-  if (await isBulkDrainPausedNow()) return;
+  if (await isBulkDrainPausedNow()) {
+    await noteReconcileSkip("bulk_pause", { pending: await queue.size() });
+    return;
+  }
   const config = await getConfig();
   if (config.syncMode !== SYNC_MODE.BIDIRECTIONAL) {
     await clearRateLimit();
+    await clearReconcileSkip();
     return;
   }
   try {
     // Heartbeat uses cooldown; Options/popup use reconcileNow() (force: true).
-    await reconcile({ force: false });
+    const result = await reconcile({ force: false });
+    if (result?.skipped && result.reason) {
+      await noteReconcileSkip(result.reason, { pending: await queue.size() });
+    } else if (!result?.skipped) {
+      await clearReconcileSkip();
+    }
     if (await isRateLimited()) return;
     await drain(); // process any jobs reconcile just enqueued
     if (!(await isRateLimited())) await clearRateLimit();

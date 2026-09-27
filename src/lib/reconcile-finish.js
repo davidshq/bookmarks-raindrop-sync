@@ -21,14 +21,24 @@ import {
   getTombstones,
   pruneTombstones,
   getFolderCollections,
+  getFolderCollectionId,
   clearFolderCollection,
+  recordFolderCollection,
+  getCollectionCache,
   getReconcileState,
   setReconcileState,
   appendLog,
 } from "./store.js";
 import * as queue from "./queue.js";
-import { getNodeOrNull, isFolderExcluded } from "./bookmarks.js";
-import { getById } from "./collections.js";
+import {
+  getNodeOrNull,
+  getChildren,
+  isFolderExcluded,
+  resolveExistingMirrorParent,
+  resolveMirrorPlacement,
+  walkAncestorsFromFolder,
+} from "./bookmarks.js";
+import { getById, collectionsUnderRoot, isOutsideRootLandingSegments } from "./collections.js";
 import { AuthError, RateLimitError, isNotFoundError } from "./raindrop.js";
 import { ensureAllowlistedOrMirrorAll } from "./reconcile-enqueue.js";
 
@@ -47,7 +57,7 @@ export async function finishReconcileCycle({
   pages,
 }) {
   await finishConfirmGets(client, seenIds, pairs);
-  await finishFolderRenamePull(index, config, overrides);
+  await finishFolderRenamePull(index, config, overrides, rootId, topRoots);
   await ensureAllowlistedOrMirrorAll(
     index,
     rootId,
@@ -273,12 +283,23 @@ async function finishTombstonePrune(client, seenIds, maxGets) {
 
 /**
  * Raindrop collection title → Edge folder title for mapped folders.
+ * Heals missing folderCollections (pull-created before mapping existed) by
+ * matching the parent mirror path + a single unmapped sibling folder.
  * Uses the live collection index (no extra API). Skips Edge top roots and exclude.
  */
-async function finishFolderRenamePull(index, config, overrides) {
-  const map = await getFolderCollections();
+async function finishFolderRenamePull(index, config, overrides, rootId, topRoots) {
   let enqueued = 0;
+  if (rootId != null) {
+    enqueued += await healUnmappedFolderCollections(
+      index,
+      rootId,
+      config,
+      overrides,
+      topRoots
+    );
+  }
 
+  const map = await getFolderCollections();
   for (const [folderId, collectionId] of Object.entries(map)) {
     const col = getById(index, collectionId);
     if (!col) {
@@ -316,6 +337,139 @@ async function finishFolderRenamePull(index, config, overrides) {
   if (enqueued > 0) {
     await appendLog("info", `Pull queued ${enqueued} local folder rename(s) from Raindrop.`);
   }
+}
+
+/**
+ * Learn folder→collection for Raindrop paths that already exist in Edge, or for
+ * a single unmapped sibling when the leaf title drifted (rename without map).
+ * @returns {Promise<number>} rename jobs enqueued during heal
+ */
+async function healUnmappedFolderCollections(index, rootId, config, overrides, topRoots) {
+  const map = await getFolderCollections();
+  const mappedColIds = new Set(Object.values(map).map(String));
+  let enqueued = 0;
+
+  for (const { collectionId, relativeSegments } of collectionsUnderRoot(index, rootId)) {
+    if (!relativeSegments.length) continue;
+    if (mappedColIds.has(String(collectionId))) continue;
+
+    const col = getById(index, collectionId);
+    if (!col) continue;
+    const wantTitle = col.title || "";
+
+    // Path already matches current Raindrop titles — record map only.
+    const exactLeaf = await resolveExistingMirrorParent(
+      relativeSegments,
+      config.rootName,
+      topRoots
+    );
+    if (exactLeaf) {
+      const node = await getNodeOrNull(exactLeaf);
+      if (node && !node.url && node.parentId !== "0") {
+        await recordFolderCollection(exactLeaf, collectionId);
+        mappedColIds.add(String(collectionId));
+      }
+      continue;
+    }
+
+    const parentFolderId = await resolveMirrorParentFolderId(
+      relativeSegments,
+      config.rootName,
+      topRoots
+    );
+    if (!parentFolderId) continue;
+
+    const folders = (await getChildren(parentFolderId)).filter((c) => !c.url);
+    const titled = folders.find((f) => (f.title || "") === wantTitle);
+    if (titled && titled.parentId !== "0") {
+      await recordFolderCollection(titled.id, collectionId);
+      mappedColIds.add(String(collectionId));
+      continue;
+    }
+
+    const candidates = [];
+    for (const f of folders) {
+      if (f.parentId === "0") continue;
+      if (rootTitlesEqual(f.title, wantTitle)) continue;
+      const existing = map[String(f.id)] ?? (await getFolderCollectionId(f.id));
+      if (existing != null) continue;
+      if (await isFolderExcluded(f.id, f.parentId, overrides, config.defaultPolicy)) {
+        continue;
+      }
+      candidates.push(f);
+    }
+    const folder = await pickHealFolderCandidate(candidates, collectionId);
+    if (!folder) continue;
+    // Never bind/rename the outside-root Raindrop landing zone.
+    if (await edgeFolderIsOutsideRootLanding(folder.id)) continue;
+
+    await recordFolderCollection(folder.id, collectionId);
+    mappedColIds.add(String(collectionId));
+    if ((folder.title || "") === wantTitle) continue;
+    if (rootTitlesEqual(folder.title, wantTitle)) continue;
+
+    const added = await queue.enqueueJob({
+      id: `ref-${folder.id}`,
+      kind: JOB.PULL_RENAME_FOLDER,
+      folderId: String(folder.id),
+      collectionId: String(collectionId),
+      title: wantTitle,
+    });
+    if (added) enqueued++;
+  }
+
+  return enqueued;
+}
+
+/**
+ * Prefer a unique unmapped sibling; if several, the one whose title still appears
+ * on a collectionCache path for this collection id (pre-rename path key).
+ * @param {{ id: string, title?: string }[]} candidates
+ * @param {string|number} collectionId
+ */
+async function pickHealFolderCandidate(candidates, collectionId) {
+  if (candidates.length === 1) return candidates[0];
+  if (candidates.length < 2) return null;
+  const cache = await getCollectionCache();
+  const hits = [];
+  for (const f of candidates) {
+    const title = f.title || "";
+    if (!title) continue;
+    for (const [path, id] of Object.entries(cache || {})) {
+      if (String(id) !== String(collectionId)) continue;
+      if (path === title || path.endsWith(`/${title}`)) {
+        hits.push(f);
+        break;
+      }
+    }
+  }
+  return hits.length === 1 ? hits[0] : null;
+}
+
+/**
+ * Edge folder that should contain the leaf collection segment, or null if the
+ * parent path is missing / the leaf is an Edge top root (not healable).
+ */
+async function resolveMirrorParentFolderId(relativeSegments, rootName, topRoots) {
+  const segs = relativeSegments || [];
+  if (segs.length >= 2) {
+    return resolveExistingMirrorParent(segs.slice(0, -1), rootName, topRoots);
+  }
+  if (segs.length !== 1) return null;
+  // Single segment: top-root alias → titles []; loose under-root collection →
+  // titles [rootName, leaf] under Other. Never treat Other favorites itself as
+  // the parent (that previously made Raindrop/ a false rename candidate).
+  const { startId, titles } = await resolveMirrorPlacement(segs, rootName, topRoots);
+  if (!titles.length) return null;
+  const parentTitles = titles.slice(0, -1);
+  if (!parentTitles.length) return startId || null;
+  return resolveExistingMirrorParent(parentTitles, rootName, topRoots);
+}
+
+/** True when folder sits under Other…/Raindrop/… (outside-root allowlist zone). */
+async function edgeFolderIsOutsideRootLanding(folderId) {
+  const { segments } = await walkAncestorsFromFolder(folderId, { soft: true });
+  return isOutsideRootLandingSegments(segments);
 }
 
 /**

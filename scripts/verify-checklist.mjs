@@ -2126,6 +2126,69 @@ async function scenario71_tombstonePruneAndPullUpdate() {
     "suppressed folder change does not enqueue rename-collection"
   );
 
+  // --- Pull-created folder must learn folderCollections (no prior Edge upload) ---
+  // Nest under a private parent so heal disambiguation is not crowded by other bar folders.
+  const healParentCol = await mock.createCollection("ERS-Heal-Parent", bar._id);
+  const pullOnlyCol = await mock.createCollection("ERS-PullOnly-Old", healParentCol._id);
+  mock._seedRich(pullOnlyCol._id, {
+    link: "https://example.com/ers-pull-only-folder",
+    title: "pull-only child",
+  });
+  await eng.reconcile.reconcile({ force: true });
+  await eng.sync.drain();
+  const pullOnlyEdge = [...bookmarks.values()].find(
+    (n) => !n.url && n.title === "ERS-PullOnly-Old"
+  );
+  assert.ok(pullOnlyEdge, "pull-created Edge folder exists");
+  assert.ok(
+    (await eng.store.getFolderCollectionId(pullOnlyEdge.id)) != null,
+    "pull-create records folder→collection mapping"
+  );
+  const pullOnlyRemote = mock._collections.get(Number(pullOnlyCol._id)) || mock._collections.get(pullOnlyCol._id);
+  pullOnlyRemote.title = "ERS-PullOnly-New";
+  await eng.reconcile.reconcile({ force: true });
+  assert.ok(
+    (await eng.queue.list()).some(
+      (j) =>
+        eng.queue.jobKind(j) === JOB.PULL_RENAME_FOLDER &&
+        String(j.folderId) === String(pullOnlyEdge.id)
+    ),
+    "pull-created folder enqueues pull-rename-folder after Raindrop rename"
+  );
+  await eng.sync.drain();
+  assert.equal(
+    (await chrome.bookmarks.get(pullOnlyEdge.id))[0].title,
+    "ERS-PullOnly-New",
+    "pull-created Edge folder title follows Raindrop rename"
+  );
+
+  // --- Heal: wipe map, Raindrop rename still finds the sole unmapped child ---
+  await eng.store.clearFolderCollection(pullOnlyEdge.id);
+  assert.equal(
+    await eng.store.getFolderCollectionId(pullOnlyEdge.id),
+    null,
+    "map cleared for heal test"
+  );
+  pullOnlyRemote.title = "ERS-PullOnly-Healed";
+  await eng.reconcile.reconcile({ force: true });
+  // Prefer in-place rename (pull-rename-folder) over pull-update creating a sibling path.
+  await eng.sync.drain();
+  const healedNode = (await chrome.bookmarks.get(pullOnlyEdge.id))[0];
+  assert.equal(
+    healedNode.title,
+    "ERS-PullOnly-Healed",
+    "healed Edge folder title follows Raindrop after map wipe"
+  );
+  assert.ok(
+    (await eng.store.getFolderCollectionId(pullOnlyEdge.id)) != null,
+    "heal re-records folder→collection after map wipe"
+  );
+  assert.equal(
+    [...bookmarks.values()].filter((n) => !n.url && n.title === "ERS-PullOnly-Healed").length,
+    1,
+    "in-place rename — no duplicate Healed folder"
+  );
+
   console.log("  ✔ tombstone prune; Raindrop→Edge title/URL/move/folder rename; change suppress");
 }
 

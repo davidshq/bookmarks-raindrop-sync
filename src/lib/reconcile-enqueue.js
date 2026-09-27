@@ -2,16 +2,21 @@
 // Drift gates share computePullUpdatePlan with drain apply (pull-update.js).
 
 import { JOB, RAINDROP_FOLDER_MODE } from "./constants.js";
-import { hasTombstone, appendLog } from "./store.js";
+import { hasTombstone, appendLog, recordFolderCollection } from "./store.js";
 import * as queue from "./queue.js";
 import { isExcluded } from "./policy.js";
 import {
   getNodeOrNull,
   ancestorIdsForMirrorPath,
+  ancestorIdsFromFolder,
   mirrorPathExists,
   ensureMirrorFolderPath,
 } from "./bookmarks.js";
-import { collectionsUnderRoot, collectionsForAllowlistPicker } from "./collections.js";
+import {
+  collectionsUnderRoot,
+  collectionsForAllowlistPicker,
+  recordFolderCollectionsForPulledPath,
+} from "./collections.js";
 import { isAllowlistActive, isCollectionAllowed, canCreateRaindropOnlyPath } from "./allowlist.js";
 import { computePullUpdatePlan } from "./pull-update.js";
 
@@ -137,7 +142,7 @@ export async function ensureAllowlistedOrMirrorAll(
   }
 
   let ensured = 0;
-  for (const { relativeSegments } of targets) {
+  for (const { relativeSegments, collectionId } of targets) {
     if (!relativeSegments.length) continue;
     if (
       await pathIsExcluded(
@@ -150,7 +155,22 @@ export async function ensureAllowlistedOrMirrorAll(
     ) {
       continue;
     }
-    await ensureMirrorFolderPath(relativeSegments, config.rootName, topRoots);
+    const leafId = await ensureMirrorFolderPath(relativeSegments, config.rootName, topRoots);
+    if (leafId && leafId !== "0") {
+      try {
+        const ancestors = await ancestorIdsFromFolder(leafId);
+        await recordFolderCollectionsForPulledPath(
+          index,
+          rootId,
+          collectionId,
+          relativeSegments,
+          ancestors,
+          recordFolderCollection
+        );
+      } catch {
+        // Empty-folder ensure already succeeded; rename map is best-effort.
+      }
+    }
     ensured++;
   }
   if (ensured > 0) {

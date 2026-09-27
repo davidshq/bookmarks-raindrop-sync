@@ -596,7 +596,80 @@ export async function getStatus() {
     lastPushAt: null,
     /** @type {number|null} epoch ms — skip Raindrop API work until then */
     rateLimitedUntil: null,
+    /**
+     * Why heartbeat skipped a Raindrop listing (busy / cooldown / bulk_pause).
+     * Cleared when a non-skipped reconcile runs. null when idle/ok.
+     * @type {null|"busy"|"cooldown"|"bulk_pause"|"rate_limited"}
+     */
+    reconcileSkipReason: null,
+    /** @type {number|null} epoch ms when reconcileSkipReason was last set */
+    reconcileSkipAt: null,
+    /** @type {number|null} queue depth when skip was recorded */
+    reconcileSkipPending: null,
   });
+}
+
+/**
+ * Record why heartbeat deferred Raindrop reconcile (Status surfaces this).
+ * @param {"busy"|"cooldown"|"bulk_pause"|"rate_limited"} reason
+ * @param {{ pending?: number }} [opts]
+ */
+export async function noteReconcileSkip(reason, { pending } = {}) {
+  return setStatus({
+    reconcileSkipReason: reason,
+    reconcileSkipAt: Date.now(),
+    reconcileSkipPending: pending != null ? Number(pending) || 0 : null,
+  });
+}
+
+/** Clear heartbeat reconcile-skip after a listing actually runs. */
+export async function clearReconcileSkip() {
+  return setStatus({
+    reconcileSkipReason: null,
+    reconcileSkipAt: null,
+    reconcileSkipPending: null,
+  });
+}
+
+/**
+ * Status copy when heartbeat deferred Raindrop listing.
+ * @param {{ reconcileSkipReason?: string|null, reconcileSkipPending?: number|null }|null|undefined} status
+ * @param {number} [pendingFallback]
+ * @returns {string|null}
+ */
+export function formatReconcileSkipNotice(status, pendingFallback) {
+  const reason = status?.reconcileSkipReason;
+  if (!reason) return null;
+  const n =
+    status?.reconcileSkipPending != null
+      ? status.reconcileSkipPending
+      : pendingFallback != null
+        ? pendingFallback
+        : null;
+  const pendingBit = n != null ? ` (${n} pending)` : "";
+  switch (reason) {
+    case "busy":
+      return (
+        `Raindrop check deferred: sync queue still has Raindrop work${pendingBit}. ` +
+        `Uploads/pulls continue to drip; use Pull now to force a check.`
+      );
+    case "cooldown":
+      return (
+        `Raindrop check on quiet-time cooldown` +
+        (n != null ? ` (${n} pending in queue)` : "") +
+        `. Wait for the interval, or use Pull now.`
+      );
+    case "bulk_pause":
+      return (
+        `Raindrop check paused while the bulk-queue prompt awaits Match or Continue drip` +
+        pendingBit +
+        `.`
+      );
+    case "rate_limited":
+      return `Raindrop check deferred for rate limits${pendingBit}.`;
+    default:
+      return `Raindrop check deferred (${reason})${pendingBit}.`;
+  }
 }
 
 async function setStatusUnlocked(patch) {

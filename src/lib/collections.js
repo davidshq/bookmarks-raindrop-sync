@@ -344,6 +344,63 @@ export async function recordFolderCollectionsAlongPath(
 }
 
 /**
+ * Persist Edge folder id → Raindrop collection id after a pull/mirror create.
+ * Upload learns this via recordFolderCollectionsAlongPath; pull-create must too
+ * or Raindrop→Edge folder renames never find a mapping.
+ *
+ * @param {{ byId?: Map }|null|undefined} index
+ * @param {string|number|null|undefined} rootId sync-root collection id (null if unknown)
+ * @param {string|number} collectionId leaf Raindrop collection for the path
+ * @param {string[]} relativeSegments mirror relative (root title stripped, or Raindrop/…)
+ * @param {string[]} edgeAncestorIds nearest-first from the leaf Edge folder
+ * @param {(folderId: string, collectionId: string|number) => Promise<void>} record
+ */
+export async function recordFolderCollectionsForPulledPath(
+  index,
+  rootId,
+  collectionId,
+  relativeSegments,
+  edgeAncestorIds,
+  record
+) {
+  if (typeof record !== "function" || collectionId == null) return;
+  const relative = relativeSegments || [];
+  const edgeIds = edgeAncestorIds || [];
+  if (!relative.length || !edgeIds.length) return;
+
+  // Under sync root: zip relative segments to collections between leaf and root.
+  if (rootId != null && collectionPathFromRoot(index, collectionId, rootId).length) {
+    const colIds = [];
+    const result = walkCollectionAncestors(index, collectionId, (col) => {
+      if (String(col._id) === String(rootId)) return "stop";
+      colIds.push(col._id);
+      return "continue";
+    });
+    if (!result.ok || result.hitTop) return;
+    if (colIds.length !== relative.length) return;
+    for (let i = 0; i < colIds.length; i++) {
+      const folderId = edgeIds[i];
+      if (folderId != null) await record(String(folderId), colIds[i]);
+    }
+    return;
+  }
+
+  // Outside sync root: relative is [Raindrop, ...absolute]; map absolute only.
+  if ((relative[0] || "").toLowerCase() !== OUTSIDE_ROOT_MIRROR_FOLDER.toLowerCase()) {
+    return;
+  }
+  const colIds = [];
+  const walked = walkCollectionAncestors(index, collectionId, (col) => {
+    colIds.push(col._id);
+    return "continue";
+  });
+  if (!walked.ok || !colIds.length) return;
+  for (let i = 0; i < colIds.length && i < edgeIds.length; i++) {
+    await record(String(edgeIds[i]), colIds[i]);
+  }
+}
+
+/**
  * Keep an in-memory collection index consistent after PUT /collection title.
  * @param {{ byParent?: Map, byId?: Map }|null|undefined} index
  * @param {string|number} collectionId
