@@ -9,6 +9,8 @@
 //   RateLimitError -> HTTP 429 *or* remaining budget exhausted: back off until
 //                     `retryAt`, keep jobs queued. Prefer pausing before 429.
 //   RaindropError  -> other HTTP failures; `status` is set when known.
+//                     Response bodies are summarized (HTML error pages collapse
+//                     to a short phrase; long JSON/text is capped).
 //
 // isNotFoundError() is the single “resource already gone” check (prefer
 // status === 404; message fallback for mocks / older throws).
@@ -58,6 +60,27 @@ export function isNotFoundError(err) {
   return typeof message === "string" && /\b404\b/.test(message);
 }
 
+/**
+ * Compact body for activity-log errors. Cloudflare/App Platform HTML pages are
+ * replaced with a short phrase; other bodies are single-lined and capped.
+ * @param {string} text
+ * @param {number} status
+ * @returns {string}
+ */
+export function summarizeHttpErrorBody(text, status) {
+  const t = (text || "").trim();
+  if (!t) return "";
+  if (/<!DOCTYPE/i.test(t) || /<html[\s>]/i.test(t)) {
+    if (status === 521) return "(Cloudflare: origin web server down)";
+    if (status === 502 || status === 503 || status === 504) {
+      return "(upstream unavailable)";
+    }
+    return "(HTML error page)";
+  }
+  const oneLine = t.replace(/\s+/g, " ");
+  return oneLine.length > 160 ? `${oneLine.slice(0, 157)}…` : oneLine;
+}
+
 export class RaindropClient {
   constructor(token) {
     this.token = token;
@@ -101,9 +124,13 @@ export class RaindropClient {
     }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new RaindropError(`Raindrop ${method} ${path} failed: ${res.status} ${text}`, {
-        status: res.status,
-      });
+      const detail = summarizeHttpErrorBody(text, res.status);
+      throw new RaindropError(
+        detail
+          ? `Raindrop ${method} ${path} failed: ${res.status} ${detail}`
+          : `Raindrop ${method} ${path} failed: ${res.status}`,
+        { status: res.status }
+      );
     }
     // DELETE may return an empty body.
     if (res.status === 204) return {};

@@ -119,6 +119,7 @@ async function maybeEnqueuePullUpdate(item, ctx, relative, bookmarkId, colId) {
 /**
  * Empty-folder ensure: allowlisted collections always (when allowlist active);
  * otherwise full mirror-all under root when mode is mirror-all.
+ * Logs a verify count (paths present or created-if-missing), not "N new folders".
  */
 export async function ensureAllowlistedOrMirrorAll(
   index,
@@ -158,8 +159,11 @@ export async function ensureAllowlistedOrMirrorAll(
     ensured++;
   }
   if (ensured > 0) {
-    const label = isAllowlistActive(allowlist) ? "Allowlist" : "Mirror-all";
-    await appendLog("info", `${label} ensured ${ensured} Edge folder path(s).`);
+    // Paths checked/created-if-missing — not "created N folders this cycle".
+    const label = isAllowlistActive(allowlist)
+      ? "Verified allowlisted"
+      : "Verified mirrored";
+    await appendLog("info", `${label} Edge folder path(s): ${ensured}.`);
   }
 }
 

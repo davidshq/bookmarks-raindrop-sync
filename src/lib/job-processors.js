@@ -542,7 +542,8 @@ async function processDeleteRaindrop(job, ctx) {
     if (!isNotFoundError(err)) throw err;
   }
   await clearPairWithTombstone(rid, "edge-user-delete");
-  await appendLog("info", `Deleted raindrop ${rid} (propagated from Edge).`);
+  const label = job.title || job.url || rid;
+  await appendLog("info", `Deleted from Raindrop: ${label} (propagated from Edge).`);
   await queue.remove(job.id);
 }
 
@@ -561,16 +562,20 @@ async function processDeleteEdge(job, ctx) {
       const node = await getNode(bookmarkId);
       const parentId = node.parentId;
       const ancestorIds = await ancestorIdsFromFolder(parentId);
+      const label = node.title || node.url || bookmarkId;
       if (isExcluded(ancestorIds, overrides, config.defaultPolicy)) {
         await appendLog(
           "info",
-          `Skipped Edge delete for excluded bookmark ${bookmarkId} (raindrop ${rid} gone).`
+          `Skipped Edge delete for excluded bookmark ${label} (raindrop gone).`
         );
       } else {
         await suppressRemove(bookmarkId);
         await removeNode(bookmarkId);
         if (config.pruneEmpty) await pruneIfEmpty(parentId, config, overrides);
-        await appendLog("info", `Deleted Edge bookmark ${bookmarkId} (propagated from Raindrop).`);
+        await appendLog(
+          "info",
+          `Deleted Edge bookmark ${label} (propagated from Raindrop).`
+        );
       }
     } catch {
       // Already gone — still clear mapping.

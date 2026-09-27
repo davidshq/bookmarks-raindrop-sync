@@ -31,9 +31,10 @@ import { drain } from "./drain.js";
  *
  * @param {string} removedId
  * @param {{ parentId?: string, node?: object }} [removeInfo]
- * @returns {{ id: string, pathFolderIds: string[], liveParentId: string|null }[]}
+ * @returns {{ id: string, title?: string, url?: string, pathFolderIds: string[], liveParentId: string|null }[]}
  *   `pathFolderIds` is nearest-first folders inside the deleted tree;
  *   `liveParentId` is the still-existing parent of the removed root.
+ *   `title`/`url` come from Chromium's removed-node payload when present.
  */
 export function collectRemovedUrlNodes(removedId, removeInfo) {
   const tree = removeInfo?.node;
@@ -49,6 +50,8 @@ export function collectRemovedUrlNodes(removedId, removeInfo) {
     if (n.url) {
       out.push({
         id: String(n.id),
+        title: n.title != null ? String(n.title) : undefined,
+        url: String(n.url),
         pathFolderIds: folderAncestorsNearestFirst,
         liveParentId,
       });
@@ -59,6 +62,11 @@ export function collectRemovedUrlNodes(removedId, removeInfo) {
   };
   walk(tree, []);
   return out;
+}
+
+/** Human-readable bookmark label for logs (title → url → id). */
+function bookmarkLogLabel(target) {
+  return target.title || target.url || target.id;
 }
 
 /**
@@ -90,7 +98,10 @@ export async function handleBookmarkRemoved(bookmarkId, removeInfo) {
       : [];
     const ancestorIds = [...target.pathFolderIds, ...liveAncestors];
     if (isExcluded(ancestorIds, overrides, config.defaultPolicy)) {
-      await appendLog("info", `Skipped Raindrop delete for excluded Edge bookmark ${target.id}.`);
+      await appendLog(
+        "info",
+        `Skipped Raindrop delete for excluded Edge bookmark ${bookmarkLogLabel(target)}.`
+      );
       continue;
     }
 
@@ -99,10 +110,16 @@ export async function handleBookmarkRemoved(bookmarkId, removeInfo) {
       kind: JOB.DELETE_RAINDROP,
       raindropId,
       bookmarkId: target.id,
+      // Edge node is already gone by drain time — keep label for the completion log.
+      title: target.title,
+      url: target.url,
     });
     if (added) {
       queued++;
-      await appendLog("info", `Queued Raindrop delete for removed Edge bookmark ${target.id}.`);
+      await appendLog(
+        "info",
+        `Queued Raindrop delete for removed Edge bookmark ${bookmarkLogLabel(target)}.`
+      );
     }
   }
 

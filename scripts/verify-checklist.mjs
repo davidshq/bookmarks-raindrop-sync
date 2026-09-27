@@ -1911,7 +1911,7 @@ async function scenario73_coalesceActivityLog() {
   assert.equal(LOG_ATS_LIMIT, 100);
   await resetAll(eng.store);
 
-  const msg = "Allowlist ensured 414 Edge folder path(s).";
+  const msg = "Verified allowlisted Edge folder path(s): 414.";
   await eng.store.appendLog("info", msg, 1_000);
   let log = await eng.store.getLog();
   assert.equal(log.length, 1);

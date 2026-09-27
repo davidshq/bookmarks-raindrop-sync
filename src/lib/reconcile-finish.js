@@ -145,14 +145,17 @@ async function finishDeleteDetection(client, seenIds, pairs, maxGets) {
   });
 
   if (deleteJobs > 0) {
-    await appendLog("info", `Pull queued ${deleteJobs} Edge delete(s) for missing raindrops.`);
+    await appendLog(
+      "info",
+      `Pull queued ${deleteJobs} Edge delete(s) for raindrops confirmed gone.`
+    );
   }
   if (maxGets > 0) {
     const deferred = candidates.length - checked;
     if (deferred > 0) {
       await appendLog(
         "info",
-        `Reconcile deferred ${deferred} delete-confirm GET(s) to stay under rate limits (will rotate next cycle).`
+        `Reconcile postponed ${deferred} missing-raindrop check(s) (rate-limit budget; continues next cycle).`
       );
     }
   }
