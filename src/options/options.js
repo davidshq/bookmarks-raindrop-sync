@@ -42,6 +42,7 @@ import {
   assessPullBulkCandidate,
   formatBulkCandidatePrompt,
 } from "../lib/bulk-candidate.js";
+import { formatBulkQueueNotice, BULK_PROMPT_NEEDS_CHOICE } from "../lib/queue-bulk-prompt.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -320,6 +321,8 @@ async function refreshStatus() {
     banner.classList.add("hidden");
   }
 
+  renderBulkQueueBanner(resp);
+
   const log = $("log");
   log.innerHTML = "";
   for (const entry of resp.log ?? []) {
@@ -343,6 +346,52 @@ async function refreshStatus() {
   }
 
   refreshArchiveMeta();
+}
+
+/**
+ * Queue-depth bulk prompt on Status (external HTML import / large backlog).
+ * @param {{ pending?: number, bulkPrompt?: { status?: string }, bulkNotice?: string }} resp
+ */
+function renderBulkQueueBanner(resp) {
+  const el = $("bulkQueueBanner");
+  const text = $("bulkQueueBannerText");
+  if (!el || !text) return;
+  const needs = resp.bulkPrompt?.status === BULK_PROMPT_NEEDS_CHOICE;
+  if (!needs) {
+    el.classList.add("hidden");
+    return;
+  }
+  text.textContent = resp.bulkNotice || formatBulkQueueNotice(resp.pending ?? 0);
+  el.classList.remove("hidden");
+}
+
+async function continueBulkDripFromStatus() {
+  const out = $("bulkQueueStatus");
+  out.textContent = "Resuming drip…";
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: MSG.CONTINUE_BULK_DRIP });
+    out.textContent = resp?.ok ? "Continuing drip (prompt snoozed until the queue shrinks)." : `Failed: ${resp?.error}`;
+  } catch (err) {
+    out.textContent = `Failed: ${err.message}`;
+  }
+  refreshStatus();
+}
+
+async function matchFromBulkQueueBanner() {
+  const out = $("bulkQueueStatus");
+  const result = await runMatchExistingFlow({ statusEl: out, offerDryRun: true });
+  // Apply path snoozes in the SW; zero-pair / cancelled-without-apply need Continue semantics for "nothing".
+  if (result === "nothing") {
+    try {
+      await chrome.runtime.sendMessage({ type: MSG.CONTINUE_BULK_DRIP });
+      out.textContent = `${out.textContent} Drain resumed (nothing new to pair).`;
+    } catch {
+      /* refreshStatus will show banner state */
+    }
+  } else if (result === "applied") {
+    out.textContent = `${out.textContent} Drain resumed.`;
+  }
+  refreshStatus();
 }
 
 async function refreshArchiveMeta() {
@@ -1206,6 +1255,8 @@ $("testToken").addEventListener("click", testToken);
 $("backfill").addEventListener("click", runBackfill);
 $("reconcile").addEventListener("click", () => runReconcile());
 $("matchExisting").addEventListener("click", () => void runMatchExistingUi());
+$("bulkQueueMatch").addEventListener("click", () => void matchFromBulkQueueBanner());
+$("bulkQueueContinue").addEventListener("click", () => void continueBulkDripFromStatus());
 $("retryDeadLetter").addEventListener("click", async () => {
   const out = $("deadLetterStatus");
   out.textContent = "Retrying…";

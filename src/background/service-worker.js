@@ -37,6 +37,13 @@ import {
   healStoredConfig,
   getStorageUsage,
 } from "../lib/store.js";
+import {
+  noteQueueDepthForBulkPrompt,
+  snoozeBulkPrompt,
+  resolveBulkPromptAfterMatch,
+  estimateDrainEtaMinutes,
+  formatBulkQueueNotice,
+} from "../lib/queue-bulk-prompt.js";
 
 function ensureHeartbeat() {
   chrome.alarms.create(ALARM_NAME, { periodInMinutes: HEARTBEAT_MINUTES });
@@ -121,16 +128,39 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         }
         case MSG.GET_STATUS: {
           const config = await getConfig();
+          const pending = await queue.size();
+          const bulkPrompt = await noteQueueDepthForBulkPrompt(pending);
           sendResponse({
             ok: true,
             status: await getStatus(),
-            pending: await queue.size(),
+            pending,
             deadLetter: await queue.deadLetterSize(),
             storage: await getStorageUsage(),
             log: await getLog(),
             reconcile: await getReconcileState(),
             syncMode: config.syncMode,
+            bulkPrompt,
+            bulkEtaMinutes: estimateDrainEtaMinutes(pending),
+            bulkNotice: formatBulkQueueNotice(pending),
           });
+          break;
+        }
+        case MSG.GET_BULK_PROMPT: {
+          const pending = await queue.size();
+          const bulkPrompt = await noteQueueDepthForBulkPrompt(pending);
+          sendResponse({
+            ok: true,
+            pending,
+            bulkPrompt,
+            bulkEtaMinutes: estimateDrainEtaMinutes(pending),
+            bulkNotice: formatBulkQueueNotice(pending),
+          });
+          break;
+        }
+        case MSG.CONTINUE_BULK_DRIP: {
+          const bulkPrompt = await snoozeBulkPrompt();
+          await drain();
+          sendResponse({ ok: true, bulkPrompt });
           break;
         }
         case MSG.RETRY_DEAD_LETTER: {
@@ -168,6 +198,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             break;
           }
           const result = await applyMatchExisting(matched);
+          if (result?.ok) {
+            // Resume drip after pairing; snooze so a still-large queue does not re-arm immediately.
+            await resolveBulkPromptAfterMatch();
+          }
           sendResponse(result);
           break;
         }

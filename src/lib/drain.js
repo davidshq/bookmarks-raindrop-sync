@@ -17,6 +17,10 @@ import { buildCollectionIndex } from "./collections.js";
 import { handleClientError } from "./client-errors.js";
 import { processJob } from "./job-processors.js";
 import { migrateLegacyRaindropRoots } from "./migrate-roots.js";
+import {
+  gateDrainForBulkPrompt,
+  noteQueueDepthForBulkPrompt,
+} from "./queue-bulk-prompt.js";
 
 let draining = false; // best-effort in-memory reentrancy guard (idempotent anyway)
 /** @type {Promise<unknown>|null} */
@@ -49,9 +53,17 @@ export async function drain() {
 async function drainLoop() {
   if (await isRateLimited()) return;
 
+  const pending = await queue.size();
+  // Evolve arm/snooze/clear from depth before gating (natural drain can clear).
+  await noteQueueDepthForBulkPrompt(pending);
+  if (await gateDrainForBulkPrompt()) {
+    await setStatus({ pending });
+    return;
+  }
+
   const config = await getConfig();
   if (!config.token) {
-    await setStatus({ lastError: "No Raindrop token configured", pending: await queue.size() });
+    await setStatus({ lastError: "No Raindrop token configured", pending });
     return;
   }
 
@@ -62,7 +74,6 @@ async function drainLoop() {
     // Logged inside ensureRootsMigrated; continue so queue still drains.
   }
 
-  const pending = await queue.size();
   const dueJobs = await queue.due(Date.now());
   if (dueJobs.length === 0) {
     await setStatus({ pending });

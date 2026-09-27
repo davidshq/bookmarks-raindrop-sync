@@ -69,6 +69,18 @@
       >
         <h2 class="visually-hidden">Status</h2>
         <div id="haltBanner" class="banner hidden" role="alert"></div>
+        <div id="bulkQueueBanner" class="banner warn hidden" role="status" aria-live="polite">
+          <p id="bulkQueueBannerText"></p>
+          <div class="row">
+            <button id="bulkQueueMatch" type="button">Match from export</button>
+            <button id="bulkQueueContinue" type="button" class="secondary">Continue drip</button>
+            <span id="bulkQueueStatus" class="hint" role="status"></span>
+          </div>
+          <p class="hint">
+            Match records overlapping URL pairs only. File-based bulk transfer is a future option —
+            see docs for the export bulk lane.
+          </p>
+        </div>
         <p class="status-line">
           Pending in queue: <strong id="pending">0</strong> · Dead-lettered:
           <strong id="deadLetter">0</strong> · Last activity:

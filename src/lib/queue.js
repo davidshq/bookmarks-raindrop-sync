@@ -78,8 +78,19 @@ export async function enqueue(id, { reason } = {}) {
   return enqueueJob({ id, kind: JOB.UPLOAD, ...(reason ? { reason } : {}) });
 }
 
+async function noteBulkPromptAfterMutation() {
+  // Dynamic import avoids a static cycle with queue-bulk-prompt.js → size().
+  try {
+    const pending = await size();
+    const { noteQueueDepthForBulkPrompt } = await import("./queue-bulk-prompt.js");
+    await noteQueueDepthForBulkPrompt(pending);
+  } catch (err) {
+    console.error("[ers] bulk prompt arm failed:", err);
+  }
+}
+
 export async function enqueueJob(job) {
-  return withLock(async () => {
+  const added = await withLock(async () => {
     const jobs = await readQueue();
     const existing = jobs.find((j) => j.id === job.id);
     if (existing) {
@@ -98,6 +109,8 @@ export async function enqueueJob(job) {
     await writeQueue(jobs);
     return true;
   });
+  await noteBulkPromptAfterMutation();
+  return added;
 }
 
 /**
@@ -105,10 +118,10 @@ export async function enqueueJob(job) {
  * @param {{ reason?: "move"|"change" }} [opts]
  */
 export async function enqueueMany(ids, { reason } = {}) {
-  return withLock(async () => {
+  const added = await withLock(async () => {
     const jobs = await readQueue();
     const byId = new Map(jobs.map((j) => [j.id, j]));
-    let added = 0;
+    let count = 0;
     for (const id of ids) {
       const existing = byId.get(id);
       if (existing) {
@@ -125,11 +138,13 @@ export async function enqueueMany(ids, { reason } = {}) {
       };
       jobs.push(job);
       byId.set(id, job);
-      added++;
+      count++;
     }
     await writeQueue(jobs);
-    return added;
+    return count;
   });
+  await noteBulkPromptAfterMutation();
+  return added;
 }
 
 export async function remove(id) {

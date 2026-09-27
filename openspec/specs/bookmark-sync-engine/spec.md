@@ -345,3 +345,40 @@ When a `rename-collection` job is drained, the engine SHALL load the Edge folder
 - **WHEN** Raindrop returns not-found for the mapped collection id during rename
 - **THEN** the folder→collection mapping is cleared
 - **AND** no new collection is created solely for the rename
+
+### Requirement: Pair map update from export URL match
+The engine SHALL allow the pair map (`bookmarkId ↔ raindropId`) to be updated by Match existing when an Edge bookmark URL unambiguously matches a raindrop id from Raindrop export CSV. Recording SHALL use the same durable pair storage as live sync. Import backfill SHALL continue to skip bookmark ids already present in the pair map, so Match-then-Import does not re-upload matched URLs.
+
+#### Scenario: Recorded pair skips Import enqueue
+- **WHEN** Match existing has recorded a pair for bookmark B and raindrop R
+- **AND** the user runs Import to Raindrop
+- **THEN** bookmark B is not enqueued for upload solely because it lacks a pair
+
+#### Scenario: Conflicting existing pair not overwritten
+- **WHEN** bookmark B is already paired to raindrop R1
+- **AND** export URL match would associate B with a different raindrop R2
+- **THEN** Match existing does not overwrite the existing pair
+- **AND** the conflict is counted in the dry-run summary
+
+### Requirement: Bulk candidate assessment for Import
+The engine SHALL expose a local assessment of whether an Import would be a bulk candidate (unpaired would-queue count and pair coverage) without calling Raindrop, so the Options UI can prompt before enqueueing.
+
+#### Scenario: Assessment counts unpaired
+- **WHEN** bulk-candidate assessment runs for Import
+- **THEN** it reports unpaired would-queue count, Edge scanned count, and paired count using the same exclude/already-paired rules as Import enqueue
+
+### Requirement: Queue-depth bulk prompt arming
+After enqueue or drain-related queue size changes, the sync engine SHALL arm durable bulk-prompt state when pending jobs are at or above the queue bulk threshold and snooze does not apply. Arming SHALL NOT require the user to trigger Import or Pull.
+
+#### Scenario: Live create storm arms prompt
+- **WHEN** many bookmarks are created in the browser and queued for upload
+- **AND** pending reaches the queue bulk threshold
+- **THEN** bulk-prompt needs_choice is set without an Import click
+
+### Requirement: Drain respects bulk-prompt pause
+The drain loop SHALL check bulk-prompt state and SHALL skip processing Raindrop-bound jobs while needs_choice is set.
+
+#### Scenario: Heartbeat drain no-ops while waiting
+- **WHEN** needs_choice is set
+- **AND** drain runs
+- **THEN** no upload/pull/delete Raindrop calls are made from that drain pass due to the pause

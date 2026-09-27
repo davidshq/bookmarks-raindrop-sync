@@ -77,7 +77,9 @@ Chrome and Edge do not fork collections.
    (collection ids preserved).
 5. Optional: **Manual Sync** → **Import to Raindrop** / **Pull now**. Large or thinly paired
    libraries prompt to **Match from Raindrop export** first (optional dry-run, then record pairs).
-   A Manual Sync Match control remains for power users. See [`docs/export-bulk-sync.md`](docs/export-bulk-sync.md).
+   If an Edge HTML import (or similar) already fills the sync queue (~150+ pending), **Status**
+   pauses drip and offers Match / Continue. A Manual Sync Match control remains for power users.
+   See [`docs/export-bulk-sync.md`](docs/export-bulk-sync.md).
 
 ## Tests
 

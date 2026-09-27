@@ -61,6 +61,10 @@ export const MSG = {
   MATCH_EXISTING_PLAN: "matchExistingPlan",
   /** Bulk lane: apply Match existing and record pairs from a dry-run plan. */
   MATCH_EXISTING_APPLY: "matchExistingApply",
+  /** Queue-depth bulk prompt: durable needs_choice / snooze state. */
+  GET_BULK_PROMPT: "getBulkPrompt",
+  /** Queue-depth bulk prompt: continue drip (clear pause + snooze). */
+  CONTINUE_BULK_DRIP: "continueBulkDrip",
 };
 
 // chrome.storage.local keys. Everything durable lives under these — the MV3
@@ -84,6 +88,11 @@ export const KEY = {
   // { pending, lastError, deletionsHalted, lastActivityAt, lastPushAt, rateLimitedUntil }
   STATUS: "status",
   LOG: "log", // [ { at, level, message } ] recent ring buffer (LOG_LIMIT)
+  /**
+   * Queue-depth bulk prompt: { status: 'idle'|'needs_choice', snoozedBelow: number|null }.
+   * While needs_choice, drain (and heartbeat reconcile) pause until Match or Continue.
+   */
+  BULK_PROMPT: "bulkPrompt",
 };
 
 /** Quiet-time bidirectional reconcile presets / clamps (minutes). */
@@ -201,6 +210,17 @@ export const BULK_UNPAIRED_IMPORT_THRESHOLD = 200;
 export const BULK_EDGE_COUNT_THRESHOLD = 100;
 /** Suggest bulk when paired/edge is below this (and edge count ≥ BULK_EDGE_COUNT_THRESHOLD). */
 export const BULK_PAIR_COVERAGE_THRESHOLD = 0.3;
+/**
+ * Durable queue size at which Status offers Match / continue-drip (external
+ * HTML import storms, etc.). Snooze clears when pending drops below half.
+ */
+export const QUEUE_BULK_PENDING_THRESHOLD = 150;
+/**
+ * Fixed activity-log line while drain is paused for the queue bulk prompt.
+ * Identical messages coalesce (×N) across heartbeats.
+ */
+export const BULK_DRAIN_PAUSED_LOG =
+  "Sync drain paused: large queue — open Options → Status to Match from export or continue dripping";
 
 /**
  * True when a Raindrop list page is the last (short page or past total count).

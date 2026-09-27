@@ -746,6 +746,80 @@ console.log("== export URL match + Match existing planner ==");
   console.log("  ✔ urlMatchKeys / export CSV / planMatchFromExport");
 }
 
+console.log("== queue-depth bulk prompt ==");
+{
+  const {
+    QUEUE_BULK_PENDING_THRESHOLD,
+    BULK_DRAIN_PAUSED_LOG,
+    drainJobsCap,
+    HEARTBEAT_MINUTES,
+  } = await import("../src/lib/constants.js");
+  const {
+    defaultBulkPrompt,
+    evolveBulkPrompt,
+    snoozeBulkPromptState,
+    isBulkDrainPaused,
+    queueBulkClearWatermark,
+    estimateDrainEtaMinutes,
+    formatBulkQueueNotice,
+    BULK_PROMPT_NEEDS_CHOICE,
+    BULK_PROMPT_IDLE,
+  } = await import("../src/lib/queue-bulk-prompt.js");
+
+  assert.equal(QUEUE_BULK_PENDING_THRESHOLD, 150);
+  assert.ok(BULK_DRAIN_PAUSED_LOG.includes("Status"));
+  assert.equal(queueBulkClearWatermark(), QUEUE_BULK_PENDING_THRESHOLD / 2);
+
+  const idle = defaultBulkPrompt();
+  assert.equal(idle.status, BULK_PROMPT_IDLE);
+  assert.equal(isBulkDrainPaused(idle), false);
+
+  // Below threshold: stay idle
+  assert.equal(
+    evolveBulkPrompt(idle, QUEUE_BULK_PENDING_THRESHOLD - 1).status,
+    BULK_PROMPT_IDLE
+  );
+
+  // Cross threshold → needs_choice
+  const armed = evolveBulkPrompt(idle, QUEUE_BULK_PENDING_THRESHOLD);
+  assert.equal(armed.status, BULK_PROMPT_NEEDS_CHOICE);
+  assert.equal(isBulkDrainPaused(armed), true);
+
+  // Stay armed while still large
+  assert.equal(
+    evolveBulkPrompt(armed, QUEUE_BULK_PENDING_THRESHOLD + 500).status,
+    BULK_PROMPT_NEEDS_CHOICE
+  );
+
+  // Natural drain below half clears needs_choice
+  const cleared = evolveBulkPrompt(armed, queueBulkClearWatermark() - 1);
+  assert.equal(cleared.status, BULK_PROMPT_IDLE);
+  assert.equal(cleared.snoozedBelow, null);
+
+  // Continue drip snoozes; same depth does not re-arm
+  const snoozed = snoozeBulkPromptState();
+  assert.equal(snoozed.status, BULK_PROMPT_IDLE);
+  assert.equal(snoozed.snoozedBelow, queueBulkClearWatermark());
+  assert.equal(
+    evolveBulkPrompt(snoozed, QUEUE_BULK_PENDING_THRESHOLD + 100).status,
+    BULK_PROMPT_IDLE
+  );
+  // After pending drops below watermark, a new spike can arm again
+  const afterSnooze = evolveBulkPrompt(snoozed, queueBulkClearWatermark() - 1);
+  assert.equal(afterSnooze.snoozedBelow, null);
+  assert.equal(
+    evolveBulkPrompt(afterSnooze, QUEUE_BULK_PENDING_THRESHOLD).status,
+    BULK_PROMPT_NEEDS_CHOICE
+  );
+
+  const eta = estimateDrainEtaMinutes(QUEUE_BULK_PENDING_THRESHOLD);
+  assert.equal(eta, Math.ceil(QUEUE_BULK_PENDING_THRESHOLD / drainJobsCap(QUEUE_BULK_PENDING_THRESHOLD)) * HEARTBEAT_MINUTES);
+  assert.ok(formatBulkQueueNotice(200).includes("200"));
+  assert.ok(formatBulkQueueNotice(200).includes("Match"));
+
+  console.log("  ✔ arm / snooze / clear watermarks / ETA / drain-pause predicate");
+}
+
 console.log("\nAll offline checks passed.");
 console.log("Engine scenarios: npm test runs verify-checklist.mjs next (mocked Edge).");
 console.log("Manual Edge still useful for SW lifecycle / Options UI only.");

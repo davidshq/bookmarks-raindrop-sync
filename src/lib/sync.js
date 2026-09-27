@@ -13,6 +13,7 @@ import { RateLimitError } from "./raindrop.js";
 import { reconcile } from "./reconcile.js";
 import { handleClientError } from "./client-errors.js";
 import { drain } from "./drain.js";
+import { isBulkDrainPausedNow } from "./queue-bulk-prompt.js";
 
 export { drain } from "./drain.js";
 export {
@@ -57,6 +58,9 @@ export async function tick() {
   }
   await drain();
   if (await isRateLimited()) return;
+  // Queue bulk prompt: skip Raindrop-heavy reconcile so we do not dig deeper
+  // while Status awaits Match / Continue drip. Live enqueue still works.
+  if (await isBulkDrainPausedNow()) return;
   const config = await getConfig();
   if (config.syncMode !== SYNC_MODE.BIDIRECTIONAL) {
     await clearRateLimit();

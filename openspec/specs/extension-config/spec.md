@@ -268,3 +268,48 @@ The extension SHALL place the Raindrop-only collections chooser as an expandable
 #### Scenario: Discard reverts allowlist draft
 - **WHEN** the user discards folder-policy changes
 - **THEN** Raindrop-only checkbox draft reverts to the last applied allowlist
+
+### Requirement: Guided bulk Match on Import and Pull
+When the user triggers Import to Raindrop or Pull now and bulk-candidate heuristics fire, the Options UI SHALL prompt to Match from Raindrop export first, continue without matching, or cancel, then optionally dry-run and record pairs before continuing the live operation. Status for Match SHALL be shown separately from Import and Pull status lines.
+
+#### Scenario: Import interrupt
+- **WHEN** the user clicks Import to Raindrop and heuristics mark a bulk candidate
+- **THEN** the UI asks before enqueueing Import
+- **AND** choosing Match first runs the Match flow before Import
+
+#### Scenario: Pull interrupt
+- **WHEN** sync mode is bidirectional, the user clicks Pull now, and heuristics mark a bulk candidate
+- **THEN** the UI asks before starting Pull
+- **AND** choosing Match first runs the Match flow before Pull
+
+### Requirement: Power-user Match existing control
+The Manual Sync panel MAY provide a Match existing from export control for users who want to run Match without starting Import/Pull. Help text SHALL state that Match records pairs only and that large Import/Pull operations may prompt automatically.
+
+#### Scenario: Manual Match available
+- **WHEN** the user views Manual Sync
+- **THEN** a Match existing control is available
+- **AND** help text states it records pairs only
+
+### Requirement: No temporary Other favorites repair in Options
+The Options Manual Sync panel SHALL NOT include a one-shot Other favorites repair button that removes or moves top-level Other favorites using a hardwired personal folder map.
+
+#### Scenario: Repair control absent
+- **WHEN** the user opens the Manual Sync panel
+- **THEN** no Other favorites live-repair control is offered
+
+### Requirement: Status bulk-queue notice
+When durable bulk-prompt state indicates a choice is needed, the Options Status panel SHALL show a notice that includes the approximate pending job count and short explanation that an external import or large backlog may take a long time if left to drip. The notice SHALL offer actions to Match from Raindrop export and to continue dripping (dismiss/snooze). The notice SHALL be visible without requiring the user to open Manual Sync or click Import/Pull.
+
+#### Scenario: Status shows notice
+- **WHEN** the user opens Options Status and needs_choice is set
+- **THEN** a bulk-queue notice is visible with Match and Continue actions
+
+#### Scenario: Continue hides notice
+- **WHEN** the user chooses Continue drip
+- **THEN** the notice is dismissed per snooze rules
+- **AND** Status no longer shows needs_choice for that backlog
+
+#### Scenario: Match from Status
+- **WHEN** the user chooses Match from the Status notice
+- **THEN** the Match existing flow runs (optional dry-run per existing Match UX)
+- **AND** Status reflects success or failure of that flow
