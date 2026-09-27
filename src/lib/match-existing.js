@@ -39,6 +39,39 @@ import {
  */
 
 /**
+ * Shared plan/apply rule for claiming a (bookmarkId, raindropId) pair.
+ * Stale reverse-map ids (bookmark gone after Edge Sync) are not conflicts.
+ * @param {string} bid
+ * @param {string} rid
+ * @param {{ byBookmark?: Record<string, string>, byRaindrop?: Record<string, string> }} pairs
+ * @param {Set<string>} liveIds
+ * @returns {'already' | 'conflict' | 'match'}
+ */
+export function classifyPairClaim(bid, rid, pairs, liveIds) {
+  const byBookmark = pairs.byBookmark || {};
+  const byRaindrop = pairs.byRaindrop || {};
+  const bidS = String(bid);
+  const ridS = String(rid);
+  const existingRid = byBookmark[bidS];
+  const existingBid = byRaindrop[ridS];
+
+  if (existingRid != null && String(existingRid) === ridS) {
+    return "already";
+  }
+  if (existingRid != null && String(existingRid) !== ridS) {
+    return "conflict";
+  }
+  if (
+    existingBid != null &&
+    String(existingBid) !== bidS &&
+    liveIds.has(String(existingBid))
+  ) {
+    return "conflict";
+  }
+  return "match";
+}
+
+/**
  * Build a Match existing plan from CSV text + current Edge bookmarks / pairs.
  * Pure aside from bookmark/pair reads when used via planMatchExisting().
  * @param {string} csvText
@@ -48,8 +81,6 @@ import {
  */
 export function planMatchFromExport(csvText, edgeBookmarks, pairs) {
   const { byKey, raindropIds, raindropCount } = indexExportByUrl(csvText);
-  const byBookmark = pairs.byBookmark || {};
-  const byRaindrop = pairs.byRaindrop || {};
   /** Live Edge ids — stale pair map entries (Edge Sync rewrite) are not conflicts. */
   const liveIds = new Set(edgeBookmarks.map((b) => String(b.id)));
 
@@ -100,24 +131,13 @@ export function planMatchFromExport(csvText, edgeBookmarks, pairs) {
       continue;
     }
     const bid = bids[0];
-    const existingRid = byBookmark[bid];
-    const existingBid = byRaindrop[rid];
-
-    if (existingRid != null && String(existingRid) === String(rid)) {
+    const verdict = classifyPairClaim(bid, rid, pairs, liveIds);
+    if (verdict === "already") {
       alreadyPaired++;
       claimedRids.add(rid);
       continue;
     }
-    if (existingRid != null && String(existingRid) !== String(rid)) {
-      conflicts++;
-      continue;
-    }
-    // Reverse map points at another bookmark: conflict only if that id still exists.
-    if (
-      existingBid != null &&
-      String(existingBid) !== String(bid) &&
-      liveIds.has(String(existingBid))
-    ) {
+    if (verdict === "conflict") {
       conflicts++;
       continue;
     }
@@ -209,21 +229,7 @@ export async function applyMatchExisting(matched) {
     const rid = String(row.raindropId);
     if (!liveIds.has(bid)) continue;
     const pairs = await getPairs();
-    const existingRid = pairs.byBookmark[bid];
-    const existingBid = pairs.byRaindrop[rid];
-    if (existingRid != null && String(existingRid) !== rid) {
-      continue;
-    }
-    if (
-      existingBid != null &&
-      String(existingBid) !== bid &&
-      liveIds.has(String(existingBid))
-    ) {
-      continue;
-    }
-    if (existingRid != null && String(existingRid) === rid) {
-      continue;
-    }
+    if (classifyPairClaim(bid, rid, pairs, liveIds) !== "match") continue;
     await recordSynced(bid, rid);
     paired++;
   }
@@ -252,8 +258,8 @@ export async function runMatchExistingDryRun() {
   return plan;
 }
 
-/** @returns {MatchPlan} */
-function emptyPlan({ ok = true, error, reason } = {}) {
+/** Zeroed MatchPlan (rate-limit / auth / SW catch paths). @returns {MatchPlan} */
+export function emptyPlan({ ok = true, error, reason } = {}) {
   return {
     ok,
     matched: [],

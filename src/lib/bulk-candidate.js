@@ -1,16 +1,15 @@
 // Local heuristics: should Options ask to Match-from-export before Import/Pull?
-// No Raindrop API — uses the same exclude / already-paired rules as Import enqueue.
+// No Raindrop API — uses scanImportScope() (same exclude / already-paired rules
+// as Import enqueue).
 
 import {
-  POLICY,
   BULK_UNPAIRED_IMPORT_THRESHOLD,
   BULK_EDGE_COUNT_THRESHOLD,
   BULK_PAIR_COVERAGE_THRESHOLD,
   SYNC_MODE,
 } from "./constants.js";
-import { getConfig, getOverrides, getPairs } from "./store.js";
-import { collectAllBookmarks } from "./bookmarks.js";
-import { resolvePolicy } from "./policy.js";
+import { getConfig } from "./store.js";
+import { scanImportScope } from "./backfill.js";
 
 /**
  * @typedef {{
@@ -28,24 +27,8 @@ import { resolvePolicy } from "./policy.js";
  * @returns {Promise<{ unpaired: number, paired: number, edgeScanned: number }>}
  */
 export async function countImportScope() {
-  const config = await getConfig();
-  const overrides = await getOverrides();
-  const pairs = await getPairs();
-  const synced = pairs.byBookmark || {};
-  const all = await collectAllBookmarks();
-
-  let unpaired = 0;
-  let paired = 0;
-  for (const { node, ancestorIds } of all) {
-    const effective = resolvePolicy(ancestorIds, overrides, config.defaultPolicy);
-    if (effective === POLICY.EXCLUDE) continue;
-    if (Object.prototype.hasOwnProperty.call(synced, node.id)) {
-      paired++;
-    } else {
-      unpaired++;
-    }
-  }
-  return { unpaired, paired, edgeScanned: all.length };
+  const { unpaired, paired, edgeScanned } = await scanImportScope();
+  return { unpaired, paired, edgeScanned };
 }
 
 /**

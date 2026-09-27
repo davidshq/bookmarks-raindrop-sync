@@ -22,6 +22,7 @@ import { startBackfill } from "../lib/backfill.js";
 import {
   runMatchExistingDryRun,
   applyMatchExisting,
+  emptyPlan,
   RateLimitError,
 } from "../lib/match-existing.js";
 import { handleClientError } from "../lib/client-errors.js";
@@ -152,18 +153,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           } catch (err) {
             if (await handleClientError(err)) {
               if (err instanceof RateLimitError) {
-                sendResponse({
-                  ok: true,
-                  matched: [],
-                  alreadyPaired: 0,
-                  ambiguous: 0,
-                  conflicts: 0,
-                  edgeOnly: 0,
-                  raindropOnly: 0,
-                  edgeScanned: 0,
-                  raindropCount: 0,
-                  reason: "rate_limited",
-                });
+                sendResponse(emptyPlan({ reason: "rate_limited" }));
                 break;
               }
             }

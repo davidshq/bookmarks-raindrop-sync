@@ -6,30 +6,58 @@
 // re-walking and re-uploading. The pair map guards against re-uploads too.
 // Load it once — hasSynced re-reads PAIRS under the lock per id, which makes
 // a large import a storage round-trip per bookmark before the first enqueue.
+//
+// scanImportScope() is the shared walk for Import enqueue and bulk-candidate
+// heuristics (same exclude / already-paired rules).
 
-import { POLICY } from "./constants.js";
 import { getConfig, getOverrides, getPairs, appendLog, setStatus } from "./store.js";
 import { collectAllBookmarks } from "./bookmarks.js";
-import { resolvePolicy } from "./policy.js";
+import { isExcluded } from "./policy.js";
 import { enqueueMany, size } from "./queue.js";
 
-export async function startBackfill() {
+/**
+ * Walk Edge bookmarks once: unpaired ids Import would enqueue + pair counts.
+ * edgeScanned includes excluded URLs (full tree size for coverage heuristics).
+ * @returns {Promise<{
+ *   unpairedIds: string[],
+ *   unpaired: number,
+ *   paired: number,
+ *   edgeScanned: number,
+ * }>}
+ */
+export async function scanImportScope() {
   const config = await getConfig();
   const overrides = await getOverrides();
   const pairs = await getPairs();
   const synced = pairs.byBookmark || {};
   const all = await collectAllBookmarks();
 
-  const ids = [];
+  const unpairedIds = [];
+  let paired = 0;
   for (const { node, ancestorIds } of all) {
-    const effective = resolvePolicy(ancestorIds, overrides, config.defaultPolicy);
-    if (effective === POLICY.EXCLUDE) continue;
-    if (Object.prototype.hasOwnProperty.call(synced, node.id)) continue;
-    ids.push(node.id);
+    if (isExcluded(ancestorIds, overrides, config.defaultPolicy)) continue;
+    if (Object.prototype.hasOwnProperty.call(synced, node.id)) {
+      paired++;
+    } else {
+      unpairedIds.push(node.id);
+    }
   }
+  return {
+    unpairedIds,
+    unpaired: unpairedIds.length,
+    paired,
+    edgeScanned: all.length,
+  };
+}
 
-  const added = await enqueueMany(ids);
-  await appendLog("info", `Import queued ${added} bookmark(s) (${all.length} scanned).`);
+export async function startBackfill() {
+  const { unpairedIds, edgeScanned } = await scanImportScope();
+
+  const added = await enqueueMany(unpairedIds);
+  await appendLog(
+    "info",
+    `Import queued ${added} bookmark(s) (${edgeScanned} scanned).`
+  );
   await setStatus({ pending: await size(), lastPushAt: Date.now() });
-  return { scanned: all.length, queued: added };
+  return { scanned: edgeScanned, queued: added };
 }
