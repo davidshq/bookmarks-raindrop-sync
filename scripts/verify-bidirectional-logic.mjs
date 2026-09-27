@@ -829,11 +829,17 @@ console.log("== queue-depth bulk prompt ==");
     queueBulkClearWatermark,
     estimateDrainEtaMinutes,
     formatBulkQueueNotice,
+    armBulkPromptIfNeeded,
     BULK_PROMPT_NEEDS_CHOICE,
     BULK_PROMPT_IDLE,
   } = await import("../src/lib/queue-bulk-prompt.js");
 
   assert.equal(QUEUE_BULK_PENDING_THRESHOLD, 150);
+  await assert.rejects(
+    () => armBulkPromptIfNeeded(),
+    /requires pending/,
+    "armBulkPromptIfNeeded must not treat missing pending as depth 0"
+  );
   assert.ok(BULK_DRAIN_PAUSED_LOG.includes("Status"));
   assert.equal(queueBulkClearWatermark(), QUEUE_BULK_PENDING_THRESHOLD / 2);
 

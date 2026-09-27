@@ -23,6 +23,7 @@ import {
 } from "./constants.js";
 import { _read, _write, _writeMany } from "./store.js";
 import { withLock } from "./mutex.js";
+import { noteQueueDepthForBulkPrompt } from "./queue-bulk-prompt.js";
 
 async function readQueue() {
   return _read(KEY.QUEUE, []);
@@ -79,11 +80,11 @@ export async function enqueue(id, { reason } = {}) {
 }
 
 async function noteBulkPromptAfterMutation() {
-  // Dynamic import avoids a static cycle with queue-bulk-prompt.js → size().
+  // Static import is required: ServiceWorkerGlobalScope forbids import().
+  // Cycle is avoided because queue-bulk-prompt takes pending and does not
+  // import this module.
   try {
-    const pending = await size();
-    const { noteQueueDepthForBulkPrompt } = await import("./queue-bulk-prompt.js");
-    await noteQueueDepthForBulkPrompt(pending);
+    await noteQueueDepthForBulkPrompt(await size());
   } catch (err) {
     console.error("[ers] bulk prompt arm failed:", err);
   }

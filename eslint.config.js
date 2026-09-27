@@ -32,6 +32,17 @@ export default [
         ...chromeApi,
       },
     },
+    rules: {
+      // Spec forbids import() on ServiceWorkerGlobalScope; Node tests hide that.
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "ImportExpression",
+          message:
+            "Dynamic import() is disallowed in MV3 service workers (ServiceWorkerGlobalScope).",
+        },
+      ],
+    },
   },
 
   {

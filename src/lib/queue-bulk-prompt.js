@@ -11,7 +11,10 @@ import {
 } from "./constants.js";
 import { _read, _write, appendLog } from "./store.js";
 import { withLock } from "./mutex.js";
-import { size } from "./queue.js";
+
+// Intentionally no import from queue.js — callers pass pending depth so this
+// module stays below queue in the graph. MV3 service workers disallow
+// import(), so queue cannot break a cycle with a dynamic import either.
 
 export const BULK_PROMPT_IDLE = "idle";
 export const BULK_PROMPT_NEEDS_CHOICE = "needs_choice";
@@ -150,11 +153,18 @@ export async function getBulkPrompt() {
 
 /**
  * Arm / evolve durable prompt from current queue depth.
- * @param {number} [pending] defaults to queue.size()
+ * Callers must pass depth (queue.size / list length); this module does not
+ * import queue.js so enqueue can statically call here under a service worker.
+ * Omitting pending used to mean "read size()" — that created a cycle and is
+ * no longer supported (a missing arg would otherwise arm as depth 0).
+ * @param {number} pending
  * @returns {Promise<BulkPromptState>}
  */
 export async function armBulkPromptIfNeeded(pending) {
-  const n = pending == null ? await size() : Number(pending) || 0;
+  if (pending == null) {
+    throw new Error("[ers] armBulkPromptIfNeeded requires pending queue depth");
+  }
+  const n = Number(pending) || 0;
   return withLock(async () => {
     const prev = await readBulkPromptUnlocked();
     const next = evolveBulkPrompt(prev, n);
