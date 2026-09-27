@@ -2424,6 +2424,93 @@ async function scenario74_offloadResumeAndCreateSuppress() {
   console.log("  ✔ offload resume tombstone; same-URL create still queues");
 }
 
+async function scenario74b_crashSafeCreates() {
+  console.log("\n== 7.4b crash-safe upload + pull-create reclaim ==");
+  const eng = await importEngine();
+  const { POLICY, SYNC_MODE, JOB } = eng.constants;
+  await resetAll(eng.store);
+  const mock = makeMockRaindrop();
+  patchClient(eng.raindropMod, mock);
+
+  const rootName = "ERS-Verify-CrashCreate";
+  await eng.store.setConfig({
+    token: "mock",
+    rootName,
+    syncMode: SYNC_MODE.BIDIRECTIONAL,
+    defaultPolicy: POLICY.SYNC_KEEP,
+  });
+  const root = await mock.createCollection(rootName, null);
+  const bar = await mock.createCollection("Bookmarks bar", root._id);
+
+  // Upload: Raindrop create succeeded, pair never written, intent left on job.
+  const uploadUrl = "https://example.com/ers-verify-crash-upload";
+  const bm = await chrome.bookmarks.create({
+    parentId: "1",
+    title: "crash upload",
+    url: uploadUrl,
+  });
+  const orphanItem = mock._seedRich(bar._id, { link: uploadUrl, title: "crash upload" });
+  await eng.queue.enqueue(bm.id);
+  assert.equal(await eng.queue.patchJob(bm.id, { createAttemptedAt: Date.now() }), true);
+  const createsBefore = mock._calls.createRaindrop;
+  const sizeBefore = mock._raindrops.size;
+  await eng.sync.drain();
+  assert.equal(mock._calls.createRaindrop, createsBefore, "upload reclaim creates no raindrop");
+  assert.equal(mock._raindrops.size, sizeBefore, "upload reclaim does not fork");
+  assert.equal(
+    await eng.store.getRaindropId(bm.id),
+    String(orphanItem._id),
+    "upload reclaim pairs to orphan raindrop"
+  );
+  assert.equal(await eng.queue.size(), 0, "upload reclaim job removed");
+
+  // Pull-create: Edge bookmark created, pair never written, intent left on job.
+  const pullUrl = "https://example.com/ers-verify-crash-pull";
+  const pullItem = mock._seedRich(bar._id, { link: pullUrl, title: "crash pull" });
+  const pullRid = String(pullItem._id);
+  const orphanEdge = await chrome.bookmarks.create({
+    parentId: "1",
+    title: "crash pull",
+    url: pullUrl,
+  });
+  const edgeCountBefore = [...bookmarks.values()].filter((n) => n.url).length;
+  await eng.queue.enqueueJob({
+    id: `pull-${pullRid}`,
+    kind: JOB.PULL_CREATE,
+    raindropId: pullRid,
+    link: pullUrl,
+    title: "crash pull",
+    // Alias → Favorites bar (same parent as orphanEdge above).
+    relativeSegments: ["Bookmarks bar"],
+    collectionId: String(bar._id),
+    pullCreateAttemptedAt: Date.now(),
+  });
+  await eng.sync.drain();
+  const edgeCountAfter = [...bookmarks.values()].filter((n) => n.url).length;
+  assert.equal(edgeCountAfter, edgeCountBefore, "pull reclaim creates no Edge bookmark");
+  assert.equal(
+    await eng.store.getBookmarkIdForRaindrop(pullRid),
+    orphanEdge.id,
+    "pull reclaim pairs to orphan Edge bookmark"
+  );
+  assert.equal(await eng.queue.size(), 0, "pull reclaim job removed");
+
+  // Fresh upload still creates when no orphan exists.
+  const freshUrl = "https://example.com/ers-verify-crash-fresh";
+  const fresh = await chrome.bookmarks.create({
+    parentId: "1",
+    title: "fresh create",
+    url: freshUrl,
+  });
+  await eng.queue.enqueue(fresh.id);
+  const createsBeforeFresh = mock._calls.createRaindrop;
+  await eng.sync.drain();
+  assert.equal(mock._calls.createRaindrop, createsBeforeFresh + 1, "first create still POSTs");
+  assert.ok(await eng.store.getRaindropId(fresh.id), "fresh create pairs");
+
+  console.log("  ✔ createAttemptedAt / pullCreateAttemptedAt reclaim; fresh create still works");
+}
+
 async function scenario75_bulkDrainPauseAndResume() {
   console.log("\n== 7.5 Queue bulk prompt pauses drain + tick reconcile ==");
   const eng = await importEngine();
@@ -2714,6 +2801,7 @@ async function main() {
   await scenario72_deadLetterAndStorage();
   await scenario73_coalesceActivityLog();
   await scenario74_offloadResumeAndCreateSuppress();
+  await scenario74b_crashSafeCreates();
   await scenario75_bulkDrainPauseAndResume();
   await scenario76_applyMatchExistingAndImportSkip();
   await scenario77_scanImportScopeAndPullBulkGate();

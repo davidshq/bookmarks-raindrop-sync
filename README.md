@@ -65,6 +65,8 @@ Chrome and Edge do not fork collections.
 - **Import to Raindrop** — one-shot upload of existing bookmarks that are not
   synced yet.
 - **Crash-safe** — durable queue, pair map, rate-limit gates, and heartbeat drain.
+  Create intents (`createAttemptedAt` / `pullCreateAttemptedAt`) reclaim orphans
+  if the worker dies between the API create and the pair write.
 - **Activity log** — Status shows the newest 500 lines; optional long-term
   IndexedDB archive.
 

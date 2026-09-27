@@ -35,6 +35,21 @@ The extension SHALL persist the sync queue, retry metadata, and in-flight progre
 - **WHEN** the drain runs and the queue is empty
 - **THEN** it completes without making any Raindrop requests
 
+### Requirement: Crash-safe Raindrop and Edge creates
+Before calling Raindrop `create` or Edge `bookmarks.create` for an unpaired sync job, the engine SHALL persist an intent marker on that durable job (`createAttemptedAt` for Edge→Raindrop upload, `pullCreateAttemptedAt` for Raindrop→Edge pull-create). When a later drain finds the marker and no pair mapping yet, the engine SHALL attempt to reclaim an existing unpaired item by stable URL match keys (upload: Raindrop search + claim rules used for move rebind; pull-create: unpaired Edge bookmark under the resolved parent) and SHALL NOT create a second copy when reclaim succeeds. A first-time create without a prior marker SHALL still create when no reclaim applies. Move jobs SHALL continue to reclaim by URL before create even without `createAttemptedAt`; move conflict (every match owned by another live bookmark) SHALL still drop the job without creating.
+
+#### Scenario: Upload create interrupted after Raindrop POST
+- **WHEN** an upload job has `createAttemptedAt` set and no pair mapping
+- **AND** Raindrop already has a claimable item for the bookmark URL
+- **THEN** drain records the pair to that raindrop and updates Edge-owned fields
+- **AND** does not call Raindrop create again
+
+#### Scenario: Pull-create interrupted after Edge bookmark create
+- **WHEN** a pull-create job has `pullCreateAttemptedAt` set and no pair mapping
+- **AND** an unpaired Edge bookmark with a matching URL exists under the resolved parent
+- **THEN** drain records the pair to that bookmark
+- **AND** does not create another Edge bookmark for that raindrop
+
 ### Requirement: Confirm-before-act ordering
 The engine SHALL create the Raindrop bookmark and persist the `bookmarkId → raindropId` mapping BEFORE performing any policy-driven local action. No local deletion SHALL occur unless the corresponding Raindrop write has been confirmed.
 

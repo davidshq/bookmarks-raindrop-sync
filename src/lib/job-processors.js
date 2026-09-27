@@ -1,5 +1,11 @@
 // Durable queue job processors (upload, pull, delete, folder rename).
 // Invoked only from drain.js. Confirm-before-act and suppress rules live here.
+//
+// Crash-safe creates: before createRaindrop / createBookmark the job is patched
+// with createAttemptedAt / pullCreateAttemptedAt. A service-worker death between
+// the side effect and recordSynced leaves the job queued with the marker; the
+// next drain reclaims by URL instead of forking a duplicate. Same pattern as
+// offloadRaindropId for destructive offload.
 
 import {
   POLICY,
@@ -17,7 +23,6 @@ import {
   recordFolderCollection,
   getFolderCollectionId,
   clearFolderCollection,
-  hasSynced,
   recordSynced,
   getRaindropId,
   getBookmarkIdForRaindrop,
@@ -68,6 +73,7 @@ import {
 import { canCreateRaindropOnlyPath } from "./allowlist.js";
 import { computePullUpdatePlan } from "./pull-update.js";
 import { filterUrlMatchingItems, pickMoveRebindCandidate } from "./move-rebind.js";
+import { urlMatchKeys } from "./url-match.js";
 
 /** Job kinds that run in one-way mode (Edge→Raindrop). */
 const ONE_WAY_KINDS = new Set([JOB.UPLOAD, JOB.RENAME_COLLECTION]);
@@ -110,13 +116,14 @@ export async function processJob(job, ctx) {
 }
 
 /**
- * Search Raindrop for an unpaired-move URL and pick a claimable raindrop id.
+ * Search Raindrop for a URL and pick a claimable raindrop id (move rebind or
+ * crash-recovery after createAttemptedAt).
  * @param {string} bookmarkId
  * @param {string} url
  * @param {import("./raindrop.js").RaindropClient} client
  * @returns {Promise<{ kind: 'unique'|'multi'|'conflict'|'none', rid?: string, extras: number }>}
  */
-async function tryRebindMoveByUrl(bookmarkId, url, client) {
+async function tryReclaimRaindropByUrl(bookmarkId, url, client) {
   const { items } = await client.searchRaindrops(url);
   const matching = filterUrlMatchingItems(url, items);
   if (!matching.length) return { kind: "none", extras: 0 };
@@ -135,6 +142,37 @@ async function tryRebindMoveByUrl(bookmarkId, url, client) {
     return { kind: pick.kind, extras: 0 };
   }
   return { kind: pick.kind, rid: pick.rid, extras: pick.extras || 0 };
+}
+
+/**
+ * Apply a URL reclaim: record pair, optionally log extras, update Edge-owned fields.
+ * @returns {Promise<string|null>} raindrop id, or null if update 404'd
+ */
+async function applyReclaimedRaindrop(job, node, rid, extras, collectionId, pathLabel, client) {
+  await recordSynced(job.id, rid);
+  if (extras > 0) {
+    await appendLog(
+      "warn",
+      `Reclaimed with ${extras} extra Raindrop copy(ies) left: ${node.title || node.url}`
+    );
+  }
+  try {
+    await client.updateRaindrop(rid, {
+      link: node.url,
+      title: node.title,
+      collectionId,
+    });
+    if (job.reason === "move") {
+      await appendLog("info", `Moved: ${node.title || node.url} → ${pathLabel}`);
+    } else {
+      await appendLog("info", `Synced: ${node.title || node.url}`);
+    }
+    return rid;
+  } catch (err) {
+    if (!isNotFoundError(err)) throw err;
+    await forgetPairByRaindrop(rid);
+    return null;
+  }
 }
 
 async function processUpload(job, ctx) {
@@ -213,11 +251,13 @@ async function processUpload(job, ctx) {
     }
   }
 
-  // Unpaired (or stale-pair) move: relocate an existing Raindrop by URL instead
-  // of forking a second copy at the ensured destination path.
-  if (!rid && job.reason === "move") {
-    const rebound = await tryRebindMoveByUrl(job.id, node.url, client);
-    if (rebound.kind === "conflict") {
+  // Unpaired move, or crash recovery after createAttemptedAt: reclaim by URL
+  // instead of forking a second Raindrop copy.
+  const shouldReclaim =
+    !rid && (job.reason === "move" || job.createAttemptedAt != null);
+  if (shouldReclaim) {
+    const rebound = await tryReclaimRaindropByUrl(job.id, node.url, client);
+    if (rebound.kind === "conflict" && job.reason === "move") {
       await appendLog(
         "warn",
         `Skipped move create (URL already paired elsewhere): ${node.title || node.url}`
@@ -226,32 +266,22 @@ async function processUpload(job, ctx) {
       return;
     }
     if (rebound.rid) {
-      await recordSynced(job.id, rebound.rid);
-      rid = rebound.rid;
-      if (rebound.extras > 0) {
-        await appendLog(
-          "warn",
-          `Moved with ${rebound.extras} extra Raindrop copy(ies) left: ${
-            node.title || node.url
-          }`
-        );
-      }
-      try {
-        await client.updateRaindrop(rid, {
-          link: node.url,
-          title: node.title,
-          collectionId,
-        });
-        await appendLog("info", `Moved: ${node.title || node.url} → ${pathLabel}`);
-      } catch (err) {
-        if (!isNotFoundError(err)) throw err;
-        await forgetPairByRaindrop(rid);
-        rid = null;
-      }
+      rid = await applyReclaimedRaindrop(
+        job,
+        node,
+        rebound.rid,
+        rebound.extras || 0,
+        collectionId,
+        pathLabel,
+        client
+      );
     }
   }
 
-  if (!rid && !(await hasSynced(job.id))) {
+  // Create: stash intent before the POST so a SW death between create and
+  // recordSynced reclaims the orphan on retry instead of duplicating.
+  if (!rid) {
+    await queue.patchJob(job.id, { createAttemptedAt: Date.now() });
     const item = await client.createRaindrop({
       link: node.url,
       title: node.title,
@@ -432,10 +462,37 @@ async function processPullCreate(job, ctx) {
     return;
   }
 
+  const parentId = await resolveEdgeParentForMirror(relative, config.rootName);
+
+  // Crash recovery: prior drain may have created the Edge bookmark without
+  // recording the pair. Reclaim instead of creating a duplicate.
+  if (job.pullCreateAttemptedAt != null) {
+    const orphan = await findUnpairedPullCreateOrphan(parentId, job.link, rid);
+    if (orphan) {
+      await suppressCreate(orphan.id);
+      await recordSynced(orphan.id, rid);
+      await recordPulledFolderCollections({
+        getIndex,
+        index,
+        rootId,
+        collectionId,
+        relative,
+        rootName: config.rootName,
+        edgeLeafFolderId: orphan.parentId,
+      });
+      await appendLog("info", `Pulled: ${job.title || job.link}`);
+      await queue.remove(job.id);
+      return;
+    }
+  }
+
+  // Intent before createBookmark so a SW death between create and recordSynced
+  // can reclaim the orphan on retry.
+  await queue.patchJob(job.id, { pullCreateAttemptedAt: Date.now() });
+
   expectExtensionCreate(job.link);
   let node;
   try {
-    const parentId = await resolveEdgeParentForMirror(relative, config.rootName);
     node = await createBookmark({
       parentId,
       title: job.title || job.link,
@@ -462,6 +519,28 @@ async function processPullCreate(job, ctx) {
   });
   await appendLog("info", `Pulled: ${job.title || job.link}`);
   await queue.remove(job.id);
+}
+
+/**
+ * Find an Edge bookmark under parent matching link that is unpaired (or already
+ * this raindrop) — left behind when pull-create was interrupted after createBookmark.
+ * @param {string} parentId
+ * @param {string} link
+ * @param {string} raindropId
+ * @returns {Promise<{ id: string, parentId?: string, url?: string, title?: string }|null>}
+ */
+async function findUnpairedPullCreateOrphan(parentId, link, raindropId) {
+  const want = new Set(urlMatchKeys(link));
+  if (!want.size) return null;
+  const children = await getChildren(parentId);
+  for (const child of children) {
+    if (!child?.url || !child.id) continue;
+    const keys = urlMatchKeys(child.url);
+    if (!keys.some((k) => want.has(k))) continue;
+    const existingRid = await getRaindropId(child.id);
+    if (existingRid == null || existingRid === String(raindropId)) return child;
+  }
+  return null;
 }
 
 /**

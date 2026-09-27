@@ -210,8 +210,9 @@ export async function remove(id) {
 
 /**
  * Merge fields onto an existing job (same lock as enqueue/remove).
- * Used to stash `offloadRaindropId` before a local delete so a restarted
- * drain can finish the tombstone after the bookmark is already gone.
+ * Used for crash-safe intents: `offloadRaindropId` before a local delete,
+ * `createAttemptedAt` before Raindrop create, `pullCreateAttemptedAt` before
+ * Edge bookmark create — so a restarted drain can reclaim instead of duplicating.
  * @param {string} id
  * @param {Record<string, unknown>} patch
  * @returns {Promise<boolean>} false if the job is no longer queued
