@@ -2494,6 +2494,11 @@ async function scenario75_bulkDrainPauseAndResume() {
     exportBefore,
     "tick/drain never fetch export.csv"
   );
+  assert.equal(
+    (await eng.store.getStatus()).reconcileSkipReason,
+    "bulk_pause",
+    "tick stamps bulk_pause skip for Status"
+  );
 
   // Live enqueue still allowed while paused
   const extra = await chrome.bookmarks.create({
@@ -2507,6 +2512,14 @@ async function scenario75_bulkDrainPauseAndResume() {
   const snoozed = await snoozeBulkPrompt();
   assert.equal(snoozed.status, BULK_PROMPT_IDLE);
   assert.ok(snoozed.snoozedBelow != null);
+
+  // Continue drip must not leave a stale bulk_pause line when queue still busy.
+  await eng.sync.refreshReconcileSkipAfterBulkResume();
+  assert.equal(
+    (await eng.store.getStatus()).reconcileSkipReason,
+    "busy",
+    "after continue, skip becomes busy while Raindrop-bound jobs remain"
+  );
 
   // Clear phantoms so one drain finishes the real upload (proves gate lift, not
   // full resume-under-150-load). clear() does not re-arm; snooze keeps idle.
@@ -2590,8 +2603,20 @@ async function scenario76_applyMatchExistingAndImportSkip() {
   // Post-Match resolve clears needs_choice (same as Continue drip)
   storage.set(KEY.BULK_PROMPT, { status: BULK_PROMPT_NEEDS_CHOICE, snoozedBelow: null });
   assert.equal((await getBulkPrompt()).status, BULK_PROMPT_NEEDS_CHOICE);
+  storage.set(KEY.STATUS, {
+    ...(storage.get(KEY.STATUS) || {}),
+    reconcileSkipReason: "bulk_pause",
+    reconcileSkipAt: Date.now(),
+    reconcileSkipPending: 10,
+  });
   const afterMatch = await resolveBulkPromptAfterMatch();
   assert.equal(afterMatch.status, BULK_PROMPT_IDLE);
+  await eng.sync.refreshReconcileSkipAfterBulkResume();
+  assert.notEqual(
+    (await eng.store.getStatus()).reconcileSkipReason,
+    "bulk_pause",
+    "Match resume clears stale bulk_pause skip"
+  );
   assert.ok(afterMatch.snoozedBelow != null);
 
   console.log("  ✔ apply pairs only; Import skip; resolveBulkPromptAfterMatch snoozes");

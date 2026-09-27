@@ -13,6 +13,7 @@ import {
   tick,
   drain,
   reconcileNow,
+  refreshReconcileSkipAfterBulkResume,
   handleBookmarkCreated,
   handleBookmarkRemoved,
   handleBookmarkMoved,
@@ -159,6 +160,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         }
         case MSG.CONTINUE_BULK_DRIP: {
           const bulkPrompt = await snoozeBulkPrompt();
+          await refreshReconcileSkipAfterBulkResume();
           await drain();
           sendResponse({ ok: true, bulkPrompt });
           break;
@@ -201,6 +203,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           if (result?.ok) {
             // Resume drip after pairing; snooze so a still-large queue does not re-arm immediately.
             await resolveBulkPromptAfterMatch();
+            await refreshReconcileSkipAfterBulkResume();
+            await drain();
           }
           sendResponse(result);
           break;

@@ -307,7 +307,16 @@ async function refreshStatus() {
   }
 
   const skipLine = $("reconcileSkipLine");
-  const skipText = formatReconcileSkipNotice(resp.status, resp.pending);
+  // Guard: don't show bulk_pause after Continue/Match already cleared needs_choice.
+  const skipStatus =
+    resp.status?.reconcileSkipReason === "bulk_pause" &&
+    resp.bulkPrompt?.status !== BULK_PROMPT_NEEDS_CHOICE
+      ? {
+          ...resp.status,
+          reconcileSkipReason: (resp.pending ?? 0) > 0 ? "busy" : null,
+        }
+      : resp.status;
+  const skipText = formatReconcileSkipNotice(skipStatus, resp.pending);
   if (skipText) {
     skipLine.textContent = skipText;
     skipLine.classList.remove("hidden");

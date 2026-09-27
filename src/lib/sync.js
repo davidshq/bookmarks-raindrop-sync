@@ -17,7 +17,7 @@ import {
   clearReconcileSkip,
 } from "./store.js";
 import { RateLimitError } from "./raindrop.js";
-import { reconcile } from "./reconcile.js";
+import { reconcile, hasRaindropBoundQueueWork } from "./reconcile.js";
 import { handleClientError } from "./client-errors.js";
 import { drain } from "./drain.js";
 import { isBulkDrainPausedNow } from "./queue-bulk-prompt.js";
@@ -31,6 +31,19 @@ export {
   handleBookmarkMoved,
   handleBookmarkChanged,
 } from "./live-handlers.js";
+
+/**
+ * After Match / Continue drip clears needs_choice, drop a stale bulk_pause
+ * skip line. If the queue still has Raindrop work, stamp busy immediately so
+ * Status stays honest without waiting for the next heartbeat.
+ */
+export async function refreshReconcileSkipAfterBulkResume() {
+  if (await hasRaindropBoundQueueWork()) {
+    await noteReconcileSkip("busy", { pending: await queue.size() });
+    return;
+  }
+  await clearReconcileSkip();
+}
 
 /**
  * Options/popup "Pull now": force past idle cooldown, then drain.
