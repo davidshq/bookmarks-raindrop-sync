@@ -60,6 +60,21 @@ export default [
     },
   },
 
+  // Puppeteer page.evaluate / evaluateOnNewDocument callbacks run in the page;
+  // ESLint still parses them as this file's scope.
+  {
+    files: ["scripts/smoke-bulk-options.mjs"],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+        ...globals.browser,
+        chrome: "readonly",
+        // options.js may expose this; referenced only inside page.evaluate.
+        refreshStatus: "readonly",
+      },
+    },
+  },
+
   {
     files: ["**/*.{js,mjs}"],
     rules: {

@@ -91,11 +91,18 @@ npm test
 ```bash
 RAINDROP_TOKEN=xxxxx npm run test:live
 RAINDROP_TOKEN=xxxxx npm run test:integration
+# Options bulk UI (throwaway Chrome profile; needs display or xvfb-run):
+RAINDROP_TOKEN=xxxxx npm run test:smoke-bulk
 ```
 
 Mocks never touch your real bookmark tree. Integration uses
 `Favorites bar / test-edge-raindrop-sync / …` in the mock and a live Raindrop
 root `test-edge-raindrop-sync`.
+
+Bulk / export lane: pure helpers in the logic script; engine pause, Match apply,
+and Import-scope alignment in checklist scenarios **7.5–7.7**; Options banner /
+Match / Import-gate smoke via `test:smoke-bulk` (see
+[`docs/export-bulk-sync.md`](docs/export-bulk-sync.md#testing)).
 
 ## Lint & format
 

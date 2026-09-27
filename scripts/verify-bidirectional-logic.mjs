@@ -5,7 +5,13 @@
 // Or:  npm test
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { resolvePolicy, isExcluded } from "../src/lib/policy.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(__dirname, "..");
 import {
   collectionPathFromRoot,
   collectionIdAlive,
@@ -820,6 +826,24 @@ console.log("== queue-depth bulk prompt ==");
   console.log("  ✔ arm / snooze / clear watermarks / ETA / drain-pause predicate");
 }
 
+console.log("== Options HTML bulk lane controls ==");
+{
+  const html = fs.readFileSync(path.join(REPO_ROOT, "src/options/options.html"), "utf8");
+  assert.ok(html.includes('id="bulkQueueBanner"'), "Status bulk-queue banner");
+  assert.ok(html.includes('id="bulkQueueMatch"'), "Match from queue banner");
+  assert.ok(html.includes('id="bulkQueueContinue"'), "Continue drip on Status");
+  assert.ok(html.includes('id="matchExisting"'), "Manual Sync Match existing");
+  assert.ok(!/id=["'][^"']*repair[^"']*["']/i.test(html), "no repair control id");
+  assert.ok(
+    !/Other\s+favorites\s+repair/i.test(html),
+    "no Other-favorites repair product control"
+  );
+  console.log("  ✔ bulk banner + Match existing; no Other-favorites repair");
+}
+
 console.log("\nAll offline checks passed.");
 console.log("Engine scenarios: npm test runs verify-checklist.mjs next (mocked Edge).");
-console.log("Manual Edge still useful for SW lifecycle / Options UI only.");
+console.log(
+  "Bulk engine wiring: checklist 7.5–7.7 (drain pause, Match apply, scanImportScope)."
+);
+console.log("Manual Edge still useful for SW lifecycle / Options confirm dialogs only.");

@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 /**
- * Isolated checklist verification for bidirectional-sync (tasks 6.2–6.5).
+ * Isolated checklist verification for bidirectional sync, folder policies,
+ * rate-limit / dead-letter paths, and export/queue bulk-lane engine wiring
+ * (scenarios 6.2–7.7). Pure bulk heuristics / Match planner live in
+ * verify-bidirectional-logic.mjs.
  *
  * SAFETY:
  * - Edge bookmarks are 100% in-memory mocks — never touches the real Edge tree.
@@ -23,6 +26,7 @@ import {
   edgeUrls,
   findEdgeByUrl,
   bookmarks,
+  storage,
 } from "./lib/test-harness.mjs";
 
 const LIVE = process.argv.includes("--live");
@@ -86,6 +90,15 @@ function makeMockRaindrop() {
   const collections = new Map(); // id -> { _id, title, parent }
   const raindrops = new Map(); // id -> item
   const trash = new Map();
+  /** @type {{ listRaindrops: number, createRaindrop: number, deleteRaindrop: number, exportRaindropsCsv: number, getRaindrop: number, updateRaindrop: number }} */
+  const calls = {
+    listRaindrops: 0,
+    createRaindrop: 0,
+    deleteRaindrop: 0,
+    exportRaindropsCsv: 0,
+    getRaindrop: 0,
+    updateRaindrop: 0,
+  };
 
   return {
     async getUser() {
@@ -108,6 +121,7 @@ function makeMockRaindrop() {
       return item;
     },
     async createRaindrop({ link, title, collectionId }) {
+      calls.createRaindrop++;
       const _id = seq++;
       const item = {
         _id,
@@ -121,6 +135,7 @@ function makeMockRaindrop() {
       return item;
     },
     async listRaindrops(collectionId, { nested = false, page = 0, perPage = 50 } = {}) {
+      calls.listRaindrops++;
       // Trash is a system collection — items live in `_trash`, not under a real parent.
       if (Number(collectionId) === -99) {
         const all = [...trash.values()];
@@ -143,10 +158,12 @@ function makeMockRaindrop() {
       return { items, count: all.length };
     },
     async getRaindrop(id) {
+      calls.getRaindrop++;
       // Live items only — trashed ids are "gone" for delete-detection confirms.
       return raindrops.get(Number(id)) || null;
     },
     async updateRaindrop(id, patch) {
+      calls.updateRaindrop++;
       const item = raindrops.get(Number(id));
       if (!item) throw new Error(`Raindrop PUT /raindrop/${id} failed: 404`);
       if (patch.link != null) item.link = patch.link;
@@ -162,16 +179,23 @@ function makeMockRaindrop() {
       return item;
     },
     async deleteRaindrop(id) {
+      calls.deleteRaindrop++;
       const item = raindrops.get(Number(id));
       if (item) {
         raindrops.delete(Number(id));
         trash.set(Number(id), { ...item, collection: { $id: -99 } });
       }
     },
+    async exportRaindropsCsv(collectionId = 0) {
+      calls.exportRaindropsCsv++;
+      void collectionId;
+      return "id,url\n";
+    },
     // test helpers
     _collections: collections,
     _raindrops: raindrops,
     _trash: trash,
+    _calls: calls,
     _seedRich(collectionId, { link, title, tags, note }) {
       const _id = seq++;
       const item = {
@@ -2205,6 +2229,251 @@ async function scenario74_offloadResumeAndCreateSuppress() {
   console.log("  ✔ offload resume tombstone; same-URL create still queues");
 }
 
+async function scenario75_bulkDrainPauseAndResume() {
+  console.log("\n== 7.5 Queue bulk prompt pauses drain + tick reconcile ==");
+  const eng = await importEngine();
+  const { POLICY, SYNC_MODE, QUEUE_BULK_PENDING_THRESHOLD, BULK_DRAIN_PAUSED_LOG } =
+    eng.constants;
+  const {
+    getBulkPrompt,
+    snoozeBulkPrompt,
+    BULK_PROMPT_NEEDS_CHOICE,
+    BULK_PROMPT_IDLE,
+  } = eng.queueBulkPrompt;
+  await resetAll(eng.store);
+  const mock = makeMockRaindrop();
+  patchClient(eng.raindropMod, mock);
+
+  await eng.store.setConfig({
+    token: "mock",
+    rootName: "ERS-Verify-BulkPause",
+    syncMode: SYNC_MODE.BIDIRECTIONAL,
+    defaultPolicy: POLICY.SYNC_KEEP,
+  });
+  await mock.createCollection("ERS-Verify-BulkPause", null);
+
+  const bm = await chrome.bookmarks.create({
+    parentId: "1",
+    title: "ERS bulk pause real",
+    url: "https://example.com/ers-bulk-pause",
+  });
+  const phantomIds = Array.from({ length: QUEUE_BULK_PENDING_THRESHOLD - 1 }, (_, i) => `phantom-bulk-${i}`);
+  await eng.queue.enqueueMany(phantomIds);
+  await eng.queue.enqueue(bm.id);
+  assert.equal(await eng.queue.size(), QUEUE_BULK_PENDING_THRESHOLD);
+
+  const armed = await getBulkPrompt();
+  assert.equal(armed.status, BULK_PROMPT_NEEDS_CHOICE, "enqueue at threshold arms needs_choice");
+
+  const pendingBefore = await eng.queue.size();
+  const createBefore = mock._calls.createRaindrop;
+  const listBefore = mock._calls.listRaindrops;
+  const exportBefore = mock._calls.exportRaindropsCsv;
+
+  await eng.sync.drain();
+  assert.equal(mock._calls.createRaindrop, createBefore, "paused drain creates no raindrops");
+  assert.equal(mock._raindrops.size, 0, "no raindrops while paused");
+  assert.equal(await eng.queue.size(), pendingBefore, "jobs stay queued while paused");
+  assert.equal((await getBulkPrompt()).status, BULK_PROMPT_NEEDS_CHOICE);
+
+  let log = await eng.store.getLog();
+  assert.ok(
+    log.some((e) => e.message === BULK_DRAIN_PAUSED_LOG),
+    "pause writes coalesced activity log line"
+  );
+
+  await eng.sync.drain();
+  log = await eng.store.getLog();
+  const pauseRows = log.filter((e) => e.message === BULK_DRAIN_PAUSED_LOG);
+  assert.equal(pauseRows.length, 1, "second paused drain coalesces pause log");
+  assert.ok(pauseRows[0].ats?.length >= 2, "second paused drain coalesces");
+
+  await eng.sync.tick();
+  assert.equal(
+    mock._calls.listRaindrops,
+    listBefore,
+    "tick skips reconcile listing while needs_choice"
+  );
+  assert.equal(
+    mock._calls.exportRaindropsCsv,
+    exportBefore,
+    "tick/drain never fetch export.csv"
+  );
+
+  // Live enqueue still allowed while paused
+  const extra = await chrome.bookmarks.create({
+    parentId: "1",
+    title: "ERS while paused",
+    url: "https://example.com/ers-bulk-while-paused",
+  });
+  await eng.queue.enqueue(extra.id);
+  assert.ok((await eng.queue.size()) > pendingBefore, "live events may still enqueue");
+
+  const snoozed = await snoozeBulkPrompt();
+  assert.equal(snoozed.status, BULK_PROMPT_IDLE);
+  assert.ok(snoozed.snoozedBelow != null);
+
+  // Clear phantoms so one drain finishes the real upload (proves gate lift, not
+  // full resume-under-150-load). clear() does not re-arm; snooze keeps idle.
+  await eng.queue.clear();
+  await eng.queue.enqueue(bm.id);
+  assert.equal((await getBulkPrompt()).status, BULK_PROMPT_IDLE);
+
+  await eng.sync.drain();
+  assert.equal(mock._raindrops.size, 1, "after continue drip, upload proceeds");
+  assert.ok(await eng.store.hasSynced(bm.id), "real bookmark paired after resume");
+
+  console.log("  ✔ arm / pause drain+tick / coalesce log / continue drip resumes");
+}
+
+async function scenario76_applyMatchExistingAndImportSkip() {
+  console.log("\n== 7.6 Match apply records pairs; Import skips matched ==");
+  const eng = await importEngine();
+  const { POLICY, SYNC_MODE, KEY } = eng.constants;
+  const { applyMatchExisting } = eng.matchExisting;
+  const {
+    resolveBulkPromptAfterMatch,
+    BULK_PROMPT_NEEDS_CHOICE,
+    BULK_PROMPT_IDLE,
+    getBulkPrompt,
+  } = eng.queueBulkPrompt;
+  await resetAll(eng.store);
+  const mock = makeMockRaindrop();
+  patchClient(eng.raindropMod, mock);
+
+  await eng.store.setConfig({
+    token: "mock",
+    rootName: "ERS-Verify-MatchApply",
+    syncMode: SYNC_MODE.BIDIRECTIONAL,
+    defaultPolicy: POLICY.SYNC_KEEP,
+  });
+
+  const matchedBm = await chrome.bookmarks.create({
+    parentId: "1",
+    title: "ERS match me",
+    url: "https://example.com/ers-match-apply",
+  });
+  const unpairedBm = await chrome.bookmarks.create({
+    parentId: "1",
+    title: "ERS still unpaired",
+    url: "https://example.com/ers-match-unpaired",
+  });
+  const goneId = "bm-gone-stale";
+  await eng.store.recordSynced(goneId, "77");
+
+  const createBefore = mock._calls.createRaindrop;
+  const deleteBefore = mock._calls.deleteRaindrop;
+  const result = await applyMatchExisting([
+    { bookmarkId: matchedBm.id, raindropId: "42" },
+    { bookmarkId: goneId, raindropId: "99" }, // not in live Edge tree
+    { bookmarkId: matchedBm.id, raindropId: "42" }, // duplicate in plan
+  ]);
+  assert.equal(result.ok, true);
+  assert.equal(result.paired, 1, "only live unambiguous rows recorded");
+  assert.equal(await eng.store.getRaindropId(matchedBm.id), "42");
+  assert.equal(await eng.store.getBookmarkIdForRaindrop("42"), matchedBm.id);
+  assert.equal(mock._calls.createRaindrop, createBefore, "Match apply creates no raindrops");
+  assert.equal(mock._calls.deleteRaindrop, deleteBefore, "Match apply deletes no raindrops");
+  assert.equal(mock._raindrops.size, 0);
+
+  // Conflict: already paired to different id — apply must not overwrite
+  const conflicted = await applyMatchExisting([{ bookmarkId: matchedBm.id, raindropId: "999" }]);
+  assert.equal(conflicted.paired, 0);
+  assert.equal(await eng.store.getRaindropId(matchedBm.id), "42", "conflict does not overwrite");
+
+  const scope = await eng.backfill.scanImportScope();
+  assert.ok(!scope.unpairedIds.includes(matchedBm.id), "matched id not in Import unpaired");
+  assert.ok(scope.unpairedIds.includes(unpairedBm.id), "unpaired still enqueueable");
+  assert.ok(scope.paired >= 1);
+
+  const { queued } = await eng.backfill.startBackfill();
+  assert.equal(queued, 1, "Import enqueues only unpaired");
+  assert.equal(await eng.queue.size(), 1);
+  const jobs = await eng.queue.list();
+  assert.equal(jobs[0].id, unpairedBm.id);
+
+  // Post-Match resolve clears needs_choice (same as Continue drip)
+  storage.set(KEY.BULK_PROMPT, { status: BULK_PROMPT_NEEDS_CHOICE, snoozedBelow: null });
+  assert.equal((await getBulkPrompt()).status, BULK_PROMPT_NEEDS_CHOICE);
+  const afterMatch = await resolveBulkPromptAfterMatch();
+  assert.equal(afterMatch.status, BULK_PROMPT_IDLE);
+  assert.ok(afterMatch.snoozedBelow != null);
+
+  console.log("  ✔ apply pairs only; Import skip; resolveBulkPromptAfterMatch snoozes");
+}
+
+async function scenario77_scanImportScopeAndPullBulkGate() {
+  console.log("\n== 7.7 scanImportScope exclude/pair rules + Pull one-way gate ==");
+  const eng = await importEngine();
+  const { POLICY, SYNC_MODE } = eng.constants;
+  await resetAll(eng.store);
+
+  await eng.store.setConfig({
+    token: "mock",
+    rootName: "ERS-Verify-Scope",
+    syncMode: SYNC_MODE.ONE_WAY,
+    defaultPolicy: POLICY.SYNC_KEEP,
+  });
+
+  const excl = await chrome.bookmarks.create({
+    parentId: "1",
+    title: "ERS-Scope-Exclude",
+  });
+  await eng.store.setOverride(excl.id, POLICY.EXCLUDE, "Favorites bar / ERS-Scope-Exclude");
+  await chrome.bookmarks.create({
+    parentId: excl.id,
+    title: "secret",
+    url: "https://example.com/ers-scope-excluded",
+  });
+  const keep = await chrome.bookmarks.create({
+    parentId: "1",
+    title: "ERS scope keep",
+    url: "https://example.com/ers-scope-keep",
+  });
+  const paired = await chrome.bookmarks.create({
+    parentId: "1",
+    title: "ERS scope paired",
+    url: "https://example.com/ers-scope-paired",
+  });
+  await eng.store.recordSynced(paired.id, "555");
+
+  const scope = await eng.backfill.scanImportScope();
+  assert.equal(
+    scope.unpairedIds.includes(keep.id),
+    true,
+    "non-excluded unpaired is in Import scope"
+  );
+  assert.equal(
+    scope.unpairedIds.includes(paired.id),
+    false,
+    "already paired excluded from unpairedIds"
+  );
+  const excludedBm = [...bookmarks.values()].find(
+    (n) => n.url === "https://example.com/ers-scope-excluded"
+  );
+  assert.ok(excludedBm);
+  assert.equal(scope.unpairedIds.includes(excludedBm.id), false, "exclude not in unpaired");
+  assert.equal(scope.paired, 1);
+  assert.ok(scope.edgeScanned >= 3, "edgeScanned counts URL bookmarks in tree");
+
+  const pullOneWay = await eng.bulkCandidate.assessPullBulkCandidate();
+  assert.equal(pullOneWay.suggest, false, "Pull bulk gate off in one-way");
+  assert.equal(pullOneWay.edgeScanned, 0);
+
+  await eng.store.setConfig({
+    token: "mock",
+    rootName: "ERS-Verify-Scope",
+    syncMode: SYNC_MODE.BIDIRECTIONAL,
+    defaultPolicy: POLICY.SYNC_KEEP,
+  });
+  // Small library: should not suggest on Pull either
+  const pullSmall = await eng.bulkCandidate.assessPullBulkCandidate();
+  assert.equal(pullSmall.suggest, false, "small bidirectional library skips Pull bulk prompt");
+  assert.ok(pullSmall.edgeScanned >= 3);
+
+  console.log("  ✔ scanImportScope matches Import rules; Pull one-way never suggests");
+}
+
 async function main() {
   console.log(
     `Mode: ${USE_LIVE ? "mock Edge + live Raindrop (ERS-Verify-* only)" : "fully mocked (no real Edge/Raindrop writes)"}`
@@ -2225,6 +2494,9 @@ async function main() {
   await scenario72_deadLetterAndStorage();
   await scenario73_coalesceActivityLog();
   await scenario74_offloadResumeAndCreateSuppress();
+  await scenario75_bulkDrainPauseAndResume();
+  await scenario76_applyMatchExistingAndImportSkip();
+  await scenario77_scanImportScopeAndPullBulkGate();
   await optionalLiveSmoke();
 
   console.log("\nAll checklist scenarios passed.");

@@ -169,7 +169,22 @@ export async function importEngine() {
   const sync = await import(`${base}/sync.js`);
   const reconcile = await import(`${base}/reconcile.js`);
   const raindropMod = await import(`${base}/raindrop.js`);
-  return { constants, store, queue, sync, reconcile, raindropMod };
+  const backfill = await import(`${base}/backfill.js`);
+  const matchExisting = await import(`${base}/match-existing.js`);
+  const queueBulkPrompt = await import(`${base}/queue-bulk-prompt.js`);
+  const bulkCandidate = await import(`${base}/bulk-candidate.js`);
+  return {
+    constants,
+    store,
+    queue,
+    sync,
+    reconcile,
+    raindropMod,
+    backfill,
+    matchExisting,
+    queueBulkPrompt,
+    bulkCandidate,
+  };
 }
 
 export function patchClient(raindropMod, clientImpl) {
