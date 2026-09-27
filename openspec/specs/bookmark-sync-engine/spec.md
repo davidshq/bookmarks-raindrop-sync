@@ -185,6 +185,32 @@ When sync mode is `bidirectional` and a reconcile cycle reaches finish (scoped l
 - **THEN** the existing capped confirm-GET path may still detect absence and enqueue `delete-edge`
 - **AND** Trash listing alone is not required to have observed that id
 
+### Requirement: Park out-of-scope alive confirm candidates
+When sync mode is `bidirectional` and a capped delete-confirm GET shows a mapped raindrop is still alive (non-trash) but its collection is outside the scoped listing—not under the sync root and not under an active outside-root allowlist—the engine SHALL park that raindrop id so it is excluded from future missing-raindrop confirm candidates. Parking SHALL keep the Edge bookmark and pair mapping. The engine SHALL unpark a raindrop id when it appears again in a completed scoped listing (`seen` set). Soft-deletes of parked pairs SHALL remain discoverable via Trash listing. Confirm GET SHALL still enqueue `delete-edge` when a non-parked candidate is confirmed absent or trashed.
+
+#### Scenario: Alive outside scope is parked after confirm GET
+- **WHEN** reconcile finishes a scoped listing
+- **AND** a mapped raindrop is absent from that listing
+- **AND** a confirm GET returns a living item whose collection is outside the sync root and outside the active allowlist (or allowlist is empty)
+- **THEN** the engine parks that raindrop id
+- **AND** does not enqueue `delete-edge` for it
+- **AND** subsequent finish passes do not spend confirm-GET budget on that id while it remains parked
+
+#### Scenario: Parked id unparks when listed again
+- **WHEN** a parked raindrop id appears in a completed scoped listing
+- **THEN** the engine removes it from the parked set
+- **AND** it may become a delete-confirm candidate again if absent from a later listing
+
+#### Scenario: Parked soft-delete still via Trash
+- **WHEN** a parked raindrop id later appears in Raindrop Trash during reconcile finish
+- **THEN** the engine still enqueues `delete-edge` for that pair
+
+#### Scenario: In-scope alive miss is not parked
+- **WHEN** a confirm GET returns a living item whose collection is under the sync root or under an active allowlist
+- **AND** the id was absent from this cycle's listing
+- **THEN** the engine does not park that id
+- **AND** does not enqueue `delete-edge` from that alive confirm
+
 ### Requirement: Bidirectional pair map and tombstones
 The engine SHALL persist bidirectional pair mappings (`bookmarkId ↔ raindropId`) and tombstones for confirmed user deletes so reconcile does not resurrect deleted items. Extension-authored creates and policy-driven removes SHALL be suppressible so they do not enqueue opposing sync jobs.
 
@@ -233,20 +259,36 @@ The engine SHALL persist bidirectional pair mappings (`bookmarkId ↔ raindropId
 - **AND** the resulting `onChanged` does not echo an Edge→Raindrop `rename-collection`
 
 ### Requirement: Periodic reconcile trigger
-When sync mode is `bidirectional`, the engine SHALL run Raindrop reconciliation on the alarm heartbeat (and when explicitly requested) to discover new raindrops and remotely deleted raindrops under the configured root. The minimum gap between *completed* heartbeat reconcile cycles SHALL be the user-configured quiet-time interval (default 15 minutes). In-progress cursors always continue; manual "Pull now" bypasses the quiet-time interval. Heartbeat starts of a new cycle SHALL also honor traffic-aware deferral defined for this engine.
+When sync mode is `bidirectional`, the engine SHALL run Raindrop reconciliation on the alarm heartbeat (and when explicitly requested) to discover new raindrops and remotely deleted raindrops under the configured root. The minimum gap between *settled completed* heartbeat reconcile cycles SHALL be the user-configured quiet-time interval (default 1 minute). A finished cycle is settled only when no unparked missing-raindrop confirm candidates remain deferred after that finish pass. Unsettled finishes SHALL NOT arm quiet-time cooldown; subsequent heartbeats MAY start a new cycle (subject to traffic-aware deferral and rate-limit pause) until a settled finish occurs. In-progress cursors always continue; manual "Pull now" bypasses the quiet-time interval. Heartbeat starts of a new cycle SHALL also honor traffic-aware deferral defined for this engine.
 
 #### Scenario: Heartbeat reconcile
 - **WHEN** bidirectional mode is on and the alarm heartbeat fires
-- **AND** the quiet-time interval has elapsed
+- **AND** the quiet-time interval has elapsed since the last settled finish (or catch-up is unsettled)
 - **AND** traffic-aware deferral does not apply
 - **THEN** reconcile runs for the configured root tree subject to rate-limit backoff
 
-#### Scenario: Configured quiet-time cooldown
-- **WHEN** a bidirectional reconcile cycle has completed successfully
+#### Scenario: Configured quiet-time cooldown after settled finish
+- **WHEN** a bidirectional reconcile cycle has completed successfully and settled
 - **AND** the heartbeat fires again before the configured quiet-time interval elapses
 - **AND** no in-progress cursor remains
 - **THEN** the engine skips starting a new Raindrop listing pass with reason `cooldown`
 - **AND** a user-triggered "Pull now" still runs immediately (subject to rate-limit pause)
+
+#### Scenario: Unsettled finish skips cooldown
+- **WHEN** a bidirectional reconcile cycle finishes with unparked missing-raindrop confirms still deferred
+- **AND** the durable queue has no Raindrop-bound jobs
+- **AND** the heartbeat fires again before the configured quiet-time interval would have elapsed from `lastRunAt`
+- **THEN** the engine does not skip with reason `cooldown`
+- **AND** it starts or continues reconcile subject to rate-limit pause
+
+### Requirement: Honest deferred confirm messaging
+When reconcile finish postpones unparked missing-raindrop confirm GETs because of the per-cycle confirm cap, the activity log SHALL state that work continues on a later cycle due to the confirm budget, and SHALL NOT attribute that postponement to Raindrop rate-limit exhaustion unless a rate-limit pause is actually active.
+
+#### Scenario: Postpone log is not rate-limit blame
+- **WHEN** finish defers N > 0 missing-raindrop confirms under the per-cycle confirm cap
+- **AND** no Raindrop rate-limit pause is active
+- **THEN** the activity log mentions postponed confirms and continuing next cycle
+- **AND** the message does not claim “rate-limit budget”
 
 ### Requirement: Traffic-aware heartbeat reconcile deferral
 When sync mode is `bidirectional` and the heartbeat would start a *new* Raindrop reconcile cycle (no in-progress cursor), the engine SHALL skip starting that cycle when the durable queue still contains jobs that perform Raindrop API work. The skip result SHALL use machine-readable reason `busy`. In-progress reconcile cursors SHALL continue on subsequent heartbeats regardless of queue contention. A user-triggered "Pull now" SHALL NOT be deferred for queue contention (it SHALL still honor the global rate-limit pause). Low rate-limit remaining is handled by the existing hard pause (`rateLimitedUntil`), not a separate durable soft-busy snapshot.

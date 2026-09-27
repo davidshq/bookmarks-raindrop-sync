@@ -69,13 +69,18 @@ When sync mode is `bidirectional`, Raindrop→Edge folder title updates SHALL de
 - **THEN** reconcile does not rename an arbitrary Edge folder to match that collection title
 
 ### Requirement: Configurable quiet-time reconcile cadence
-When sync mode is `bidirectional`, periodic Raindrop→Edge reconcile on the heartbeat SHALL use the user-configured quiet-time interval (default 15 minutes) as the minimum gap between completed cycles, and SHALL defer starting a new cycle while competing Raindrop traffic is active as defined by the bookmark-sync-engine traffic-aware deferral rules. Manual "Pull now" SHALL still trigger an immediate reconcile subject to the global rate-limit pause.
+When sync mode is `bidirectional`, periodic Raindrop→Edge reconcile on the heartbeat SHALL use the user-configured quiet-time interval (default 1 minute) as the minimum gap between *settled* completed cycles, and SHALL defer starting a new cycle while competing Raindrop traffic is active as defined by the bookmark-sync-engine traffic-aware deferral rules. Quiet-time cooldown SHALL NOT apply after a finish that still has deferred unparked missing-raindrop confirms. Manual "Pull now" SHALL still trigger an immediate reconcile subject to the global rate-limit pause.
 
 #### Scenario: Faster quiet polling when configured
 - **WHEN** bidirectional mode is on and the user has set the reconcile interval to 1 minute
 - **AND** the queue is idle
-- **AND** a reconcile cycle completed at least one minute ago
+- **AND** a settled reconcile cycle completed at least one minute ago
 - **THEN** the next heartbeat starts a new reconcile listing pass
+
+#### Scenario: Catch-up continues without quiet nap
+- **WHEN** bidirectional mode is on and a reconcile finish deferred unparked missing-raindrop confirms
+- **AND** the durable queue is idle
+- **THEN** the next heartbeat does not skip reconcile solely for quiet-time cooldown
 
 #### Scenario: Remote deletes wait while uploads drain
 - **WHEN** bidirectional mode is on and raindrops were deleted remotely
@@ -146,6 +151,16 @@ When sync mode is `bidirectional` and reconcile detects that a mapped raindrop w
 - **THEN** the paired Edge bookmark is removed
 - **AND** a tombstone is recorded
 - **AND** the pair mapping is removed
+
+### Requirement: Out-of-scope living pairs are not remote deletes
+When sync mode is `bidirectional`, a mapped raindrop that remains alive outside the sync scope (not under the configured sync root and not covered by the active outside-root allowlist) SHALL NOT be treated as a remote delete solely because it is absent from the scoped listing. After confirm GET establishes that out-of-scope living state, the system SHALL stop repeatedly treating that id as a missing-raindrop delete candidate while keeping the Edge bookmark and pair until Trash or a later absence confirm for a non-parked candidate applies.
+
+#### Scenario: Cleared allowlist does not delete Edge for living outside-root pair
+- **WHEN** a pair was established for a raindrop outside the sync root under an allowlist
+- **AND** the allowlist no longer includes that collection
+- **AND** the raindrop still exists outside the sync root
+- **THEN** reconcile does not remove the Edge bookmark as a remote delete
+- **AND** after confirm GET parks the id, quiet-time cycles do not keep re-confirming that same id forever
 
 ### Requirement: Policy-driven local cleanup does not delete Raindrop
 When the extension removes an Edge bookmark because of `sync-and-delete` after a confirmed upload, that removal SHALL NOT cause a Raindrop delete, even if sync mode is `bidirectional`. The `edge-offload` tombstone SHALL be recorded before the Edge bookmark is removed, and the raindrop id SHALL be stored on the upload job before that removal. The pair mapping SHALL be cleared after the Edge remove. If a later drain finds the Edge bookmark already gone and the job carries that raindrop id, the engine SHALL still record the tombstone and clear the pair instead of dropping the job. Reconcile SHALL NOT pull that raindrop back into Edge.

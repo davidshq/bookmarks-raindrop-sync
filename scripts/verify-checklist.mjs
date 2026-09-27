@@ -1033,7 +1033,7 @@ async function scenario67_raindropFolderAllowlist() {
     "drop lands in original outside-root collection (not Edge/Other favorites/Raindrop/…)"
   );
 
-  // Clear allowlist: outside-root pair must still survive (getRaindrop confirm).
+  // Clear allowlist: outside-root pair must still survive; confirm parks it.
   await eng.store.setConfig({
     raindropFolderAllowlist: {},
   });
@@ -1047,9 +1047,14 @@ async function scenario67_raindropFolderAllowlist() {
     (await eng.store.getPairs()).byRaindrop[String(indieItem._id)],
     "pair still mapped after clearing allowlist"
   );
+  const parkedAfterClear = await eng.store.getParkedAliveIds();
+  assert.ok(
+    parkedAfterClear.has(String(indieItem._id)),
+    "cleared-allowlist outside-root alive is parked"
+  );
 
   console.log(
-    "  ✔ allowlist skip/allow/empty-folder/Edge-bypass/empty-preserves-mode/prune/legacy/outside-root/upload-roundtrip/clear"
+    "  ✔ allowlist skip/allow/empty-folder/Edge-bypass/empty-preserves-mode/prune/legacy/outside-root/upload-roundtrip/clear/park"
   );
 }
 
@@ -1158,7 +1163,7 @@ async function scenario68_rateLimitBudget() {
   const due = await eng.queue.due(Date.now());
   assert.equal(due.length, 0, "due jobs deferred past the pause");
 
-  // Heartbeat cooldown: after a completed cycle, force:false skips re-listing.
+  // Heartbeat cooldown: after a *settled* finish, force:false skips re-listing.
   await eng.store.clearRateLimit();
   await eng.queue.clear(); // leftover deferred upload must not look like traffic-busy
   await eng.store.setReconcileState({
@@ -1167,6 +1172,8 @@ async function scenario68_rateLimitBudget() {
     seenAcc: null,
     running: false,
     lastRunAt: Date.now(),
+    lastSettledAt: Date.now(),
+    unsettledConfirmCatchUp: false,
     lastError: null,
   });
   const cooled = await eng.reconcile.reconcile({ force: false });
@@ -1174,6 +1181,21 @@ async function scenario68_rateLimitBudget() {
   assert.equal(cooled.reason, "cooldown", "skip reason is cooldown");
   const forced = await eng.reconcile.reconcile({ force: true });
   assert.notEqual(forced.skipped, true, "manual reconcile bypasses cooldown");
+
+  // Unsettled confirm catch-up: no cooldown even if lastRunAt is fresh.
+  await eng.store.setReconcileState({
+    cursorPage: 0,
+    outsideCursor: null,
+    seenAcc: null,
+    running: false,
+    lastRunAt: Date.now(),
+    lastSettledAt: Date.now(),
+    unsettledConfirmCatchUp: true,
+    lastError: null,
+  });
+  const catchUp = await eng.reconcile.reconcile({ force: false });
+  assert.notEqual(catchUp.reason, "cooldown", "unsettled catch-up skips cooldown");
+  assert.notEqual(catchUp.skipped, true, "unsettled catch-up starts listing");
 
   // Adaptive: quiet install honors a short configured interval.
   await eng.store.setConfig({ reconcileIntervalMinutes: 1 });
@@ -1183,6 +1205,8 @@ async function scenario68_rateLimitBudget() {
     seenAcc: null,
     running: false,
     lastRunAt: Date.now() - 90_000,
+    lastSettledAt: Date.now() - 90_000,
+    unsettledConfirmCatchUp: false,
     lastError: null,
   });
   const quiet = await eng.reconcile.reconcile({ force: false });
@@ -1196,6 +1220,8 @@ async function scenario68_rateLimitBudget() {
     seenAcc: null,
     running: false,
     lastRunAt: Date.now() - 90_000,
+    lastSettledAt: Date.now() - 90_000,
+    unsettledConfirmCatchUp: false,
     lastError: null,
   });
   const queuedBusy = await eng.reconcile.reconcile({ force: false });
@@ -1213,6 +1239,8 @@ async function scenario68_rateLimitBudget() {
     seenAcc: ["1"],
     running: false,
     lastRunAt: Date.now() - 90_000,
+    lastSettledAt: Date.now() - 90_000,
+    unsettledConfirmCatchUp: false,
     lastError: null,
   });
   const midCycle = await eng.reconcile.reconcile({ force: false });
@@ -1233,7 +1261,8 @@ async function scenario68_rateLimitBudget() {
   assert.equal(await eng.store.isRateLimited(), true, "reconcileNow 429 sets global pause");
 
   console.log(
-    "  ✔ global gate, capped confirms, round-robin, skip reasons, cooldown, queue-busy, reconcileNow gate"
+    "  ✔ global gate, capped confirms, round-robin, skip reasons, settled cooldown, " +
+      "unsettled catch-up, queue-busy, reconcileNow gate"
   );
 }
 
@@ -1317,6 +1346,96 @@ async function scenario68b_trashFastPath() {
   );
 
   console.log("  ✔ paired trash → delete-edge; unpaired ignored; confirm fallback for hard delete");
+}
+
+async function scenario68c_parkOutOfScopeAlives() {
+  console.log("\n== 6.8c Park out-of-scope alive confirm candidates ==");
+  const eng = await importEngine();
+  const { POLICY, SYNC_MODE, JOB } = eng.constants;
+  await resetAll(eng.store);
+
+  const mock = makeMockRaindrop();
+  let getRaindropCalls = 0;
+  const origGet = mock.getRaindrop.bind(mock);
+  mock.getRaindrop = async (id) => {
+    getRaindropCalls++;
+    return origGet(id);
+  };
+  patchClient(eng.raindropMod, mock);
+
+  const rootName = "ERS-Verify-Park";
+  await eng.store.setConfig({
+    token: "mock",
+    rootName,
+    syncMode: SYNC_MODE.BIDIRECTIONAL,
+    defaultPolicy: POLICY.SYNC_KEEP,
+  });
+  await mock.createCollection(rootName, null);
+  const outside = await mock.createCollection("ParkOutside", null);
+  const item = mock._seedRich(outside._id, {
+    link: "https://example.com/ers-park-outside",
+    title: "park-outside",
+  });
+  await eng.store.recordSynced("bm-park-outside", String(item._id));
+
+  // Absent from scoped listing (empty allowlist) + alive → park.
+  getRaindropCalls = 0;
+  await eng.reconcile.reconcile({ force: true });
+  assert.ok(
+    (await eng.store.getParkedAliveIds()).has(String(item._id)),
+    "out-of-scope alive parked after confirm GET"
+  );
+  assert.equal(
+    (await eng.queue.list()).filter((j) => j.kind === JOB.DELETE_EDGE).length,
+    0,
+    "park does not enqueue delete-edge"
+  );
+  assert.ok(getRaindropCalls >= 1, "first cycle spends a confirm GET to park");
+
+  // Next cycle must not re-confirm the parked id.
+  getRaindropCalls = 0;
+  await eng.reconcile.reconcile({ force: true });
+  assert.equal(getRaindropCalls, 0, "parked id skipped on subsequent confirm window");
+  assert.ok(
+    (await eng.store.getParkedAliveIds()).has(String(item._id)),
+    "park persists across cycles"
+  );
+
+  // Soft-delete while parked → Trash fast path still deletes Edge.
+  await mock.deleteRaindrop(item._id);
+  assert.ok(mock._trash.has(Number(item._id)), "mock soft-delete lands in Trash");
+  await eng.reconcile.reconcile({ force: true });
+  assert.ok(
+    (await eng.queue.list()).some(
+      (j) => j.kind === JOB.DELETE_EDGE && String(j.raindropId) === String(item._id)
+    ),
+    "Trash fast path still deletes parked pair"
+  );
+
+  // In-scope alive under root is not parked when listed (seen → not a candidate).
+  await resetAll(eng.store);
+  const mock2 = makeMockRaindrop();
+  patchClient(eng.raindropMod, mock2);
+  await eng.store.setConfig({
+    token: "mock",
+    rootName,
+    syncMode: SYNC_MODE.BIDIRECTIONAL,
+    defaultPolicy: POLICY.SYNC_KEEP,
+  });
+  const root2 = await mock2.createCollection(rootName, null);
+  const inScope = mock2._seedRich(root2._id, {
+    link: "https://example.com/ers-park-inscope",
+    title: "park-inscope",
+  });
+  await eng.store.recordSynced("bm-park-inscope", String(inScope._id));
+  await eng.reconcile.reconcile({ force: true });
+  assert.equal(
+    (await eng.store.getParkedAliveIds()).has(String(inScope._id)),
+    false,
+    "in-scope listed pair is not parked"
+  );
+
+  console.log("  ✔ park out-of-scope; skip re-confirm; Trash still deletes; in-scope not parked");
 }
 
 async function scenario69_bookmarkMoves() {
@@ -2795,6 +2914,7 @@ async function main() {
   await scenario67_raindropFolderAllowlist();
   await scenario68_rateLimitBudget();
   await scenario68b_trashFastPath();
+  await scenario68c_parkOutOfScopeAlives();
   await scenario69_bookmarkMoves();
   await scenario70_onChangedAndFolderRename();
   await scenario71_tombstonePruneAndPullUpdate();

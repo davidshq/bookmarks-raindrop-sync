@@ -109,7 +109,7 @@ export async function getStorageUsage() {
 // by setConfig, never by a read.
 
 /**
- * Clamp quiet-time reconcile interval to [1, 60] minutes; invalid → default 15.
+ * Clamp quiet-time reconcile interval to [1, 60] minutes; invalid → default 1.
  * @param {unknown} value
  * @returns {number}
  */
@@ -481,11 +481,24 @@ export async function getReconcileState() {
     cursorPage: 0,
     running: false,
     lastRunAt: null,
+    /**
+     * Epoch ms of last *settled* finish (no deferred unparked confirms).
+     * Quiet-time cooldown keys off this (not lastRunAt). Missing → treat as
+     * lastRunAt at the cooldown gate for upgrade continuity.
+     */
+    lastSettledAt: null,
+    /** True when finish deferred unparked missing-raindrop confirms. */
+    unsettledConfirmCatchUp: false,
     lastError: null,
     /** Rotating index into delete-confirm candidates (survives completed cycles). */
     aliveConfirmOffset: 0,
     /** Rotating index into tombstone-prune candidates (survives completed cycles). */
     tombstonePruneOffset: 0,
+    /**
+     * Raindrop ids confirmed alive outside scoped listing — skip delete-confirm
+     * until they reappear in seenAcc (moved back into scope / re-allowlisted).
+     */
+    parkedAliveIds: [],
   });
 }
 
@@ -493,6 +506,47 @@ export async function setReconcileState(patch) {
   const next = { ...(await getReconcileState()), ...patch };
   await write(KEY.RECONCILE, next);
   return next;
+}
+
+/** @returns {Promise<Set<string>>} */
+export async function getParkedAliveIds() {
+  const state = await getReconcileState();
+  return new Set((state.parkedAliveIds || []).map(String));
+}
+
+/**
+ * Merge raindrop ids into the parked-alive set.
+ * @param {Iterable<string|number>} ids
+ */
+export async function parkAliveIds(ids) {
+  const add = [...ids].map(String).filter(Boolean);
+  if (!add.length) return;
+  const next = await getParkedAliveIds();
+  for (const id of add) next.add(id);
+  await setReconcileState({ parkedAliveIds: [...next] });
+}
+
+/**
+ * Remove raindrop ids from the parked-alive set.
+ * @param {Iterable<string|number>} ids
+ */
+export async function unparkAliveIds(ids) {
+  const remove = new Set([...ids].map(String));
+  if (!remove.size) return;
+  const next = await getParkedAliveIds();
+  let changed = false;
+  for (const id of remove) {
+    if (next.delete(id)) changed = true;
+  }
+  if (changed) await setReconcileState({ parkedAliveIds: [...next] });
+}
+
+/**
+ * Replace parked-alive set (e.g. after pruning unpaired ids).
+ * @param {Iterable<string|number>} ids
+ */
+export async function setParkedAliveIds(ids) {
+  await setReconcileState({ parkedAliveIds: [...new Set([...ids].map(String))] });
 }
 
 /* ---- collection-path cache: "Edge/Work/ProjectA" -> collectionId ---- */
@@ -655,7 +709,7 @@ export function formatReconcileSkipNotice(status, pendingFallback) {
       );
     case "cooldown":
       return (
-        `Raindrop check on quiet-time cooldown` +
+        `Raindrop check on quiet-time cooldown after a settled check` +
         (n != null ? ` (${n} pending in queue)` : "") +
         `. Wait for the interval, or use Pull now.`
       );

@@ -12,9 +12,10 @@
 // Rate-limit posture: shared page budget for root + outside-root listing; capped
 // GET /raindrop confirms shared by delete detection + tombstone prune; stop early
 // when the client reports low X-RateLimit-Remaining (throws RateLimitError).
-// Heartbeat starts a *new* cycle only when the configured quiet-time interval has
-// elapsed and the durable queue has no Raindrop-bound jobs; in-progress cursors
-// always continue. Pull now (force) bypasses interval and queue-busy.
+// Heartbeat starts a *new* cycle only when the quiet-time interval has elapsed
+// since the last *settled* finish (or confirm catch-up is still unsettled) and
+// the durable queue has no Raindrop-bound jobs; in-progress cursors always
+// continue. Pull now (force) bypasses interval and queue-busy.
 
 import {
   SYNC_MODE,
@@ -120,15 +121,19 @@ async function reconcileOnce({ force }) {
   const state = await getReconcileState();
   const inProgress = isReconcileInProgress(state);
   // Heartbeat only: after in-progress continues, defer new cycles while the
-  // durable queue still has Raindrop work; then honor the configured quiet-time
-  // interval. Pull now (force) bypasses busy + cooldown; hard rateLimitedUntil
-  // already gated. (Hard pause covers low remaining — no separate soft snapshot.)
+  // durable queue still has Raindrop work; then honor quiet-time only after a
+  // *settled* finish. Unsettled confirm catch-up skips cooldown so Status never
+  // shows “0 pending + wait N minutes” over a postponed confirm mountain.
+  // Pull now (force) bypasses busy + cooldown; hard rateLimitedUntil already gated.
   if (!force && !inProgress) {
     if (await hasRaindropBoundQueueWork()) {
       return { enqueued: 0, pages: 0, done: true, skipped: true, reason: "busy" };
     }
-    if (state.lastRunAt && Date.now() - state.lastRunAt < reconcileIntervalMs(config)) {
-      return { enqueued: 0, pages: 0, done: true, skipped: true, reason: "cooldown" };
+    if (!state.unsettledConfirmCatchUp) {
+      const settledAt = state.lastSettledAt ?? state.lastRunAt;
+      if (settledAt && Date.now() - settledAt < reconcileIntervalMs(config)) {
+        return { enqueued: 0, pages: 0, done: true, skipped: true, reason: "cooldown" };
+      }
     }
   }
 

@@ -244,7 +244,7 @@ The extension SHALL let the user choose Raindrop→Edge folder mode from `existi
 - **AND** explains that mirror-all also creates folders for empty Raindrop collections under the root
 
 ### Requirement: Bidirectional reconcile interval setting
-When sync mode is `bidirectional`, the extension SHALL let the user choose a quiet-time Raindrop reconcile interval in minutes from a fixed set of presets (at minimum including 1, 5, 15, 30, and 60), defaulting to 15, and SHALL persist the choice with the rest of settings. The control SHALL be hidden in one-way mode. Help text SHALL state that the interval applies when the sync queue is idle and that polling waits while other Raindrop work is still queued. Invalid or missing stored values SHALL normalize to the default (15) and values outside the allowed range SHALL be clamped.
+When sync mode is `bidirectional`, the extension SHALL let the user choose a quiet-time Raindrop reconcile interval in minutes from a fixed set of presets (at minimum including 1, 5, 15, 30, and 60), defaulting to 1, and SHALL persist the choice with the rest of settings. The control SHALL be hidden in one-way mode. Help text SHALL state that the interval applies when the sync queue is idle and confirm catch-up is settled, and that polling waits while other Raindrop work is still queued. Invalid or missing stored values SHALL normalize to the default (1) and values outside the allowed range SHALL be clamped.
 
 #### Scenario: Save reconcile interval with bidirectional
 - **WHEN** sync mode is `bidirectional` and the user selects a reconcile interval preset and saves settings
@@ -255,13 +255,14 @@ When sync mode is `bidirectional`, the extension SHALL let the user choose a qui
 - **WHEN** sync mode is `one-way`
 - **THEN** the options UI does not show the reconcile interval control
 
-#### Scenario: Default fifteen minutes
+#### Scenario: Default one minute
 - **WHEN** the user has never set a reconcile interval
-- **THEN** the effective stored/default interval is 15 minutes
+- **THEN** the effective stored/default interval is 1 minute
 
 #### Scenario: Help text explains adaptive polling
 - **WHEN** bidirectional mode is selected and the user views the reconcile interval control
-- **THEN** the UI explains that frequent polling applies when idle and that a busy sync queue defers listing
+- **THEN** the UI explains that frequent polling applies when idle and settled
+- **AND** that a busy sync queue defers listing
 
 ### Requirement: Folder policies host Raindrop-only picker
 The extension SHALL place the Raindrop-only collections chooser as an expandable section at the bottom of Folder policies when bidirectional mode is on, and SHALL persist allowlist drafts via the folder-policies apply/discard flow. Help text SHALL clarify that the Edge tree above is Edge-only and the expandable is for Raindrop-only opt-in, and that changes take effect with **Apply folder policies**.
@@ -320,7 +321,7 @@ When durable bulk-prompt state indicates a choice is needed, the Options Status 
 - **AND** Status reflects success or failure of that flow
 
 ### Requirement: Status surfaces reconcile deferral reasons
-When bidirectional mode is on, the Options Status panel SHALL surface durable heartbeat reconcile-skip reasons (`busy`, `cooldown`, `rate_limited`, `bulk_pause`) with distinct user-visible copy so a deferred Raindrop check does not look like a stuck or idle install. When reason is `bulk_pause`, copy SHALL point at Match or Continue drip on the bulk-queue notice. When reason is `busy` or `cooldown`, copy MAY mention Pull now. Status SHALL NOT keep showing `bulk_pause` after needs_choice has already been cleared (guard or refresh to `busy`/clear).
+When bidirectional mode is on, the Options Status panel SHALL surface durable heartbeat reconcile-skip reasons (`busy`, `cooldown`, `rate_limited`, `bulk_pause`) with distinct user-visible copy so a deferred Raindrop check does not look like a stuck or idle install. When reason is `bulk_pause`, copy SHALL point at Match or Continue drip on the bulk-queue notice. When reason is `busy` or `cooldown`, copy MAY mention Pull now. Cooldown copy SHALL describe quiet-time wait after a settled Raindrop check (not unfinished confirm catch-up). Status SHALL NOT keep showing `bulk_pause` after needs_choice has already been cleared (guard or refresh to `busy`/clear). Status SHALL NOT present quiet-time cooldown as the explanation while durable unsettled confirm catch-up is active (catch-up MUST continue on heartbeat instead of arming cooldown).
 
 #### Scenario: Busy deferral visible
 - **WHEN** Status refreshes and reconcileSkipReason is `busy`
@@ -328,7 +329,12 @@ When bidirectional mode is on, the Options Status panel SHALL surface durable he
 
 #### Scenario: Bulk pause copy points at banner actions
 - **WHEN** Status refreshes and reconcileSkipReason is `bulk_pause`
-- **THEN** the Status panel explains Raindrop check is paused awaiting Match or Continue drip
+- **THEN** the Status panel points the user at Match or Continue drip on the bulk-queue notice
+
+#### Scenario: Cooldown copy is settled quiet-time
+- **WHEN** Status refreshes and reconcileSkipReason is `cooldown`
+- **THEN** the copy indicates quiet-time wait after a settled check (or equivalent)
+- **AND** does not imply unfinished missing-raindrop confirm catch-up
 
 #### Scenario: Stale bulk_pause not shown after Continue
 - **WHEN** the user has chosen Continue drip and needs_choice is cleared

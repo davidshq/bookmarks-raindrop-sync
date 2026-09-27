@@ -19,6 +19,7 @@ import {
 } from "./collections.js";
 import { isAllowlistActive, isCollectionAllowed, canCreateRaindropOnlyPath } from "./allowlist.js";
 import { computePullUpdatePlan } from "./pull-update.js";
+import { raindropCollectionId } from "./raindrop.js";
 
 export async function maybeEnqueuePullCreate(item, ctx, resolveRelative) {
   const rid = String(item._id);
@@ -28,7 +29,7 @@ export async function maybeEnqueuePullCreate(item, ctx, resolveRelative) {
   if (!item.link) return 0;
   if (item.type === "file" || item.type === "document") return 0;
 
-  const colId = item.collection?.$id ?? item.collection?.id;
+  const colId = raindropCollectionId(item);
   const relative = resolveRelative(colId);
   // null/undefined ⇒ skip; [] is valid (bookmark living directly under sync root).
   if (relative == null) return 0;

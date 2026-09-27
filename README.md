@@ -17,7 +17,7 @@ Chrome and Edge do not fork collections.
 | Mode | Behavior |
 | --- | --- |
 | **One-way** (default) | Browser → Raindrop only. Choose whether to **delete locally** after upload (offload) or **keep** a local copy. |
-| **Bidirectional** | Keeps bookmarks in **both** places: also pulls Raindrop → browser under your root, and propagates **user** deletes both ways. Global default is keep-both; use folder policies for Exclude or Offload exceptions. Quiet-time **Raindrop check interval** is configurable (default 15 minutes); heartbeat defers a new listing while the upload queue still has Raindrop work. **Pull now** still runs immediately. |
+| **Bidirectional** | Keeps bookmarks in **both** places: also pulls Raindrop → browser under your root, and propagates **user** deletes both ways. Global default is keep-both; use folder policies for Exclude or Offload exceptions. Quiet-time **Raindrop check interval** is configurable (default 1 minute after a settled check); unfinished confirm catch-up continues every heartbeat. Heartbeat defers a new listing while the upload queue still has Raindrop work. **Pull now** still runs immediately. |
 
 ## What it does
 
@@ -52,9 +52,12 @@ Chrome and Edge do not fork collections.
 - **Bidirectional pull** — raindrops under the root appear as browser bookmarks
   (files/documents skipped); deletes propagate both ways with tombstones.
   Heartbeat reconcile uses your quiet-time interval when idle, and skips starting
-  a new listing while Raindrop-bound jobs are still queued. Options → Status shows
+  a new listing while Raindrop-bound jobs are still queued. Out-of-scope living
+  pairs (e.g. cleared allowlist) are parked after confirm so they stop burning
+  delete-check budget; Trash still catches soft-deletes. Options → Status shows
   pending jobs split by Edge→Raindrop vs Raindrop→Edge, and why a Raindrop check
   was deferred (queue busy, cooldown, or bulk-queue pause).
+  Throughput / cooldown design target: [`docs/sync-architecture-right-sizing.md`](docs/sync-architecture-right-sizing.md).
   **Raindrop → browser folders** chooses create-as-needed / existing-only /
   mirror-all. Outside-root allowlist picks land under Other bookmarks / Raindrop
   (or Other favorites on Edge). Pull learns folder→collection maps (and heals

@@ -81,7 +81,10 @@ export const KEY = {
   PAIRS: "pairs", // { byBookmark: { [bookmarkId]: raindropId }, byRaindrop: { [raindropId]: bookmarkId } }
   TOMBSTONES: "tombstones", // { [raindropId]: { at, reason } }
   SUPPRESS: "suppress", // { removes, creates, changes: { [bookmarkId]: expiresAt } }
-  RECONCILE: "reconcile", // { cursorPage, outsideCursor, running, lastRunAt, lastError, seenAcc, aliveConfirmOffset, tombstonePruneOffset }
+  // reconcile: { cursorPage, outsideCursor, running, lastRunAt, lastSettledAt,
+  //   unsettledConfirmCatchUp, lastError, seenAcc, aliveConfirmOffset,
+  //   tombstonePruneOffset, parkedAliveIds }
+  RECONCILE: "reconcile",
   COLLECTION_CACHE: "collectionCache", // { [collectionPath]: collectionId }
   /** Edge folder id → Raindrop collection id (for in-place folder renames). */
   FOLDER_COLLECTIONS: "folderCollections", // { [folderId]: collectionId }
@@ -96,7 +99,8 @@ export const KEY = {
 };
 
 /** Quiet-time bidirectional reconcile presets / clamps (minutes). */
-export const DEFAULT_RECONCILE_INTERVAL_MINUTES = 15;
+/** Quiet-time gap after a *settled* finish (alarm floor). Was 15; see right-sizing memo. */
+export const DEFAULT_RECONCILE_INTERVAL_MINUTES = 1;
 export const MIN_RECONCILE_INTERVAL_MINUTES = 1;
 export const MAX_RECONCILE_INTERVAL_MINUTES = 60;
 
@@ -112,8 +116,9 @@ export const DEFAULT_CONFIG = {
   /** When true, appendLog also writes to the IndexedDB long-term archive. */
   keepLongTermLog: false,
   /**
-   * Minimum gap (minutes) between *completed* heartbeat reconcile cycles when
+   * Minimum gap (minutes) between *settled* heartbeat reconcile cycles when
    * the durable queue has no Raindrop-bound jobs. Bidirectional only.
+   * Unsettled confirm catch-up ignores this gap.
    */
   reconcileIntervalMinutes: DEFAULT_RECONCILE_INTERVAL_MINUTES,
   /**
@@ -137,6 +142,7 @@ export const HEARTBEAT_MINUTES = 1;
 
 /**
  * Quiet-time cooldown in ms from config (after normalizeConfig).
+ * Applied only after a settled finish (see reconcile.js).
  * @param {{ reconcileIntervalMinutes?: number }|null|undefined} config
  */
 export function reconcileIntervalMs(config) {

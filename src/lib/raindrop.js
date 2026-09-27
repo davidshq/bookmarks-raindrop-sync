@@ -14,6 +14,7 @@
 //
 // isNotFoundError() is the single “resource already gone” check (prefer
 // status === 404; message fallback for mocks / older throws).
+// raindropCollectionId() is the single collection-id extractor ($id || id).
 //
 // X-RateLimit-Reset is normalized once via #parseResetAt (epoch ms or seconds).
 
@@ -58,6 +59,16 @@ export function isNotFoundError(err) {
   if (typeof status === "number") return status === 404;
   const message = /** @type {{ message?: unknown }} */ (err).message;
   return typeof message === "string" && /\b404\b/.test(message);
+}
+
+/**
+ * Collection id from a raindrop item. API payloads use `collection.$id`;
+ * some mocks / older shapes use `collection.id`.
+ * @param {{ collection?: { $id?: unknown, id?: unknown } }|null|undefined} item
+ * @returns {unknown}
+ */
+export function raindropCollectionId(item) {
+  return item?.collection?.$id ?? item?.collection?.id;
 }
 
 /**

@@ -189,18 +189,19 @@
           <label>
             Raindrop check interval
             <select id="reconcileIntervalMinutes" aria-describedby="reconcileIntervalHelp">
-              <option value="1">Every 1 minute</option>
+              <option value="1" selected>Every 1 minute</option>
               <option value="2">Every 2 minutes</option>
               <option value="5">Every 5 minutes</option>
-              <option value="15" selected>Every 15 minutes</option>
+              <option value="15">Every 15 minutes</option>
               <option value="30">Every 30 minutes</option>
               <option value="60">Every 60 minutes</option>
             </select>
           </label>
           <p id="reconcileIntervalHelp" class="field-help hint">
-            How often to check Raindrop when the sync queue is idle. Polling waits while uploads
-            or other Raindrop work is still queued. Use <strong>Pull now</strong> for an immediate
-            check.
+            How often to check Raindrop when the sync queue is idle and confirm catch-up is
+            settled. Polling waits while uploads or other Raindrop work is still queued; unfinished
+            missing-raindrop checks continue every minute. Use <strong>Pull now</strong> for an
+            immediate check.
           </p>
           <label>
             Raindrop → browser folders

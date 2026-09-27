@@ -13,7 +13,7 @@
 // mode must not auto-exit and undo a saved opt-in (especially with
 // existing-only, where an empty allowlist skips all Raindrop-only creates).
 
-import { getById, walkCollectionAncestors } from "./collections.js";
+import { getById, walkCollectionAncestors, collectionPathFromRoot } from "./collections.js";
 import { RAINDROP_FOLDER_MODE } from "./constants.js";
 
 /**
@@ -22,6 +22,20 @@ import { RAINDROP_FOLDER_MODE } from "./constants.js";
  */
 export function isAllowlistActive(allowlist) {
   return !!allowlist && Object.keys(allowlist).length > 0;
+}
+
+/**
+ * True when a raindrop in `collectionId` would appear in scoped reconcile listing
+ * (nested under sync root, or under an active outside-root allowlist).
+ * @param {string|number|null|undefined} collectionId
+ * @param {{ byId?: Map }|null|undefined} index
+ * @param {string|number|null|undefined} rootId
+ * @param {Record<string, { path?: string }>|null|undefined} allowlist
+ */
+export function isInScopedListing(collectionId, index, rootId, allowlist) {
+  if (collectionId == null || !index?.byId) return false;
+  if (collectionPathFromRoot(index, collectionId, rootId).length) return true;
+  return isCollectionAllowed(collectionId, index, rootId, allowlist);
 }
 
 /**

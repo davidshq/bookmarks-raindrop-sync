@@ -48,6 +48,7 @@ import { runPullNow } from "../src/lib/pull-now.js";
 import {
   isAllowlistActive,
   isCollectionAllowed,
+  isInScopedListing,
   canCreateRaindropOnlyPath,
   pruneAllowlist,
 } from "../src/lib/allowlist.js";
@@ -452,6 +453,17 @@ console.log("== raindrop folder allowlist ==");
     true,
     "outside-root parent covers"
   );
+  assert.equal(isInScopedListing(4, index, 1, {}), true, "under sync root is in scoped listing");
+  assert.equal(
+    isInScopedListing(21, index, 1, {}),
+    false,
+    "outside-root without allowlist is out of scope"
+  );
+  assert.equal(
+    isInScopedListing(21, index, 1, { 20: { path: "Indie" } }),
+    true,
+    "outside-root allowlisted is in scoped listing"
+  );
   assert.deepEqual(collectionAbsolutePath(index, 21), ["Indie", "Child"]);
   assert.deepEqual(mirrorRelativeSegments(index, 21, 1), ["Raindrop", "Indie", "Child"]);
   assert.deepEqual(mirrorRelativeSegments(index, 4, 1), ["Favorites bar", "Work", "Nested"]);
@@ -628,12 +640,13 @@ console.log("== outside-root forest list ids ==");
 console.log("== reconcile interval config ==");
 {
   assert.equal(DEFAULT_CONFIG.reconcileIntervalMinutes, DEFAULT_RECONCILE_INTERVAL_MINUTES);
-  assert.equal(DEFAULT_RECONCILE_INTERVAL_MINUTES, 15);
-  assert.equal(clampReconcileIntervalMinutes(undefined), 15);
-  assert.equal(clampReconcileIntervalMinutes("nope"), 15);
+  assert.equal(DEFAULT_RECONCILE_INTERVAL_MINUTES, 1);
+  assert.equal(clampReconcileIntervalMinutes(undefined), 1);
+  assert.equal(clampReconcileIntervalMinutes("nope"), 1);
   assert.equal(clampReconcileIntervalMinutes(0), MIN_RECONCILE_INTERVAL_MINUTES);
   assert.equal(clampReconcileIntervalMinutes(99), MAX_RECONCILE_INTERVAL_MINUTES);
-  assert.equal(normalizeConfig({}).reconcileIntervalMinutes, 15);
+  assert.equal(normalizeConfig({}).reconcileIntervalMinutes, 1);
+  assert.equal(normalizeConfig({ reconcileIntervalMinutes: 15 }).reconcileIntervalMinutes, 15);
   assert.equal(normalizeConfig({ reconcileIntervalMinutes: 1 }).reconcileIntervalMinutes, 1);
   assert.equal(reconcileIntervalMs({ reconcileIntervalMinutes: 2 }), 2 * 60_000);
   console.log("  ✔ default / clamp / reconcileIntervalMs");
@@ -664,9 +677,13 @@ console.log("== rate-limit constants ==");
   assert.ok(MAX_TRASH_PAGES_PER_TICK >= 1);
   assert.equal(RAINDROP_TRASH_COLLECTION_ID, -99);
   assert.ok(reconcileIntervalMs(DEFAULT_CONFIG) >= 60_000);
-  const { RateLimitError } = await import("../src/lib/raindrop.js");
+  const { RateLimitError, raindropCollectionId } = await import("../src/lib/raindrop.js");
   const err = new RateLimitError(Date.now() + 1000, { proactive: true });
   assert.equal(err.proactive, true);
+  assert.equal(raindropCollectionId({ collection: { $id: 42 } }), 42);
+  assert.equal(raindropCollectionId({ collection: { id: 7 } }), 7);
+  assert.equal(raindropCollectionId({ collection: { $id: 1, id: 2 } }), 1);
+  assert.equal(raindropCollectionId(null), undefined);
   console.log("  ✔ reserve / adaptive drain caps / cooldown / proactive RateLimitError");
 }
 
@@ -873,9 +890,29 @@ console.log("== reconcile skip Status copy ==");
   assert.equal(formatReconcileSkipNotice(null), null);
   assert.ok(formatReconcileSkipNotice({ reconcileSkipReason: "busy", reconcileSkipPending: 40 }).includes("40"));
   assert.ok(formatReconcileSkipNotice({ reconcileSkipReason: "busy", reconcileSkipPending: 40 }).includes("Pull now"));
-  assert.ok(formatReconcileSkipNotice({ reconcileSkipReason: "cooldown" }).includes("cooldown"));
+  const coolNotice = formatReconcileSkipNotice({ reconcileSkipReason: "cooldown" });
+  assert.ok(coolNotice.includes("cooldown"));
+  assert.ok(coolNotice.includes("settled"), "cooldown copy mentions settled check");
   assert.ok(formatReconcileSkipNotice({ reconcileSkipReason: "bulk_pause" }).includes("Continue"));
   console.log("  ✔ busy / cooldown / bulk_pause notices");
+}
+
+console.log("== postpone confirm log copy ==");
+{
+  const fs = await import("node:fs/promises");
+  const finishSrc = await fs.readFile(
+    new URL("../src/lib/reconcile-finish.js", import.meta.url),
+    "utf8"
+  );
+  assert.ok(
+    finishSrc.includes("confirm budget this cycle"),
+    "postpone log mentions confirm budget"
+  );
+  assert.ok(
+    !finishSrc.includes("rate-limit budget; continues next cycle"),
+    "postpone log must not blame rate-limit budget"
+  );
+  console.log("  ✔ postpone log honesty");
 }
 
 console.log("== pulled-path folderCollections zip ==");

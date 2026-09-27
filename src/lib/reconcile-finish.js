@@ -2,9 +2,11 @@
 // tombstone prune, folder-rename pull.
 //
 // Soft-deletes: list Raindrop Trash (-99) first (paginated). Confirm GETs remain
-// for permanent deletes / non-trash absence. Follow-on strategies (park
-// out-of-scope, collection 0, lastUpdate): docs/raindrop-delete-detection-options.md
+// for permanent deletes / non-trash absence. Out-of-scope alives are parked so
+// they stop re-candidating (option C). Follow-ons (collection 0, lastUpdate):
+// docs/raindrop-delete-detection-options.md
 //
+// Trash + confirm-GET both enqueue via enqueueDeleteEdge (shared job id/payload).
 // Delete-confirm and tombstone-prune share rotateConfirmWindow for GET-budget fairness.
 
 import {
@@ -27,6 +29,10 @@ import {
   getCollectionCache,
   getReconcileState,
   setReconcileState,
+  getParkedAliveIds,
+  parkAliveIds,
+  unparkAliveIds,
+  setParkedAliveIds,
   appendLog,
 } from "./store.js";
 import * as queue from "./queue.js";
@@ -39,8 +45,28 @@ import {
   walkAncestorsFromFolder,
 } from "./bookmarks.js";
 import { getById, collectionsUnderRoot, isOutsideRootLandingSegments } from "./collections.js";
-import { AuthError, RateLimitError, isNotFoundError } from "./raindrop.js";
+import { isInScopedListing } from "./allowlist.js";
+import {
+  AuthError,
+  RateLimitError,
+  isNotFoundError,
+  raindropCollectionId,
+} from "./raindrop.js";
 import { ensureAllowlistedOrMirrorAll } from "./reconcile-enqueue.js";
+
+/**
+ * Enqueue a local Edge delete for a raindrop that is gone (trash or confirm-GET).
+ * Shared by trash listing and missing-raindrop confirm so job id/payload stay aligned.
+ * @returns {Promise<boolean>} true when a new job was added
+ */
+async function enqueueDeleteEdge(rid, bookmarkId) {
+  return queue.enqueueJob({
+    id: `de-${rid}`,
+    kind: JOB.DELETE_EDGE,
+    raindropId: rid,
+    bookmarkId,
+  });
+}
 
 export async function finishReconcileCycle({
   client,
@@ -56,7 +82,7 @@ export async function finishReconcileCycle({
   enqueued,
   pages,
 }) {
-  await finishConfirmGets(client, seenIds, pairs);
+  await finishConfirmGets(client, seenIds, pairs, index, rootId, allowlist);
   await finishFolderRenamePull(index, config, overrides, rootId, topRoots);
   await ensureAllowlistedOrMirrorAll(
     index,
@@ -85,7 +111,7 @@ export async function finishReconcileCycle({
  * Trash soft-delete fast path, then shared GET budget for delete-confirm and
  * tombstone prune (at most MAX_ALIVE_CHECKS_PER_TICK total).
  */
-async function finishConfirmGets(client, seenIds, pairs) {
+async function finishConfirmGets(client, seenIds, pairs, index, rootId, allowlist) {
   const trashHandled = await finishTrashDeleteDetection(client, pairs);
   let remaining = MAX_ALIVE_CHECKS_PER_TICK;
   remaining = await finishDeleteDetection(
@@ -93,7 +119,10 @@ async function finishConfirmGets(client, seenIds, pairs) {
     seenIds,
     pairs,
     remaining,
-    trashHandled
+    trashHandled,
+    index,
+    rootId,
+    allowlist
   );
   await finishTombstonePrune(client, seenIds, remaining);
 }
@@ -130,12 +159,7 @@ async function finishTrashDeleteDetection(client, pairs) {
         continue;
       }
       handled.add(rid);
-      const added = await queue.enqueueJob({
-        id: `de-${rid}`,
-        kind: JOB.DELETE_EDGE,
-        raindropId: rid,
-        bookmarkId,
-      });
+      const added = await enqueueDeleteEdge(rid, bookmarkId);
       if (added) deleteJobs++;
     }
 
@@ -195,10 +219,38 @@ async function seenAccWithLive(seenIds) {
 
 /**
  * Confirm-GET fallback for pairs missing from scoped listing (permanent deletes,
- * emptied trash, etc.). Skips ids already handled by the Trash fast path.
+ * emptied trash, etc.). Skips ids already handled by the Trash fast path and
+ * ids parked as out-of-scope alives.
  */
-async function finishDeleteDetection(client, seenIds, pairs, maxGets, skipIds) {
+async function finishDeleteDetection(
+  client,
+  seenIds,
+  pairs,
+  maxGets,
+  skipIds,
+  index,
+  rootId,
+  allowlist
+) {
   const acc = await seenAccWithLive(seenIds);
+
+  // Back in scoped listing → eligible for delete-confirm again if they leave later.
+  const parked = await getParkedAliveIds();
+  if (parked.size) {
+    const toUnpark = [];
+    for (const rid of parked) {
+      if (acc.has(String(rid))) toUnpark.push(rid);
+    }
+    if (toUnpark.length) await unparkAliveIds(toUnpark);
+  }
+
+  // Drop park entries for pairs that no longer exist.
+  const parkedAfterUnpark = await getParkedAliveIds();
+  if (parkedAfterUnpark.size) {
+    const kept = [...parkedAfterUnpark].filter((rid) => pairs.byRaindrop[rid] != null);
+    if (kept.length !== parkedAfterUnpark.size) await setParkedAliveIds(kept);
+  }
+  const parkedSkip = await getParkedAliveIds();
 
   // Build the full candidate list first, then walk a rotating window so pairs
   // past the per-tick budget are not starved across cycles.
@@ -206,11 +258,13 @@ async function finishDeleteDetection(client, seenIds, pairs, maxGets, skipIds) {
   for (const [rid, bookmarkId] of Object.entries(pairs.byRaindrop)) {
     if (acc.has(String(rid))) continue;
     if (skipIds?.has(String(rid))) continue;
+    if (parkedSkip.has(String(rid))) continue;
     if (await hasTombstone(rid)) continue;
     candidates.push([rid, bookmarkId]);
   }
 
   let deleteJobs = 0;
+  const newlyParked = [];
   const { checked, remaining } = await rotateConfirmWindow({
     candidates,
     offsetKey: "aliveConfirmOffset",
@@ -218,35 +272,51 @@ async function finishDeleteDetection(client, seenIds, pairs, maxGets, skipIds) {
     visit: async ([rid, bookmarkId]) => {
       // Pairs outside the nested root listing (e.g. cleared outside-root allowlist)
       // never appear in seenIds — confirm with a direct get before deleting Edge.
-      if (await raindropStillAlive(client, rid)) {
+      const probe = await probeLivingRaindrop(client, rid);
+      if (probe.status === "unknown") {
         client.throwIfShouldPause();
         return;
       }
-      const added = await queue.enqueueJob({
-        id: `de-${rid}`,
-        kind: JOB.DELETE_EDGE,
-        raindropId: rid,
-        bookmarkId,
-      });
+      if (probe.status === "alive") {
+        const col = raindropCollectionId(probe.item);
+        if (!isInScopedListing(col, index, rootId, allowlist)) {
+          newlyParked.push(String(rid));
+        }
+        client.throwIfShouldPause();
+        return;
+      }
+      const added = await enqueueDeleteEdge(rid, bookmarkId);
       if (added) deleteJobs++;
       client.throwIfShouldPause();
     },
   });
 
+  if (newlyParked.length) {
+    await parkAliveIds(newlyParked);
+    await appendLog(
+      "info",
+      `Parked ${newlyParked.length} out-of-scope alive pair(s) (skipped future missing-raindrop checks).`
+    );
+  }
   if (deleteJobs > 0) {
     await appendLog(
       "info",
       `Pull queued ${deleteJobs} local delete(s) for raindrops confirmed gone.`
     );
   }
-  if (maxGets > 0) {
-    const deferred = candidates.length - checked;
-    if (deferred > 0) {
-      await appendLog(
-        "info",
-        `Reconcile postponed ${deferred} missing-raindrop check(s) (rate-limit budget; continues next cycle).`
-      );
-    }
+  const deferred = Math.max(0, candidates.length - checked);
+  if (deferred > 0) {
+    await appendLog(
+      "info",
+      `Reconcile postponed ${deferred} missing-raindrop check(s) ` +
+        `(confirm budget this cycle; continues next heartbeat).`
+    );
+    await setReconcileState({ unsettledConfirmCatchUp: true });
+  } else {
+    await setReconcileState({
+      unsettledConfirmCatchUp: false,
+      lastSettledAt: Date.now(),
+    });
   }
   return remaining;
 }
@@ -473,23 +543,29 @@ async function edgeFolderIsOutsideRootLanding(folderId) {
 }
 
 /**
- * True when Raindrop still has a non-trashed item for this id.
- * Fail-soft on transient errors (5xx/network): assume alive so we do not
- * false-delete Edge pairs. Only definite absence (null / 404 / trash) ⇒ gone.
+ * Probe whether Raindrop still has a non-trashed item for this id.
+ * Fail-soft on transient errors (5xx/network): `unknown` so we neither
+ * false-delete nor park. Only definite absence (null / 404 / trash) ⇒ gone.
+ * @returns {Promise<{ status: 'gone' }|{ status: 'alive', item: object }|{ status: 'unknown' }>}
  */
-async function raindropStillAlive(client, rid) {
+async function probeLivingRaindrop(client, rid) {
   try {
     const item = await client.getRaindrop(rid);
-    if (!item) return false;
-    const col = item.collection?.$id ?? item.collection?.id;
+    if (!item) return { status: "gone" };
+    const col = raindropCollectionId(item);
     if (col === RAINDROP_TRASH_COLLECTION_ID || col === String(RAINDROP_TRASH_COLLECTION_ID)) {
-      return false;
+      return { status: "gone" };
     }
-    return true;
+    return { status: "alive", item };
   } catch (err) {
     if (err instanceof AuthError || err instanceof RateLimitError) throw err;
-    if (isNotFoundError(err)) return false;
-    // 5xx / network / unknown — skip delete this tick.
-    return true;
+    if (isNotFoundError(err)) return { status: "gone" };
+    return { status: "unknown" };
   }
+}
+
+/** True when Raindrop still has a non-trashed item (or probe is inconclusive). */
+async function raindropStillAlive(client, rid) {
+  const probe = await probeLivingRaindrop(client, rid);
+  return probe.status !== "gone";
 }
