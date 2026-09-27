@@ -15,6 +15,7 @@ import {
   recordSynced,
   getRaindropId,
   getBookmarkIdForRaindrop,
+  getPairs,
   forgetSynced,
   forgetPairByRaindrop,
   clearPairWithTombstone,
@@ -58,6 +59,7 @@ import {
 } from "./collections.js";
 import { canCreateRaindropOnlyPath } from "./allowlist.js";
 import { computePullUpdatePlan } from "./pull-update.js";
+import { filterUrlMatchingItems, pickMoveRebindCandidate } from "./move-rebind.js";
 
 /** Job kinds that run in one-way mode (Edge→Raindrop). */
 const ONE_WAY_KINDS = new Set([JOB.UPLOAD, JOB.RENAME_COLLECTION]);
@@ -97,6 +99,34 @@ export async function processJob(job, ctx) {
       await processUpload(job, ctx);
       break;
   }
+}
+
+/**
+ * Search Raindrop for an unpaired-move URL and pick a claimable raindrop id.
+ * @param {string} bookmarkId
+ * @param {string} url
+ * @param {import("./raindrop.js").RaindropClient} client
+ * @returns {Promise<{ kind: 'unique'|'multi'|'conflict'|'none', rid?: string, extras: number }>}
+ */
+async function tryRebindMoveByUrl(bookmarkId, url, client) {
+  const { items } = await client.searchRaindrops(url);
+  const matching = filterUrlMatchingItems(url, items);
+  if (!matching.length) return { kind: "none", extras: 0 };
+
+  const pairs = await getPairs();
+  const liveIds = new Set([String(bookmarkId)]);
+  for (const item of matching) {
+    const otherBid = pairs.byRaindrop?.[String(item._id)];
+    if (otherBid == null) continue;
+    const other = await getNodeOrNull(String(otherBid));
+    if (other?.url) liveIds.add(String(otherBid));
+  }
+
+  const pick = pickMoveRebindCandidate(bookmarkId, matching, pairs, liveIds);
+  if (pick.kind === "none" || pick.kind === "conflict") {
+    return { kind: pick.kind, extras: 0 };
+  }
+  return { kind: pick.kind, rid: pick.rid, extras: pick.extras || 0 };
 }
 
 async function processUpload(job, ctx) {
@@ -154,6 +184,7 @@ async function processUpload(job, ctx) {
   const pathLabel = fullSegments.join("/");
 
   let rid = await getRaindropId(job.id);
+
   if (rid) {
     try {
       await client.updateRaindrop(rid, {
@@ -167,10 +198,48 @@ async function processUpload(job, ctx) {
         await appendLog("info", `Updated: ${node.title || node.url}`);
       }
     } catch (err) {
-      // Stale pair: raindrop gone — clear mapping and fall through to create.
+      // Stale pair: raindrop gone — clear mapping; move may rebind by URL below.
       if (!isNotFoundError(err)) throw err;
       await forgetPairByRaindrop(rid);
       rid = null;
+    }
+  }
+
+  // Unpaired (or stale-pair) move: relocate an existing Raindrop by URL instead
+  // of forking a second copy at the ensured destination path.
+  if (!rid && job.reason === "move") {
+    const rebound = await tryRebindMoveByUrl(job.id, node.url, client);
+    if (rebound.kind === "conflict") {
+      await appendLog(
+        "warn",
+        `Skipped move create (URL already paired elsewhere): ${node.title || node.url}`
+      );
+      await queue.remove(job.id);
+      return;
+    }
+    if (rebound.rid) {
+      await recordSynced(job.id, rebound.rid);
+      rid = rebound.rid;
+      if (rebound.extras > 0) {
+        await appendLog(
+          "warn",
+          `Moved with ${rebound.extras} extra Raindrop copy(ies) left: ${
+            node.title || node.url
+          }`
+        );
+      }
+      try {
+        await client.updateRaindrop(rid, {
+          link: node.url,
+          title: node.title,
+          collectionId,
+        });
+        await appendLog("info", `Moved: ${node.title || node.url} → ${pathLabel}`);
+      } catch (err) {
+        if (!isNotFoundError(err)) throw err;
+        await forgetPairByRaindrop(rid);
+        rid = null;
+      }
     }
   }
 

@@ -90,7 +90,7 @@ function makeMockRaindrop() {
   const collections = new Map(); // id -> { _id, title, parent }
   const raindrops = new Map(); // id -> item
   const trash = new Map();
-  /** @type {{ listRaindrops: number, createRaindrop: number, deleteRaindrop: number, exportRaindropsCsv: number, getRaindrop: number, updateRaindrop: number }} */
+  /** @type {{ listRaindrops: number, createRaindrop: number, deleteRaindrop: number, exportRaindropsCsv: number, getRaindrop: number, updateRaindrop: number, searchRaindrops: number }} */
   const calls = {
     listRaindrops: 0,
     createRaindrop: 0,
@@ -98,6 +98,7 @@ function makeMockRaindrop() {
     exportRaindropsCsv: 0,
     getRaindrop: 0,
     updateRaindrop: 0,
+    searchRaindrops: 0,
   };
 
   return {
@@ -134,7 +135,10 @@ function makeMockRaindrop() {
       raindrops.set(_id, item);
       return item;
     },
-    async listRaindrops(collectionId, { nested = false, page = 0, perPage = 50 } = {}) {
+    async listRaindrops(
+      collectionId,
+      { nested = false, page = 0, perPage = 50, search = undefined } = {}
+    ) {
       calls.listRaindrops++;
       // Trash is a system collection — items live in `_trash`, not under a real parent.
       if (Number(collectionId) === -99) {
@@ -142,6 +146,20 @@ function makeMockRaindrop() {
         const start = page * perPage;
         const items = all.slice(start, start + perPage);
         return { items, count: all.length };
+      }
+      if (search != null && String(search).trim() !== "") {
+        const q = String(search).toLowerCase();
+        const all = [...raindrops.values()].filter(
+          (r) =>
+            String(r.link || "")
+              .toLowerCase()
+              .includes(q) ||
+            String(r.title || "")
+              .toLowerCase()
+              .includes(q)
+        );
+        const start = page * perPage;
+        return { items: all.slice(start, start + perPage), count: all.length };
       }
       const under = new Set();
       const walk = (id) => {
@@ -156,6 +174,10 @@ function makeMockRaindrop() {
       const start = page * perPage;
       const items = all.slice(start, start + perPage);
       return { items, count: all.length };
+    },
+    async searchRaindrops(query, { perPage = 50 } = {}) {
+      calls.searchRaindrops++;
+      return this.listRaindrops(0, { page: 0, perPage, search: query });
     },
     async getRaindrop(id) {
       calls.getRaindrop++;
@@ -1494,7 +1516,117 @@ async function scenario69_bookmarkMoves() {
   assert.notEqual(String(newRid), String(staleRid), "new raindrop after 404 recreate");
   assert.ok(mock._raindrops.get(Number(newRid)), "recreated raindrop exists");
 
-  console.log("  ✔ move update, reorder no-op, folder fan-out, exclude, offload, 404 recreate");
+  // Unpaired move: existing Raindrop URL → rebind + relocate (no second copy)
+  const orphanCol = await mock.createCollection("ERS-Orphan-JSON", null);
+  const orphanUrl = "https://example.com/ers-verify-move-rebind";
+  const orphanItem = mock._seedRich(orphanCol._id, {
+    link: orphanUrl,
+    title: "orphan JSON",
+    tags: ["keep-orphan"],
+    note: "orphan-note",
+  });
+  const rebindSrc = await chrome.bookmarks.create({
+    parentId: "1",
+    title: "ERS-Rebind-Src",
+  });
+  const rebindDest = await chrome.bookmarks.create({
+    parentId: "1",
+    title: "ERS-Rebind-Dest",
+  });
+  const unpairedBm = await chrome.bookmarks.create({
+    parentId: rebindSrc.id,
+    title: "unpaired move me",
+    url: orphanUrl,
+  });
+  assert.equal(await eng.store.getRaindropId(unpairedBm.id), null, "unpaired before move");
+  const createsBeforeRebind = mock._calls.createRaindrop;
+  const sizeBeforeRebind = mock._raindrops.size;
+  bookmarks.get(unpairedBm.id).parentId = rebindDest.id;
+  await eng.sync.handleBookmarkMoved(unpairedBm.id, {
+    oldParentId: rebindSrc.id,
+    parentId: rebindDest.id,
+  });
+  assert.equal(mock._calls.createRaindrop, createsBeforeRebind, "unpaired move creates no raindrop");
+  assert.equal(mock._raindrops.size, sizeBeforeRebind, "unpaired move does not fork");
+  assert.equal(
+    await eng.store.getRaindropId(unpairedBm.id),
+    String(orphanItem._id),
+    "unpaired move rebinds to existing raindrop"
+  );
+  const rebound = mock._raindrops.get(orphanItem._id);
+  assert.notEqual(rebound.collection.$id, orphanCol._id, "rebound raindrop relocated");
+  assert.deepEqual(rebound.tags, ["keep-orphan"], "rebind preserves tags");
+  assert.equal(rebound.note, "orphan-note", "rebind preserves note");
+
+  // Multi-match: relocate oldest, do not create a third
+  const multiUrl = "https://example.com/ers-verify-move-multi";
+  const multiOld = mock._seedRich(orphanCol._id, { link: multiUrl, title: "multi-old" });
+  const multiNew = mock._seedRich(orphanCol._id, { link: multiUrl, title: "multi-new" });
+  const multiBm = await chrome.bookmarks.create({
+    parentId: rebindSrc.id,
+    title: "multi move",
+    url: multiUrl,
+  });
+  const createsBeforeMulti = mock._calls.createRaindrop;
+  const sizeBeforeMulti = mock._raindrops.size;
+  bookmarks.get(multiBm.id).parentId = rebindDest.id;
+  await eng.sync.handleBookmarkMoved(multiBm.id, {
+    oldParentId: rebindSrc.id,
+    parentId: rebindDest.id,
+  });
+  assert.equal(mock._calls.createRaindrop, createsBeforeMulti, "multi-match move creates none");
+  assert.equal(mock._raindrops.size, sizeBeforeMulti, "multi-match does not add a copy");
+  assert.equal(
+    await eng.store.getRaindropId(multiBm.id),
+    String(multiOld._id),
+    "multi-match claims oldest id"
+  );
+  assert.notEqual(
+    mock._raindrops.get(multiOld._id).collection.$id,
+    orphanCol._id,
+    "oldest relocated"
+  );
+  assert.equal(
+    mock._raindrops.get(multiNew._id).collection.$id,
+    orphanCol._id,
+    "extra copy left in place"
+  );
+
+  // Conflict: URL owned by another live Edge bookmark → no create, no steal
+  const conflictUrl = "https://example.com/ers-verify-move-conflict";
+  const ownerBm = await chrome.bookmarks.create({
+    parentId: rebindDest.id,
+    title: "owner",
+    url: conflictUrl,
+  });
+  await eng.queue.enqueue(ownerBm.id);
+  await eng.sync.drain();
+  const ownerRid = await eng.store.getRaindropId(ownerBm.id);
+  assert.ok(ownerRid, "owner paired");
+  const conflictBm = await chrome.bookmarks.create({
+    parentId: rebindSrc.id,
+    title: "conflict mover",
+    url: conflictUrl,
+  });
+  const createsBeforeConflict = mock._calls.createRaindrop;
+  const sizeBeforeConflict = mock._raindrops.size;
+  bookmarks.get(conflictBm.id).parentId = rebindDest.id;
+  await eng.sync.handleBookmarkMoved(conflictBm.id, {
+    oldParentId: rebindSrc.id,
+    parentId: rebindDest.id,
+  });
+  assert.equal(mock._calls.createRaindrop, createsBeforeConflict, "conflict move creates none");
+  assert.equal(mock._raindrops.size, sizeBeforeConflict, "conflict move does not fork");
+  assert.equal(await eng.store.getRaindropId(conflictBm.id), null, "conflict mover stays unpaired");
+  assert.equal(
+    await eng.store.getRaindropId(ownerBm.id),
+    String(ownerRid),
+    "owner pair retained"
+  );
+
+  console.log(
+    "  ✔ move update, reorder no-op, folder fan-out, exclude, offload, 404 recreate, URL rebind"
+  );
 }
 
 async function scenario70_onChangedAndFolderRename() {

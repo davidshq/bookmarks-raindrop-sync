@@ -752,6 +752,67 @@ console.log("== export URL match + Match existing planner ==");
   console.log("  ✔ urlMatchKeys / export CSV / planMatchFromExport");
 }
 
+console.log("== move URL rebind picker ==");
+{
+  const { filterUrlMatchingItems, pickMoveRebindCandidate } = await import(
+    "../src/lib/move-rebind.js"
+  );
+
+  const filtered = filterUrlMatchingItems("https://www.Example.com/a/", [
+    { _id: 1, link: "https://example.com/a" },
+    { _id: 2, link: "https://other.example/b" },
+    { _id: 3, link: "https://example.com/a?utm=1" },
+  ]);
+  assert.deepEqual(
+    filtered.map((i) => i._id).sort((a, b) => a - b),
+    [1, 3]
+  );
+
+  const emptyPairs = { byBookmark: {}, byRaindrop: {} };
+  const live = new Set(["bm1"]);
+  const unique = pickMoveRebindCandidate(
+    "bm1",
+    [{ _id: 50, link: "https://x.example/" }],
+    emptyPairs,
+    live
+  );
+  assert.equal(unique.kind, "unique");
+  assert.equal(unique.rid, "50");
+
+  const multi = pickMoveRebindCandidate(
+    "bm1",
+    [
+      { _id: 90, link: "https://x.example/" },
+      { _id: 40, link: "https://x.example/" },
+    ],
+    emptyPairs,
+    live
+  );
+  assert.equal(multi.kind, "multi");
+  assert.equal(multi.rid, "40");
+  assert.equal(multi.extras, 1);
+
+  const conflict = pickMoveRebindCandidate(
+    "bm1",
+    [{ _id: 7, link: "https://x.example/" }],
+    { byBookmark: { owner: "7" }, byRaindrop: { "7": "owner" } },
+    new Set(["bm1", "owner"])
+  );
+  assert.equal(conflict.kind, "conflict");
+
+  const staleOk = pickMoveRebindCandidate(
+    "bm1",
+    [{ _id: 8, link: "https://x.example/" }],
+    { byBookmark: { gone: "8" }, byRaindrop: { "8": "gone" } },
+    new Set(["bm1"])
+  );
+  assert.equal(staleOk.kind, "unique");
+  assert.equal(staleOk.rid, "8");
+
+  assert.equal(pickMoveRebindCandidate("bm1", [], emptyPairs, live).kind, "none");
+  console.log("  ✔ filterUrlMatchingItems / pickMoveRebindCandidate");
+}
+
 console.log("== queue-depth bulk prompt ==");
 {
   const {

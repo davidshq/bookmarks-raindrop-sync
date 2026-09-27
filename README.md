@@ -24,8 +24,11 @@ Chrome and Edge do not fork collections.
 - **Live capture** — a new bookmark is queued the moment you create it.
   Dragging a bookmark (or folder) to another parent re-queues it so Raindrop
   **collection placement** matches the new path; same-folder reorders are ignored.
-  Folder moves fan out to every URL bookmark under that tree. Editing a bookmark
-  **title or URL** updates those browser-owned fields on the paired raindrop.
+  Folder moves fan out to every URL bookmark under that tree. If a moved bookmark
+  is unpaired but that URL already exists in Raindrop, sync **rebinds and
+  relocates** the existing raindrop instead of creating a second copy.
+  Editing a bookmark **title or URL** updates those browser-owned fields on the
+  paired raindrop.
   Renaming a folder renames the mirrored Raindrop collection **in place**
   (same collection id) once that folder has been synced. Browser top roots are
   never renamed to match Raindrop’s canonical titles. In bidirectional mode,

@@ -239,19 +239,35 @@ export class RaindropClient {
    * List raindrops in a collection (paginated).
    * Use collectionId `-99` for Trash (soft-deleted items); `0` for all except Trash.
    * @param {number|string} collectionId
-   * @param {{ page?: number, perPage?: number, nested?: boolean }} [opts]
+   * @param {{ page?: number, perPage?: number, nested?: boolean, search?: string }} [opts]
    */
-  async listRaindrops(collectionId, { page = 0, perPage = 50, nested = false } = {}) {
+  async listRaindrops(
+    collectionId,
+    { page = 0, perPage = 50, nested = false, search = undefined } = {}
+  ) {
     const params = new URLSearchParams({
       page: String(page),
       perpage: String(Math.min(perPage, 50)),
     });
     if (nested) params.set("nested", "true");
+    if (search != null && String(search).trim() !== "") {
+      params.set("search", String(search));
+    }
     const data = await this.request("GET", `/raindrops/${collectionId}?${params}`);
     return {
       items: data.items ?? [],
       count: data.count ?? data.items?.length ?? 0,
     };
+  }
+
+  /**
+   * Library-wide search (collection `0` = all except Trash). Callers MUST
+   * hard-filter hits (e.g. urlMatchKeys) — Raindrop search is not exact-URL.
+   * @param {string} query
+   * @param {{ perPage?: number }} [opts]
+   */
+  async searchRaindrops(query, { perPage = 50 } = {}) {
+    return this.listRaindrops(0, { page: 0, perPage, search: query });
   }
 
   async getRaindrop(id) {
