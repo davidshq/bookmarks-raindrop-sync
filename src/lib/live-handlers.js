@@ -1,7 +1,7 @@
 // Live Edge bookmark listeners: enqueue durable jobs and signal drain.
 // Does not call the Raindrop API directly.
 
-import { JOB, SYNC_MODE, POLICY } from "./constants.js";
+import { JOB, SYNC_MODE } from "./constants.js";
 import {
   getConfig,
   getOverrides,
@@ -16,12 +16,12 @@ import {
 } from "./store.js";
 import * as queue from "./queue.js";
 import {
-  getNode,
+  getNodeOrNull,
   ancestorIdsFromFolder,
-  folderPolicyAncestorIds,
+  isFolderExcluded,
   collectUrlDescendantIds,
 } from "./bookmarks.js";
-import { resolvePolicy, isExcluded } from "./policy.js";
+import { isExcluded } from "./policy.js";
 import { drain } from "./drain.js";
 
 /**
@@ -160,12 +160,8 @@ export async function handleBookmarkMoved(id, moveInfo) {
     moveInfo?.parentId != null && moveInfo.parentId !== "" ? String(moveInfo.parentId) : null;
   if (oldParent != null && newParent != null && oldParent === newParent) return;
 
-  let node;
-  try {
-    node = await getNode(id);
-  } catch {
-    return;
-  }
+  const node = await getNodeOrNull(id);
+  if (!node) return;
 
   const ids = node.url ? [String(id)] : await collectUrlDescendantIds(id);
   if (!ids.length) return;
@@ -196,12 +192,8 @@ export async function handleBookmarkChanged(id, changeInfo) {
   }
   if (await isChangeSuppressed(id)) return;
 
-  let node;
-  try {
-    node = await getNode(id);
-  } catch {
-    return;
-  }
+  const node = await getNodeOrNull(id);
+  if (!node) return;
 
   if (node.url) {
     await queue.enqueue(String(id), { reason: "change" });
@@ -219,8 +211,7 @@ export async function handleBookmarkChanged(id, changeInfo) {
 
   const config = await getConfig();
   const overrides = await getOverrides();
-  const ancestorIds = await folderPolicyAncestorIds(id, node.parentId);
-  if (resolvePolicy(ancestorIds, overrides, config.defaultPolicy) === POLICY.EXCLUDE) {
+  if (await isFolderExcluded(id, node.parentId, overrides, config.defaultPolicy)) {
     return;
   }
 

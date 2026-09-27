@@ -422,6 +422,11 @@ console.log("== raindrop folder allowlist ==");
     "bare Raindrop container falls back under sync root with canonical other"
   );
   assert.equal(rootRole("Other"), null, "bare Other is not a top-root alias");
+  assert.deepEqual(
+    raindropUploadSegments(["Other", "Raindrop", "Indie"], "Bookmarks"),
+    ["Bookmarks", "Other", "Raindrop", "Indie"],
+    "bare Other is not outside-root landing"
+  );
   const picker = collectionsForAllowlistPicker(index, 1);
   assert.ok(picker.some((p) => p.collectionId === 20 && !p.underSyncRoot));
   assert.ok(picker.some((p) => p.collectionId === 4 && p.underSyncRoot));

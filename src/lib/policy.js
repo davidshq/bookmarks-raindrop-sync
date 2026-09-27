@@ -4,6 +4,9 @@
 // folder that has an explicit override; if none do, the global default applies.
 // `ancestorIds` is nearest-first (the bookmark's parent folder is index 0), so
 // the first override we hit walking the list wins.
+//
+// Prefer `isExcluded` (or bookmarks.isFolderExcluded for folder + parents) over
+// comparing resolvePolicy(...) === POLICY.EXCLUDE at call sites.
 
 import { POLICY } from "./constants.js";
 

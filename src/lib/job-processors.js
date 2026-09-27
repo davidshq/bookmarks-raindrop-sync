@@ -32,6 +32,7 @@ import {
 import * as queue from "./queue.js";
 import {
   getNode,
+  getNodeOrNull,
   getChildren,
   removeNode,
   removeFolder,
@@ -43,7 +44,7 @@ import {
   getTopRoots,
   mirrorPathExists,
   ancestorIdsFromFolder,
-  folderPolicyAncestorIds,
+  isFolderExcluded,
 } from "./bookmarks.js";
 import { resolvePolicy, isExcluded } from "./policy.js";
 import { isNotFoundError } from "./raindrop.js";
@@ -127,7 +128,7 @@ async function processUpload(job, ctx) {
   const { segments, ancestorIds } = await resolveLocation(node);
   const effective = resolvePolicy(ancestorIds, overrides, config.defaultPolicy);
 
-  if (effective === POLICY.EXCLUDE) {
+  if (isExcluded(ancestorIds, overrides, config.defaultPolicy)) {
     await queue.remove(job.id);
     return;
   }
@@ -240,10 +241,8 @@ async function processRenameCollection(job, ctx) {
   const { client, config, overrides, cache, getIndex } = ctx;
   const folderId = job.folderId != null ? String(job.folderId) : String(job.id).replace(/^rc-/, "");
 
-  let node;
-  try {
-    node = await getNode(folderId);
-  } catch {
+  const node = await getNodeOrNull(folderId);
+  if (!node) {
     await clearFolderCollection(folderId);
     await queue.remove(job.id);
     return;
@@ -258,8 +257,7 @@ async function processRenameCollection(job, ctx) {
     return;
   }
 
-  const ancestorIds = await folderPolicyAncestorIds(folderId, node.parentId);
-  if (resolvePolicy(ancestorIds, overrides, config.defaultPolicy) === POLICY.EXCLUDE) {
+  if (await isFolderExcluded(folderId, node.parentId, overrides, config.defaultPolicy)) {
     await queue.remove(job.id);
     return;
   }
@@ -404,13 +402,7 @@ async function processPullUpdate(job, ctx) {
     return;
   }
 
-  let node;
-  try {
-    node = await getNode(bookmarkId);
-  } catch {
-    await queue.remove(job.id);
-    return;
-  }
+  const node = await getNodeOrNull(bookmarkId);
   if (!node?.url) {
     await queue.remove(job.id);
     return;
@@ -483,10 +475,8 @@ async function processPullRenameFolder(job, ctx) {
     return;
   }
 
-  let node;
-  try {
-    node = await getNode(folderId);
-  } catch {
+  const node = await getNodeOrNull(folderId);
+  if (!node) {
     await clearFolderCollection(folderId);
     await queue.remove(job.id);
     return;
@@ -502,8 +492,7 @@ async function processPullRenameFolder(job, ctx) {
     return;
   }
 
-  const ancestorIds = await folderPolicyAncestorIds(folderId, node.parentId);
-  if (resolvePolicy(ancestorIds, overrides, config.defaultPolicy) === POLICY.EXCLUDE) {
+  if (await isFolderExcluded(folderId, node.parentId, overrides, config.defaultPolicy)) {
     await queue.remove(job.id);
     return;
   }
@@ -570,27 +559,32 @@ async function processDeleteEdge(job, ctx) {
   const bookmarkId = job.bookmarkId;
 
   if (bookmarkId) {
-    try {
-      const node = await getNode(bookmarkId);
-      const parentId = node.parentId;
-      const ancestorIds = await ancestorIdsFromFolder(parentId);
-      const label = node.title || node.url || bookmarkId;
-      if (isExcluded(ancestorIds, overrides, config.defaultPolicy)) {
-        await appendLog(
-          "info",
-          `Skipped local delete for excluded bookmark ${label} (raindrop gone).`
-        );
-      } else {
-        await suppressRemove(bookmarkId);
-        await removeNode(bookmarkId);
-        if (config.pruneEmpty) await pruneIfEmpty(parentId, config, overrides);
-        await appendLog(
-          "info",
-          `Deleted local bookmark ${label} (propagated from Raindrop).`
-        );
+    // Missing node → already gone; still clear pair/tombstone below.
+    // Catch remove/prune races the same way so a vanished bookmark cannot
+    // abort the job before clearPairWithTombstone / queue.remove.
+    const node = await getNodeOrNull(bookmarkId);
+    if (node) {
+      try {
+        const parentId = node.parentId;
+        const ancestorIds = await ancestorIdsFromFolder(parentId);
+        const label = node.title || node.url || bookmarkId;
+        if (isExcluded(ancestorIds, overrides, config.defaultPolicy)) {
+          await appendLog(
+            "info",
+            `Skipped local delete for excluded bookmark ${label} (raindrop gone).`
+          );
+        } else {
+          await suppressRemove(bookmarkId);
+          await removeNode(bookmarkId);
+          if (config.pruneEmpty) await pruneIfEmpty(parentId, config, overrides);
+          await appendLog(
+            "info",
+            `Deleted local bookmark ${label} (propagated from Raindrop).`
+          );
+        }
+      } catch {
+        // Already gone between get and remove — still clear mapping below.
       }
-    } catch {
-      // Already gone — still clear mapping.
     }
   }
 

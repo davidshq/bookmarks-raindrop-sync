@@ -431,36 +431,46 @@ async function runReconcile(pendingMsg) {
 
 /* ---- folder policy editor (draft until Apply) ---- */
 
-function cloneOverrides(overrides) {
-  return structuredClone(overrides ?? {});
+/** Deep-clone a plain object map (folder overrides, allowlist, …). */
+function cloneMap(map) {
+  return structuredClone(map ?? {});
 }
 
-function cloneAllowlist(allowlist) {
-  return structuredClone(allowlist ?? {});
-}
-
-function overridesEqual(a, b) {
-  const keysA = Object.keys(a).sort();
-  const keysB = Object.keys(b).sort();
-  if (keysA.length !== keysB.length) return false;
-  for (let i = 0; i < keysA.length; i++) {
-    if (keysA[i] !== keysB[i]) return false;
-    const left = a[keysA[i]];
-    const right = b[keysB[i]];
-    if (left?.policy !== right?.policy || left?.path !== right?.path) return false;
-  }
-  return true;
-}
-
-function allowlistsEqual(a, b) {
+/**
+ * Sorted-key deep equality for draft vs saved maps.
+ * @param {Record<string, unknown>|null|undefined} a
+ * @param {Record<string, unknown>|null|undefined} b
+ * @param {(left: unknown, right: unknown) => boolean} valuesEqual
+ */
+function mapsEqual(a, b, valuesEqual) {
   const keysA = Object.keys(a || {}).sort();
   const keysB = Object.keys(b || {}).sort();
   if (keysA.length !== keysB.length) return false;
   for (let i = 0; i < keysA.length; i++) {
     if (keysA[i] !== keysB[i]) return false;
-    if ((a[keysA[i]]?.path || "") !== (b[keysB[i]]?.path || "")) return false;
+    if (!valuesEqual(a[keysA[i]], b[keysB[i]])) return false;
   }
   return true;
+}
+
+function cloneOverrides(overrides) {
+  return cloneMap(overrides);
+}
+
+function cloneAllowlist(allowlist) {
+  return cloneMap(allowlist);
+}
+
+function overridesEqual(a, b) {
+  return mapsEqual(
+    a,
+    b,
+    (left, right) => left?.policy === right?.policy && left?.path === right?.path
+  );
+}
+
+function allowlistsEqual(a, b) {
+  return mapsEqual(a, b, (left, right) => (left?.path || "") === (right?.path || ""));
 }
 
 function policiesDirty() {

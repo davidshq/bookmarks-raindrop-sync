@@ -6,26 +6,38 @@
 // mirror-all empty folders, and exclude checks cannot drift.
 //
 // Those path helpers share walkFolderTitles (create vs stop-on-missing) so the
-// Edge title walk cannot diverge.
+// Edge title walk cannot diverge. Top-root picking uses rootRole aliases with
+// locale fallbacks so Favorites bar ↔ Bookmarks bar stay aligned.
 //
 // Live Edge folder ancestry (resolveLocation / ancestorIdsFromFolder) shares
 // walkAncestorsFromFolder so upload policy and delete-propagation exclude gates
 // walk the same chain. Upload throws on missing ancestors; delete gates soft-truncate.
 //
-// Folder rename/exclude gates share folderPolicyAncestorIds (folder + parents)
-// so push rename, pull rename, and onChanged cannot disagree on the chain.
+// Folder rename/exclude gates share folderPolicyAncestorIds / isFolderExcluded
+// (folder + parents) so push rename, pull rename, and onChanged cannot disagree.
+// Soft misses use getNodeOrNull (missing id → null) instead of try/catch at each site.
 //
 // Note on identity: the on-disk Chromium "guid" is not exposed by the
 // chrome.bookmarks API. We use the node `id`, which is stable across browser
 // restarts and survives renames/moves within the profile — which is exactly the
 // rename-survival property the design wanted from a GUID.
 
-import { findTopRootByAlias } from "./bookmark-roots.js";
+import { findTopRootByAlias, rootRole } from "./bookmark-roots.js";
 import { OUTSIDE_ROOT_MIRROR_FOLDER } from "./constants.js";
+import { isExcluded } from "./policy.js";
 
 export async function getNode(id) {
   const [node] = await chrome.bookmarks.get(id);
   return node;
+}
+
+/** Like getNode, but returns null when the id is missing (soft miss). */
+export async function getNodeOrNull(id) {
+  try {
+    return await getNode(id);
+  } catch {
+    return null;
+  }
 }
 
 export async function getTree() {
@@ -125,11 +137,11 @@ export async function ensureFolderPath(parentId, titles) {
 export async function resolveMirrorPlacement(relativeSegments, rootName, topRoots) {
   const tops = topRoots ?? (await getTopRoots());
   const other =
-    tops.find((t) => /other/i.test(t.title || "")) ||
-    tops.find((t) => !/bar|toolbar/i.test(t.title || "")) ||
+    tops.find((t) => rootRole(t.title) === "other") ||
+    tops.find((t) => rootRole(t.title) !== "toolbar") ||
     tops[0];
   const bar =
-    tops.find((t) => /bar|toolbar/i.test(t.title || "")) ||
+    tops.find((t) => rootRole(t.title) === "toolbar") ||
     tops.find((t) => /favorite/i.test(t.title || "") && t !== other) ||
     tops[0];
 
@@ -261,6 +273,15 @@ export async function ancestorIdsFromFolder(folderId) {
 export async function folderPolicyAncestorIds(folderId, parentId) {
   const parentAncestors = parentId && parentId !== "0" ? await ancestorIdsFromFolder(parentId) : [];
   return [String(folderId), ...parentAncestors];
+}
+
+/**
+ * True when the folder (or a nearer ancestor override) is effectively exclude.
+ * Shared by rename push/pull and onChanged folder-title gates.
+ */
+export async function isFolderExcluded(folderId, parentId, overrides, defaultPolicy) {
+  const ancestorIds = await folderPolicyAncestorIds(folderId, parentId);
+  return isExcluded(ancestorIds, overrides, defaultPolicy);
 }
 
 // Resolve a bookmark's location into:

@@ -7,6 +7,8 @@
 // disappears.
 // Finish-cycle helpers: reconcile-finish.js. Pull enqueue: reconcile-enqueue.js.
 //
+// List paging uses RAINDROP_LIST_PER_PAGE + isListPageDone (shared with Trash).
+//
 // Rate-limit posture: shared page budget for root + outside-root listing; capped
 // GET /raindrop confirms shared by delete detection + tombstone prune; stop early
 // when the client reports low X-RateLimit-Remaining (throws RateLimitError).
@@ -18,6 +20,8 @@ import {
   SYNC_MODE,
   RAINDROP_FOLDER_MODE,
   MAX_RECONCILE_PAGES_PER_TICK,
+  RAINDROP_LIST_PER_PAGE,
+  isListPageDone,
   JOB,
   reconcileIntervalMs,
 } from "./constants.js";
@@ -46,8 +50,6 @@ import { RaindropClient } from "./raindrop.js";
 import { maybeEnqueuePullCreate } from "./reconcile-enqueue.js";
 import { finishReconcileCycle } from "./reconcile-finish.js";
 
-const PER_PAGE = 50;
-
 /** Job kinds that hit the Raindrop API (compete with listing for rate budget). */
 const RAINDROP_BOUND_KINDS = new Set([
   JOB.UPLOAD,
@@ -63,12 +65,6 @@ const RAINDROP_BOUND_KINDS = new Set([
 export async function hasRaindropBoundQueueWork() {
   const jobs = await queue.list();
   return jobs.some((job) => RAINDROP_BOUND_KINDS.has(queue.jobKind(job)));
-}
-
-/** True when this list page is the last (short page or past total count). */
-function isListPageDone(page, perPage, items, count) {
-  const fetched = (page + 1) * perPage;
-  return items.length < perPage || fetched >= count;
 }
 
 /** In-memory reentrancy guard — overlapping heartbeat + manual reconcile must not interleave. */
@@ -220,7 +216,7 @@ async function reconcileOnce({ force }) {
       while (pages < MAX_RECONCILE_PAGES_PER_TICK) {
         const { items, count } = await client.listRaindrops(root._id, {
           page,
-          perPage: PER_PAGE,
+          perPage: RAINDROP_LIST_PER_PAGE,
           nested: true,
         });
         pages++;
@@ -234,7 +230,7 @@ async function reconcileOnce({ force }) {
           });
         }
 
-        if (isListPageDone(page, PER_PAGE, items, count)) {
+        if (isListPageDone(page, RAINDROP_LIST_PER_PAGE, items, count)) {
           // Root listing done — start outside-root with remaining page budget.
           if (isAllowlistActive(allowlist)) {
             const started = startOutsideCursor(allowlist, index, root._id);
@@ -366,7 +362,7 @@ async function continueOutsideRoot(client, cursor, pullCtx, maxPages) {
     }
     const { items, count } = await client.listRaindrops(id, {
       page,
-      perPage: PER_PAGE,
+      perPage: RAINDROP_LIST_PER_PAGE,
       nested: true,
     });
     pages++;
@@ -378,7 +374,7 @@ async function continueOutsideRoot(client, cursor, pullCtx, maxPages) {
       );
     }
 
-    if (isListPageDone(page, PER_PAGE, items, count)) {
+    if (isListPageDone(page, RAINDROP_LIST_PER_PAGE, items, count)) {
       i++;
       page = 0;
     } else {

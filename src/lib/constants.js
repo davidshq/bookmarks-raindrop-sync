@@ -168,6 +168,19 @@ export const MAX_TRASH_PAGES_PER_TICK = 3;
 /** Raindrop list page size (API max 50). */
 export const RAINDROP_LIST_PER_PAGE = 50;
 
+/**
+ * True when a Raindrop list page is the last (short page or past total count).
+ * Shared by sync-root listing, outside-root listing, and Trash paging.
+ * @param {number} page zero-based page index just fetched
+ * @param {number} perPage page size used for the request
+ * @param {unknown[]} items items returned on this page
+ * @param {number} count total items reported by the API
+ */
+export function isListPageDone(page, perPage, items, count) {
+  const fetched = (page + 1) * perPage;
+  return items.length < perPage || fetched >= count;
+}
+
 // Suppression windows for extension-authored bookmark create/remove events.
 export const SUPPRESS_MS = 15_000;
 

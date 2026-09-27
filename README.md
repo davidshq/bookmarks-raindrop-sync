@@ -111,7 +111,8 @@ src/
   lib/
     bookmark-roots.js      canonical toolbar/other titles + aliases
     migrate-roots.js       one-shot Edge/Favorites → Bookmarks migration
-    constants.js, store.js, queue.js, raindrop.js, collections.js, …
+    constants.js           shared constants + isListPageDone
+    store.js, queue.js, raindrop.js, collections.js, …
     sync.js, drain.js, job-processors.js, live-handlers.js, reconcile*.js
   options/  popup/
 scripts/

@@ -9,8 +9,12 @@
 //
 // Index maps store dual keys (id + String(id)); use getById / getByParent so
 // call sites never miss a collection due to number/string mismatch.
+//
+// Parent-chain walks share walkCollectionAncestors (path-from-root, absolute
+// path, allowlist membership). Outside-root landing uses isOutsideRootLandingSegments
+// (rootRole + Raindrop container) so upload and folder→collection recording agree.
 
-import { canonicalizeUploadSegments } from "./bookmark-roots.js";
+import { canonicalizeUploadSegments, rootRole } from "./bookmark-roots.js";
 import { OUTSIDE_ROOT_MIRROR_FOLDER } from "./constants.js";
 
 const ROOT = "root"; // sentinel parent key for top-level collections
@@ -66,23 +70,49 @@ export function findRootCollection(index, title) {
 }
 
 /**
+ * Walk Raindrop collection parents from `startId` toward the account top.
+ *
+ * `visit(col)` returns `"continue"`, `"stop"` (success), or `"abort"` (failure).
+ * Hitting a null parent after continues yields `{ ok: true, hitTop: true }`.
+ * Cycles, missing start, or `"abort"` yield `{ ok: false }`.
+ *
+ * @param {{ byId?: Map }|null|undefined} index
+ * @param {string|number} startId
+ * @param {(col: object) => "continue"|"stop"|"abort"} visit
+ * @returns {{ ok: boolean, hitTop: boolean }}
+ */
+export function walkCollectionAncestors(index, startId, visit) {
+  let current = getById(index, startId);
+  if (!current) return { ok: false, hitTop: false };
+  const seen = new Set();
+  while (current) {
+    if (seen.has(current._id)) return { ok: false, hitTop: false };
+    seen.add(current._id);
+    const action = visit(current);
+    if (action === "abort") return { ok: false, hitTop: false };
+    if (action === "stop") return { ok: true, hitTop: false };
+    const parentId = current.parent?.$id;
+    if (parentId == null) return { ok: true, hitTop: true };
+    current = getById(index, parentId);
+    if (!current) return { ok: false, hitTop: false };
+  }
+  return { ok: false, hitTop: false };
+}
+
+/**
  * Titles from the configured root down to `collectionId` (inclusive of root).
  * Returns [] if the collection is not under the root.
  */
 export function collectionPathFromRoot(index, collectionId, rootId) {
   const titles = [];
-  let current = getById(index, collectionId);
-  const seen = new Set();
-  while (current) {
-    if (seen.has(current._id)) return [];
-    seen.add(current._id);
-    titles.unshift(current.title || "");
-    if (String(current._id) === String(rootId)) return titles;
-    const parentId = current.parent?.$id;
-    if (parentId == null) return []; // walked off the top without hitting root
-    current = getById(index, parentId);
-  }
-  return [];
+  const result = walkCollectionAncestors(index, collectionId, (col) => {
+    titles.unshift(col.title || "");
+    if (String(col._id) === String(rootId)) return "stop";
+    return "continue";
+  });
+  // Must stop on the root — walking off the top without hitting it is a miss.
+  if (!result.ok || result.hitTop) return [];
+  return titles;
 }
 
 /** True when `id` is present in the live collection index. */
@@ -115,17 +145,26 @@ export function collectionsUnderRoot(index, rootId) {
  */
 export function collectionAbsolutePath(index, collectionId) {
   const titles = [];
-  let current = getById(index, collectionId);
-  const seen = new Set();
-  while (current) {
-    if (seen.has(current._id)) return [];
-    seen.add(current._id);
-    titles.unshift(current.title || "");
-    const parentId = current.parent?.$id;
-    if (parentId == null) return titles;
-    current = getById(index, parentId);
-  }
-  return [];
+  const result = walkCollectionAncestors(index, collectionId, (col) => {
+    titles.unshift(col.title || "");
+    return "continue";
+  });
+  return result.ok ? titles : [];
+}
+
+/**
+ * True when Edge segments are the outside-root landing zone:
+ * Other bookmarks|favorites / Raindrop / …
+ * Uses rootRole so bare "Other" is not treated as a top root.
+ * @param {string[]|null|undefined} edgeSegments
+ */
+export function isOutsideRootLandingSegments(edgeSegments) {
+  const segs = edgeSegments || [];
+  return (
+    segs.length >= 2 &&
+    rootRole(segs[0]) === "other" &&
+    (segs[1] || "").toLowerCase() === OUTSIDE_ROOT_MIRROR_FOLDER.toLowerCase()
+  );
 }
 
 /**
@@ -160,11 +199,7 @@ export function mirrorRelativeSegments(index, collectionId, syncRootId) {
  */
 export function raindropUploadSegments(edgeSegments, rootName) {
   const segs = edgeSegments || [];
-  if (
-    segs.length >= 2 &&
-    /other/i.test(segs[0] || "") &&
-    (segs[1] || "").toLowerCase() === OUTSIDE_ROOT_MIRROR_FOLDER.toLowerCase()
-  ) {
+  if (isOutsideRootLandingSegments(segs)) {
     const rest = segs.slice(2);
     if (rest.length) return rest;
   }
@@ -298,11 +333,7 @@ export async function recordFolderCollectionsAlongPath(
   }
 
   // Outside-root landing: Other favorites / Raindrop / rest → full = rest.
-  if (
-    segs.length >= 2 &&
-    /other/i.test(segs[0] || "") &&
-    (segs[1] || "").toLowerCase() === OUTSIDE_ROOT_MIRROR_FOLDER.toLowerCase()
-  ) {
+  if (isOutsideRootLandingSegments(segs)) {
     const restFolders = edgeIdsRootFirst.slice(2);
     for (let i = 0; i < full.length && i < restFolders.length; i++) {
       const path = full.slice(0, i + 1).join("/");

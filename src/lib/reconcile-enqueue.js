@@ -6,7 +6,7 @@ import { hasTombstone, appendLog } from "./store.js";
 import * as queue from "./queue.js";
 import { isExcluded } from "./policy.js";
 import {
-  getNode,
+  getNodeOrNull,
   ancestorIdsForMirrorPath,
   mirrorPathExists,
   ensureMirrorFolderPath,
@@ -78,12 +78,7 @@ export async function maybeEnqueuePullCreate(item, ctx, resolveRelative) {
  * @returns {Promise<0|1>}
  */
 async function maybeEnqueuePullUpdate(item, ctx, relative, bookmarkId, colId) {
-  let node;
-  try {
-    node = await getNode(bookmarkId);
-  } catch {
-    return 0;
-  }
+  const node = await getNodeOrNull(bookmarkId);
   if (!node?.url) return 0;
 
   const plan = await computePullUpdatePlan({

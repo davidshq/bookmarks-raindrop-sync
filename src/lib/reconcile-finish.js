@@ -13,6 +13,7 @@ import {
   MAX_TRASH_PAGES_PER_TICK,
   RAINDROP_LIST_PER_PAGE,
   RAINDROP_TRASH_COLLECTION_ID,
+  isListPageDone,
 } from "./constants.js";
 import { rootTitlesEqual } from "./bookmark-roots.js";
 import {
@@ -26,8 +27,7 @@ import {
   appendLog,
 } from "./store.js";
 import * as queue from "./queue.js";
-import { isExcluded } from "./policy.js";
-import { getNode, folderPolicyAncestorIds } from "./bookmarks.js";
+import { getNodeOrNull, isFolderExcluded } from "./bookmarks.js";
 import { getById } from "./collections.js";
 import { AuthError, RateLimitError, isNotFoundError } from "./raindrop.js";
 import { ensureAllowlistedOrMirrorAll } from "./reconcile-enqueue.js";
@@ -129,8 +129,7 @@ async function finishTrashDeleteDetection(client, pairs) {
       if (added) deleteJobs++;
     }
 
-    const fetched = (page + 1) * RAINDROP_LIST_PER_PAGE;
-    if (items.length < RAINDROP_LIST_PER_PAGE || fetched >= count) break;
+    if (isListPageDone(page, RAINDROP_LIST_PER_PAGE, items, count)) break;
     page++;
   }
 
@@ -288,10 +287,8 @@ async function finishFolderRenamePull(index, config, overrides) {
       continue;
     }
 
-    let node;
-    try {
-      node = await getNode(folderId);
-    } catch {
+    const node = await getNodeOrNull(folderId);
+    if (!node) {
       await clearFolderCollection(folderId);
       continue;
     }
@@ -302,8 +299,9 @@ async function finishFolderRenamePull(index, config, overrides) {
     // Do not push canonical bar/other titles onto local Favorites/Other roots.
     if (rootTitlesEqual(node.title, wantTitle)) continue;
 
-    const ancestorIds = await folderPolicyAncestorIds(folderId, node.parentId);
-    if (isExcluded(ancestorIds, overrides, config.defaultPolicy)) continue;
+    if (await isFolderExcluded(folderId, node.parentId, overrides, config.defaultPolicy)) {
+      continue;
+    }
 
     const added = await queue.enqueueJob({
       id: `ref-${folderId}`,

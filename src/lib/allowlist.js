@@ -6,12 +6,14 @@
 // allowlist. Empty allowlist leaves raindropFolderMode behavior unchanged
 // (still scoped to the sync root only).
 //
+// Membership walks share collections.walkCollectionAncestors with path helpers.
+//
 // Stale entries (collections deleted from Raindrop) are pruned. Fully mirrored
 // subtrees stay on the allowlist until the user clears selection — selective
 // mode must not auto-exit and undo a saved opt-in (especially with
 // existing-only, where an empty allowlist skips all Raindrop-only creates).
 
-import { getById } from "./collections.js";
+import { getById, walkCollectionAncestors } from "./collections.js";
 import { RAINDROP_FOLDER_MODE } from "./constants.js";
 
 /**
@@ -35,19 +37,18 @@ export function isCollectionAllowed(collectionId, index, rootId, allowlist) {
   if (!isAllowlistActive(allowlist) || collectionId == null || !index?.byId) {
     return false;
   }
-  let current = getById(index, collectionId);
-  const seen = new Set();
-  while (current) {
-    if (seen.has(current._id)) return false;
-    seen.add(current._id);
-    const key = String(current._id);
-    if (allowlist[key] || allowlist[current._id]) return true;
-    if (rootId != null && String(current._id) === String(rootId)) return false;
-    const parentId = current.parent?.$id;
-    if (parentId == null) return false;
-    current = getById(index, parentId);
-  }
-  return false;
+  let allowed = false;
+  const result = walkCollectionAncestors(index, collectionId, (col) => {
+    const key = String(col._id);
+    if (allowlist[key] || allowlist[col._id]) {
+      allowed = true;
+      return "stop";
+    }
+    // Sync root is not an implicit allow — stop without matching.
+    if (rootId != null && String(col._id) === String(rootId)) return "abort";
+    return "continue";
+  });
+  return allowed && result.ok;
 }
 
 /**
