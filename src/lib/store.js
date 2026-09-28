@@ -662,8 +662,9 @@ export async function getStatus() {
      */
     lastThrottle: null,
     /**
-     * Why heartbeat skipped a Raindrop listing (busy / cooldown / bulk_pause).
-     * Cleared when a non-skipped reconcile runs. null when idle/ok.
+     * Why heartbeat skipped a Raindrop listing (busy=reentrancy / cooldown /
+     * bulk_pause / rate_limited). Cleared when a non-skipped reconcile runs.
+     * Not used for queue-contention deferral. null when idle/ok.
      * @type {null|"busy"|"cooldown"|"bulk_pause"|"rate_limited"}
      */
     reconcileSkipReason: null,
@@ -715,8 +716,8 @@ export function formatReconcileSkipNotice(status, pendingFallback) {
   switch (reason) {
     case "busy":
       return (
-        `Raindrop check deferred: sync queue still has Raindrop work${pendingBit}. ` +
-        `Uploads/pulls continue to drip; use Pull now to force a check.`
+        `Raindrop check already running${pendingBit}. ` +
+        `Wait for it to finish; queue depth alone does not defer listing.`
       );
     case "cooldown":
       return (

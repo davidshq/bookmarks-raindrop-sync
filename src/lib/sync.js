@@ -17,7 +17,7 @@ import {
   clearReconcileSkip,
 } from "./store.js";
 import { RateLimitError } from "./raindrop.js";
-import { reconcile, hasRaindropBoundQueueWork } from "./reconcile.js";
+import { reconcile } from "./reconcile.js";
 import { handleClientError } from "./client-errors.js";
 import { drain } from "./drain.js";
 import { isBulkDrainPausedNow } from "./queue-bulk-prompt.js";
@@ -35,14 +35,10 @@ export {
 
 /**
  * After Match / Continue drip clears needs_choice, drop a stale bulk_pause
- * skip line. If the queue still has Raindrop work, stamp busy immediately so
- * Status stays honest without waiting for the next heartbeat.
+ * skip line. Remaining Raindrop-bound jobs are not a listing deferral — tick
+ * prefer-drains then uses leftover spendable for Trash/list.
  */
 export async function refreshReconcileSkipAfterBulkResume() {
-  if (await hasRaindropBoundQueueWork()) {
-    await noteReconcileSkip("busy", { pending: await queue.size() });
-    return;
-  }
   await clearReconcileSkip();
 }
 

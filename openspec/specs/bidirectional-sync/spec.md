@@ -247,7 +247,7 @@ When the user moves a mapped Edge bookmark or folder (parent change only), or re
 - **AND** an `edge-offload` tombstone is recorded as for create-time offload
 
 ### Requirement: Reconcile slices share per-wake spendable budget
-When sync mode is `bidirectional`, Raindrop listing pages, Trash listing pages, and missing-raindrop confirm GETs on a heartbeat or Pull-now wake SHALL consume the same per-wake header-driven spendable budget and soft wake cap as drain work on that wake (as specified by bookmark-sync-engine). The engine SHALL prefer completing due drain work before starting large list/confirm slices when both compete for the same wake budget, but SHALL still allow Trash peek and small list/confirm progress when spendable remains after drain (busy-mutex rules for *starting* a new cycle remain unchanged). Confirm GETs SHALL NOT be primarily limited to a fixed historical count of 8 when spendable and wake cap remain.
+When sync mode is `bidirectional`, Raindrop listing pages, Trash listing pages, and missing-raindrop confirm GETs on a heartbeat or Pull-now wake SHALL consume the same per-wake header-driven spendable budget and soft wake cap as drain work on that wake (as specified by bookmark-sync-engine). The engine SHALL prefer completing due drain work before starting large list/confirm slices when both compete for the same wake budget, and SHALL still allow Trash peek and list/confirm progress when spendable remains after drain even if Raindrop-bound queue jobs remain. Confirm GETs SHALL NOT be primarily limited to a fixed historical count of 8 when spendable and wake cap remain.
 
 #### Scenario: Confirm GETs follow spendable not magic eight
 - **WHEN** bidirectional reconcile finish has many unparked missing-raindrop candidates
@@ -265,3 +265,10 @@ When sync mode is `bidirectional`, Raindrop listing pages, Trash listing pages, 
 - **WHEN** the last reconcile finish was settled and quiet-time cooldown applies
 - **AND** the durable queue is idle
 - **THEN** heartbeat does not start a full nested listing solely to consume leftover spendable
+
+#### Scenario: Leftover spendable funds Trash while queue has work
+- **WHEN** the durable queue still contains Raindrop-bound jobs
+- **AND** prefer-drain leaves spendable remaining on a heartbeat wake
+- **AND** quiet-time cooldown does not apply (interval elapsed or unsettled catch-up)
+- **THEN** the engine may run Trash listing and/or list/confirm slices on that leftover budget
+- **AND** does not skip solely with reason `busy` for queue contention

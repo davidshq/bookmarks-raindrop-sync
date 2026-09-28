@@ -51,15 +51,15 @@ Chrome and Edge do not fork collections.
   delete the Raindrop copy.
 - **Bidirectional pull** — raindrops under the root appear as browser bookmarks
   (files/documents skipped); deletes propagate both ways with tombstones.
-  Heartbeat reconcile uses your quiet-time interval when idle, and skips starting
-  a new listing while Raindrop-bound jobs are still queued. Out-of-scope living
-  pairs (e.g. cleared allowlist) are parked after confirm so they stop burning
-  delete-check budget; Trash still catches soft-deletes. Options → Status shows
-  pending jobs split by Edge→Raindrop vs Raindrop→Edge, and why a Raindrop check
-  was deferred (queue busy, cooldown, rate-limit pause, or bulk-queue pause).
-  Heartbeat / Pull now / Drain now size Raindrop work from
-  `X-RateLimit-Remaining` (soft per-wake cap); Status distinguishes a real
-  Raindrop pause from a self wake-cap stop.
+  Heartbeat reconcile uses your quiet-time interval when idle and settled;
+  each wake prefer-drains the sync queue then uses leftover Raindrop budget for
+  Trash / list. Out-of-scope living pairs (e.g. cleared allowlist) are parked
+  after confirm so they stop burning delete-check budget; Trash still catches
+  soft-deletes. Options → Status shows pending jobs split by Edge→Raindrop vs
+  Raindrop→Edge, and why a Raindrop check was deferred (already running,
+  cooldown, rate-limit pause, or bulk-queue pause). Heartbeat / Pull now /
+  Drain now size Raindrop work from `X-RateLimit-Remaining` (soft per-wake
+  cap); Status distinguishes a real Raindrop pause from a self wake-cap stop.
   Throughput / cooldown design target: [`docs/sync-architecture-right-sizing.md`](docs/sync-architecture-right-sizing.md).
   **Raindrop → browser folders** chooses create-as-needed / existing-only /
   mirror-all. Outside-root allowlist picks land under Other bookmarks / Raindrop

@@ -1215,7 +1215,7 @@ async function scenario68_rateLimitBudget() {
   const quiet = await eng.reconcile.reconcile({ force: false });
   assert.notEqual(quiet.skipped, true, "quiet + short interval starts a new listing");
 
-  // Adaptive: queued Raindrop-bound job defers a new cycle (busy).
+  // Ordered share: queued Raindrop-bound job does not hard-skip new listing.
   await eng.queue.enqueue(bm.id);
   await eng.store.setReconcileState({
     cursorPage: 0,
@@ -1227,14 +1227,43 @@ async function scenario68_rateLimitBudget() {
     unsettledConfirmCatchUp: false,
     lastError: null,
   });
-  const queuedBusy = await eng.reconcile.reconcile({ force: false });
-  assert.equal(queuedBusy.skipped, true, "queued upload defers new listing");
-  assert.equal(queuedBusy.reason, "busy", "queue contention reason is busy");
-  const forceBusy = await eng.reconcile.reconcile({ force: true });
-  assert.notEqual(forceBusy.skipped, true, "Pull now bypasses queue-busy");
+  const queuedShare = await eng.reconcile.reconcile({ force: false });
+  assert.notEqual(queuedShare.skipped, true, "queued upload does not hard-skip listing");
+  assert.notEqual(queuedShare.reason, "busy", "queue contention is not busy");
   await eng.queue.clear();
 
-  // Adaptive: in-progress cursor continues even with queue contention.
+  // Exhausted wake budget: new cycle must not burn collection-index GETs.
+  const emptyBudget = new eng.wakeBudget.WakeBudget({
+    mode: "full",
+    headerRemaining: 100,
+    headerResetAt: Date.now() + 60_000,
+    wakeCapReqs: 1,
+  });
+  emptyBudget.noteRequest({ remaining: 99, resetAt: Date.now() + 60_000 });
+  assert.equal(emptyBudget.allowance(), 0, "fixture budget is empty");
+  await eng.store.setReconcileState({
+    cursorPage: 0,
+    outsideCursor: null,
+    seenAcc: null,
+    running: false,
+    lastRunAt: Date.now() - 90_000,
+    lastSettledAt: Date.now() - 90_000,
+    unsettledConfirmCatchUp: false,
+    lastError: null,
+  });
+  let rootFetches = 0;
+  const prevRootCount = Proto.getRootCollections;
+  Proto.getRootCollections = async function (...args) {
+    rootFetches++;
+    return prevRootCount.apply(this, args);
+  };
+  const noLeftover = await eng.reconcile.reconcile({ force: false, budget: emptyBudget });
+  Proto.getRootCollections = prevRootCount;
+  assert.equal(rootFetches, 0, "empty leftover budget skips collection index");
+  assert.notEqual(noLeftover.skipped, true, "budget empty is not a Status skip reason");
+  assert.equal(noLeftover.enqueued, 0, "no work enqueued without leftover budget");
+
+  // In-progress cursor continues even with queue work present.
   await eng.queue.enqueue(bm.id);
   await eng.store.setReconcileState({
     cursorPage: 1,
@@ -1247,7 +1276,7 @@ async function scenario68_rateLimitBudget() {
     lastError: null,
   });
   const midCycle = await eng.reconcile.reconcile({ force: false });
-  assert.notEqual(midCycle.reason, "busy", "in-progress cursor ignores busy gate");
+  assert.notEqual(midCycle.reason, "busy", "in-progress cursor is not busy-skipped");
   assert.notEqual(midCycle.skipped, true, "in-progress cursor continues listing");
   await eng.queue.clear();
 
@@ -1265,7 +1294,7 @@ async function scenario68_rateLimitBudget() {
 
   console.log(
     "  ✔ global gate, capped confirms, round-robin, skip reasons, settled cooldown, " +
-      "unsettled catch-up, queue-busy, reconcileNow gate"
+      "unsettled catch-up, ordered share, empty-budget gate, reconcileNow gate"
   );
 }
 
@@ -2722,12 +2751,12 @@ async function scenario75_bulkDrainPauseAndResume() {
   assert.equal(snoozed.status, BULK_PROMPT_IDLE);
   assert.ok(snoozed.snoozedBelow != null);
 
-  // Continue drip must not leave a stale bulk_pause line when queue still busy.
+  // Continue drip must not leave a stale bulk_pause line (or invent busy).
   await eng.sync.refreshReconcileSkipAfterBulkResume();
   assert.equal(
     (await eng.store.getStatus()).reconcileSkipReason,
-    "busy",
-    "after continue, skip becomes busy while Raindrop-bound jobs remain"
+    null,
+    "after continue, skip is cleared even while Raindrop-bound jobs remain"
   );
 
   // Clear phantoms so one drain finishes the real upload (proves gate lift, not

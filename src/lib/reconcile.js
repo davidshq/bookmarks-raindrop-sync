@@ -13,10 +13,11 @@
 // outside-root listing, Trash, and confirm GETs; stop early when the client
 // reports low X-RateLimit-Remaining (throws RateLimitError). Soft page/confirm
 // constants are fairness backstops under spendable.
-// Heartbeat starts a *new* cycle only when the quiet-time interval has elapsed
-// since the last *settled* finish (or confirm catch-up is still unsettled) and
-// the durable queue has no Raindrop-bound jobs; in-progress cursors always
-// continue. Pull now (force) bypasses interval and queue-busy.
+// Heartbeat prefer-drains first (tick), then may start a *new* cycle when the
+// quiet-time interval has elapsed since the last *settled* finish (or confirm
+// catch-up is still unsettled). Raindrop-bound queue jobs do NOT hard-skip
+// listing — leftover spendable funds Trash / list / confirm. In-progress
+// cursors always continue. Pull now (force) bypasses interval.
 
 import {
   SYNC_MODE,
@@ -129,20 +130,24 @@ async function reconcileOnce({ force, budget }) {
 
   const state = await getReconcileState();
   const inProgress = isReconcileInProgress(state);
-  // Heartbeat only: after in-progress continues, defer new cycles while the
-  // durable queue still has Raindrop work; then honor quiet-time only after a
+  // Heartbeat only: after in-progress continues, honor quiet-time only after a
   // *settled* finish. Unsettled confirm catch-up skips cooldown so Status never
   // shows “0 pending + wait N minutes” over a postponed confirm mountain.
-  // Pull now (force) bypasses busy + cooldown; hard rateLimitedUntil already gated.
+  // Queue work is not a hard skip — tick prefer-drains first; leftover spendable
+  // funds Trash/list. Pull now (force) bypasses cooldown; rateLimitedUntil gated.
+  // Skip reason `busy` is only the in-process reconciling reentrancy above.
   if (!force && !inProgress) {
-    if (await hasRaindropBoundQueueWork()) {
-      return { enqueued: 0, pages: 0, done: true, skipped: true, reason: "busy" };
-    }
     if (!state.unsettledConfirmCatchUp) {
       const settledAt = state.lastSettledAt ?? state.lastRunAt;
       if (settledAt && Date.now() - settledAt < reconcileIntervalMs(config)) {
         return { enqueued: 0, pages: 0, done: true, skipped: true, reason: "cooldown" };
       }
+    }
+    // Prefer-drain may have emptied the shared wake budget — do not start a
+    // new cycle that would still burn collection-index GETs. In-progress and
+    // Pull now may continue; Status self-cap is lastThrottle, not a skip reason.
+    if (budget.shouldStop()) {
+      return { enqueued: 0, pages: 0, done: true };
     }
   }
 

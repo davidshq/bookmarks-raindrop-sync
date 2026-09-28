@@ -199,10 +199,10 @@
             </select>
           </label>
           <p id="reconcileIntervalHelp" class="field-help hint">
-            How often to check Raindrop when the sync queue is idle and confirm catch-up is
-            settled. Polling waits while uploads or other Raindrop work is still queued; unfinished
-            missing-raindrop checks continue every minute. Use <strong>Pull now</strong> for an
-            immediate check.
+            How often to start a full Raindrop check when confirm catch-up is settled. Each
+            heartbeat prefers draining the sync queue, then uses leftover Raindrop budget for
+            Trash / list work — queued jobs do not hard-block listing. Unfinished missing-raindrop
+            checks continue every minute. Use <strong>Pull now</strong> for an immediate check.
           </p>
           <label>
             Raindrop → browser folders

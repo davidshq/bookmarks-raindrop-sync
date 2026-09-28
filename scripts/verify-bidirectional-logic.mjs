@@ -970,8 +970,13 @@ console.log("== reconcile skip Status copy ==");
 {
   const { formatReconcileSkipNotice } = await import("../src/lib/store.js");
   assert.equal(formatReconcileSkipNotice(null), null);
-  assert.ok(formatReconcileSkipNotice({ reconcileSkipReason: "busy", reconcileSkipPending: 40 }).includes("40"));
-  assert.ok(formatReconcileSkipNotice({ reconcileSkipReason: "busy", reconcileSkipPending: 40 }).includes("Pull now"));
+  const busyNotice = formatReconcileSkipNotice({
+    reconcileSkipReason: "busy",
+    reconcileSkipPending: 40,
+  });
+  assert.ok(busyNotice.includes("40"));
+  assert.ok(busyNotice.includes("already running"), "busy copy is reentrancy");
+  assert.ok(!busyNotice.includes("sync queue still has"), "busy is not queue contention");
   const coolNotice = formatReconcileSkipNotice({ reconcileSkipReason: "cooldown" });
   assert.ok(coolNotice.includes("cooldown"));
   assert.ok(coolNotice.includes("settled"), "cooldown copy mentions settled check");

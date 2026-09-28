@@ -291,27 +291,39 @@ When reconcile finish postpones unparked missing-raindrop confirm GETs because s
 - **AND** the message does not claim “rate-limit budget”
 
 ### Requirement: Traffic-aware heartbeat reconcile deferral
-When sync mode is `bidirectional` and the heartbeat would start a *new* Raindrop reconcile cycle (no in-progress cursor), the engine SHALL skip starting that cycle when the durable queue still contains jobs that perform Raindrop API work. The skip result SHALL use machine-readable reason `busy`. In-progress reconcile cursors SHALL continue on subsequent heartbeats regardless of queue contention. A user-triggered "Pull now" SHALL NOT be deferred for queue contention (it SHALL still honor the global rate-limit pause). Low rate-limit remaining is handled by the existing hard pause (`rateLimitedUntil`), not a separate durable soft-busy snapshot.
+When sync mode is `bidirectional`, heartbeat SHALL share one per-wake spendable budget across prefer-drain then reconcile (Trash / list / confirm) then a second drain. The engine SHALL NOT skip starting a *new* Raindrop reconcile cycle solely because the durable queue still contains Raindrop-bound jobs. Settled quiet-time cooldown, in-progress cursor continue, bulk_pause, and the hard rate-limit pause (`rateLimitedUntil`) remain. Machine-readable skip reason `busy` SHALL mean in-process reentrancy (reconcile already running), not queue contention. A user-triggered "Pull now" SHALL bypass quiet-time cooldown (it SHALL still honor the global rate-limit pause).
 
-#### Scenario: Queue busy defers new listing
-- **WHEN** bidirectional mode is on and the quiet-time reconcile interval has elapsed
+#### Scenario: Queue work does not block leftover listing
+- **WHEN** bidirectional mode is on and the quiet-time reconcile interval has elapsed (or unsettled confirm catch-up is active)
 - **AND** no in-progress reconcile cursor remains
 - **AND** the durable queue still contains at least one Raindrop-bound job
-- **AND** the heartbeat fires without `force`
-- **THEN** the engine skips starting a new Raindrop listing pass
-- **AND** the result reason is `busy`
+- **AND** the heartbeat fires without `force` after prefer-drain left spendable remaining
+- **THEN** the engine starts or continues Raindrop Trash / list / confirm work on that leftover budget
+- **AND** the result reason is not `busy` solely because of queue contention
 
 #### Scenario: Quiet install honors configured interval
 - **WHEN** bidirectional mode is on and the quiet-time reconcile interval has elapsed
 - **AND** no in-progress reconcile cursor remains
-- **AND** the durable queue has no Raindrop-bound jobs
+- **AND** the last finish was settled (no unsettled confirm catch-up)
 - **AND** the heartbeat fires without `force`
-- **THEN** the engine starts a Raindrop listing pass for the configured root tree
+- **THEN** the engine starts a Raindrop listing pass for the configured root tree subject to spendable and wake cap
 
-#### Scenario: In-progress cursor ignores busy gate
+#### Scenario: In-progress cursor continues with queue work
 - **WHEN** a reconcile cycle is mid-cursor across heartbeats
 - **AND** Raindrop-bound jobs are also queued
-- **THEN** the engine continues the in-progress listing/finish work on the next heartbeat subject to rate-limit pause
+- **THEN** the engine continues the in-progress listing/finish work on the next heartbeat subject to rate-limit pause and shared spendable
+
+#### Scenario: Reentrancy still reports busy
+- **WHEN** reconcile is already running in-process
+- **AND** another reconcile entry is attempted
+- **THEN** the result is skipped with reason `busy`
+
+#### Scenario: Empty leftover budget skips new cycle index
+- **WHEN** prefer-drain has exhausted the shared wake budget
+- **AND** no in-progress reconcile cursor remains
+- **AND** the heartbeat would start a new cycle without `force`
+- **THEN** the engine does not fetch collection index for that cycle
+- **AND** it does not invent a queue-contention `busy` skip reason
 
 ### Requirement: Live capture of Edge bookmark moves
 The extension SHALL register a `chrome.bookmarks.onMoved` listener. When a URL bookmark's parent folder changes, the engine SHALL enqueue a durable upload job for that bookmark's id and signal drain. When a folder is moved, the engine SHALL walk the folder's live descendant tree, enqueue an upload job for each URL bookmark, and signal drain once. Same-parent moves (index-only reorders) SHALL NOT enqueue work. Folder nodes themselves SHALL NOT enqueue a job for the folder id.
@@ -475,7 +487,7 @@ The drain loop SHALL check bulk-prompt state and SHALL skip processing Raindrop-
 - **THEN** reconcile listing is skipped with reason `bulk_pause`
 
 ### Requirement: Heartbeat reconcile skip reasons include bulk_pause
-When sync mode is `bidirectional`, heartbeat reconcile skip reasons SHALL include machine-readable `bulk_pause` in addition to `busy`, `rate_limited`, and `cooldown`. The engine SHALL set `bulk_pause` when durable bulk-prompt state is `needs_choice` and SHALL skip starting or continuing Raindrop listing work on that heartbeat tick (after the drain pause already applies). A user-triggered "Pull now" SHALL NOT be the primary remediation for `bulk_pause`; Match or Continue drip on Status SHALL resolve the prompt.
+When sync mode is `bidirectional`, heartbeat reconcile skip reasons SHALL include machine-readable `bulk_pause` in addition to `busy` (reentrancy only), `rate_limited`, and `cooldown`. The engine SHALL set `bulk_pause` when durable bulk-prompt state is `needs_choice` and SHALL skip starting or continuing Raindrop listing work on that heartbeat tick (after the drain pause already applies). A user-triggered "Pull now" SHALL NOT be the primary remediation for `bulk_pause`; Match or Continue drip on Status SHALL resolve the prompt.
 
 #### Scenario: Bulk prompt stamps bulk_pause
 - **WHEN** bulk-prompt state is `needs_choice`
@@ -487,6 +499,7 @@ When sync mode is `bidirectional`, heartbeat reconcile skip reasons SHALL includ
 - **WHEN** Status refreshes after a deferred Raindrop check
 - **THEN** `busy`, `cooldown`, `rate_limited`, and `bulk_pause` remain distinguishable machine-readable reasons
 - **AND** the Options UI can surface matching copy for each
+- **AND** `busy` is not used to mean durable queue contention
 
 ### Requirement: Rename jobs drain before path-mutating jobs
 The drain loop SHALL process due `rename-collection` and `pull-rename-folder` jobs before due upload and `pull-update` / `pull-create` jobs so a pending child job does not ensure a Raindrop or Edge path under a new folder title before the in-place rename runs.

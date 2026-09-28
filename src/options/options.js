@@ -320,10 +320,7 @@ async function refreshStatus() {
   const skipStatus =
     resp.status?.reconcileSkipReason === "bulk_pause" &&
     resp.bulkPrompt?.status !== BULK_PROMPT_NEEDS_CHOICE
-      ? {
-          ...resp.status,
-          reconcileSkipReason: (resp.pending ?? 0) > 0 ? "busy" : null,
-        }
+      ? { ...resp.status, reconcileSkipReason: null }
       : resp.status;
   const skipText = formatReconcileSkipNotice(skipStatus, resp.pending);
   if (skipText) {
