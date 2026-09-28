@@ -1,7 +1,12 @@
 // Queue drain loop: processes due jobs with rate-limit / auth gates.
 // Job kind handlers live in job-processors.js; Auth/429 handling in client-errors.js.
+// Full wakes share a WakeBudget with reconcile; opportunistic drains use a short budget.
 
-import { JOB, drainJobsCap } from "./constants.js";
+import {
+  JOB,
+  SOFT_MAX_DRAIN_JOBS_PER_WAKE,
+  drainJobsCap,
+} from "./constants.js";
 import {
   getConfig,
   getOverrides,
@@ -21,6 +26,7 @@ import {
   gateDrainForBulkPrompt,
   noteQueueDepthForBulkPrompt,
 } from "./queue-bulk-prompt.js";
+import { createWakeBudget, finalizeWakeBudget } from "./wake-budget.js";
 
 let draining = false; // best-effort in-memory reentrancy guard (idempotent anyway)
 /** @type {Promise<unknown>|null} */
@@ -37,20 +43,33 @@ async function ensureRootsMigrated(client) {
   await rootsMigration;
 }
 
-export async function drain() {
+/**
+ * @param {{ budget?: import("./wake-budget.js").WakeBudget }} [opts]
+ *   Omit budget for short/opportunistic drain (live handlers). Pass a shared
+ *   full wake budget from heartbeat / Pull now / Drain now.
+ */
+export async function drain(opts = {}) {
   if (draining) return;
   draining = true;
+  const ownedBudget = !opts.budget;
+  const budget = opts.budget ?? (await createWakeBudget({ mode: "short" }));
   try {
     await ensurePairsMigrated();
-    await drainLoop();
+    await drainLoop(budget);
   } catch (err) {
     await appendLog("error", `Drain crashed: ${err.message}`);
   } finally {
     draining = false;
+    // Opportunistic drains must persist the rate window too — otherwise live
+    // storms leave heartbeat seeding from a stale Remaining.
+    if (ownedBudget) {
+      await finalizeWakeBudget(budget, { ranWork: budget.spent > 0 });
+    }
   }
 }
 
-async function drainLoop() {
+/** @param {import("./wake-budget.js").WakeBudget} budget */
+async function drainLoop(budget) {
   if (await isRateLimited()) return;
 
   const pending = await queue.size();
@@ -68,6 +87,7 @@ async function drainLoop() {
   }
 
   const client = new RaindropClient(config.token);
+  budget.bindClient(client);
   try {
     await ensureRootsMigrated(client);
   } catch {
@@ -80,7 +100,11 @@ async function drainLoop() {
     return;
   }
 
-  const jobCap = drainJobsCap(pending);
+  // Full wakes: soft job backstop under spendable. Short wakes: historical 25/55.
+  const jobCap =
+    budget.mode === "full"
+      ? Math.min(SOFT_MAX_DRAIN_JOBS_PER_WAKE, dueJobs.length)
+      : drainJobsCap(pending);
   const overrides = await getOverrides();
   const cache = await getCollectionCache();
   let index = null;
@@ -88,10 +112,19 @@ async function drainLoop() {
 
   let processed = 0;
   for (const job of dueJobs) {
-    if (processed >= jobCap) {
+    if (processed >= jobCap || !budget.canSpend(1)) {
+      const reason = budget.consumeSelfCapReason();
+      const why =
+        reason === "bootstrap"
+          ? "bootstrap budget"
+          : reason === "wake_cap"
+            ? "wake cap"
+            : processed >= jobCap
+              ? "job fairness cap"
+              : "wake budget";
       await appendLog(
         "info",
-        `Drain paused after ${jobCap} jobs (pending ${pending}); ` +
+        `Drain paused after ${processed} jobs (${why}; pending ${pending}); ` +
           `${dueJobs.length - processed} remain for later.`
       );
       break;
@@ -99,6 +132,7 @@ async function drainLoop() {
     try {
       await processJob(job, { client, config, overrides, cache, getIndex });
       processed++;
+      budget.syncFromClient(client);
       client.throwIfShouldPause();
     } catch (err) {
       if (await handleClientError(err, { job })) return;

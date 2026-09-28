@@ -1059,7 +1059,7 @@ async function scenario67_raindropFolderAllowlist() {
 }
 
 async function scenario68_rateLimitBudget() {
-  console.log("\n== 6.8 Rate-limit gate + capped delete-confirm GETs ==");
+  console.log("\n== 6.8 Rate-limit gate + spendable delete-confirm GETs ==");
   const eng = await importEngine();
   const { POLICY, SYNC_MODE, JOB, MAX_ALIVE_CHECKS_PER_TICK } = eng.constants;
   await resetAll(eng.store);
@@ -1142,6 +1142,7 @@ async function scenario68_rateLimitBudget() {
 
   // 429 during drain sets global pause + defers due jobs.
   await eng.store.clearRateLimit();
+  await eng.queue.clear(); // drop confirm delete-edge backlog so the upload is reached
   const folder = await chrome.bookmarks.create({
     parentId: "1",
     title: "ERS-Rate-Folder",
@@ -1183,6 +1184,7 @@ async function scenario68_rateLimitBudget() {
   assert.notEqual(forced.skipped, true, "manual reconcile bypasses cooldown");
 
   // Unsettled confirm catch-up: no cooldown even if lastRunAt is fresh.
+  await eng.queue.clear(); // forced reconcile may have re-queued delete-edge work
   await eng.store.setReconcileState({
     cursorPage: 0,
     outsideCursor: null,
@@ -1198,6 +1200,7 @@ async function scenario68_rateLimitBudget() {
   assert.notEqual(catchUp.skipped, true, "unsettled catch-up starts listing");
 
   // Adaptive: quiet install honors a short configured interval.
+  await eng.queue.clear();
   await eng.store.setConfig({ reconcileIntervalMinutes: 1 });
   await eng.store.setReconcileState({
     cursorPage: 0,

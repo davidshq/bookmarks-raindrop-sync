@@ -21,6 +21,7 @@ import { reconcile, hasRaindropBoundQueueWork } from "./reconcile.js";
 import { handleClientError } from "./client-errors.js";
 import { drain } from "./drain.js";
 import { isBulkDrainPausedNow } from "./queue-bulk-prompt.js";
+import { createWakeBudget, finalizeWakeBudget } from "./wake-budget.js";
 import * as queue from "./queue.js";
 
 export { drain } from "./drain.js";
@@ -51,19 +52,20 @@ export async function refreshReconcileSkipAfterBulkResume() {
  * manual 429 cannot leave rateLimitedUntil unset while the alarm keeps firing.
  */
 export async function reconcileNow() {
+  const budget = await createWakeBudget({ mode: "full" });
   try {
     if (await isRateLimited()) {
       await noteReconcileSkip("rate_limited", { pending: await queue.size() });
       return { enqueued: 0, pages: 0, done: false, skipped: true, reason: "rate_limited" };
     }
-    const result = await reconcile({ force: true });
+    const result = await reconcile({ force: true, budget });
     if (result?.skipped && result.reason) {
       await noteReconcileSkip(result.reason, { pending: await queue.size() });
     } else if (!result?.skipped) {
       await clearReconcileSkip();
     }
     if (await isRateLimited()) return result;
-    await drain();
+    await drain({ budget });
     return result;
   } catch (err) {
     if (await handleClientError(err)) {
@@ -75,46 +77,64 @@ export async function reconcileNow() {
     }
     await appendLog("error", `Pull failed: ${err.message}`);
     throw err;
+  } finally {
+    await finalizeWakeBudget(budget, { ranWork: budget.spent > 0 });
+  }
+}
+
+/** Full-wake drain (Options Drain now / message API). */
+export async function drainNow() {
+  const budget = await createWakeBudget({ mode: "full" });
+  try {
+    if (await isRateLimited()) return;
+    await drain({ budget });
+  } finally {
+    await finalizeWakeBudget(budget, { ranWork: budget.spent > 0 });
   }
 }
 
 /** Heartbeat entry: drain queue, then reconcile when bidirectional. */
 export async function tick() {
-  if (await isRateLimited()) {
-    // rateLimitedUntil banner is primary; still stamp skip for Status copy.
-    await noteReconcileSkip("rate_limited", { pending: await queue.size() });
-    return;
-  }
-  await drain();
-  if (await isRateLimited()) {
-    await noteReconcileSkip("rate_limited", { pending: await queue.size() });
-    return;
-  }
-  // Queue bulk prompt: skip Raindrop-heavy reconcile so we do not dig deeper
-  // while Status awaits Match / Continue drip. Live enqueue still works.
-  if (await isBulkDrainPausedNow()) {
-    await noteReconcileSkip("bulk_pause", { pending: await queue.size() });
-    return;
-  }
-  const config = await getConfig();
-  if (config.syncMode !== SYNC_MODE.BIDIRECTIONAL) {
-    await clearRateLimit();
-    await clearReconcileSkip();
-    return;
-  }
+  const budget = await createWakeBudget({ mode: "full" });
   try {
-    // Heartbeat uses cooldown; Options/popup use reconcileNow() (force: true).
-    const result = await reconcile({ force: false });
-    if (result?.skipped && result.reason) {
-      await noteReconcileSkip(result.reason, { pending: await queue.size() });
-    } else if (!result?.skipped) {
-      await clearReconcileSkip();
+    if (await isRateLimited()) {
+      // rateLimitedUntil banner is primary; still stamp skip for Status copy.
+      await noteReconcileSkip("rate_limited", { pending: await queue.size() });
+      return;
     }
-    if (await isRateLimited()) return;
-    await drain(); // process any jobs reconcile just enqueued
-    if (!(await isRateLimited())) await clearRateLimit();
-  } catch (err) {
-    if (await handleClientError(err)) return;
-    await appendLog("error", `Pull failed: ${err.message}`);
+    await drain({ budget });
+    if (await isRateLimited()) {
+      await noteReconcileSkip("rate_limited", { pending: await queue.size() });
+      return;
+    }
+    // Queue bulk prompt: skip Raindrop-heavy reconcile so we do not dig deeper
+    // while Status awaits Match / Continue drip. Live enqueue still works.
+    if (await isBulkDrainPausedNow()) {
+      await noteReconcileSkip("bulk_pause", { pending: await queue.size() });
+      return;
+    }
+    const config = await getConfig();
+    if (config.syncMode !== SYNC_MODE.BIDIRECTIONAL) {
+      await clearRateLimit();
+      await clearReconcileSkip();
+      return;
+    }
+    try {
+      // Heartbeat uses cooldown; Options/popup use reconcileNow() (force: true).
+      const result = await reconcile({ force: false, budget });
+      if (result?.skipped && result.reason) {
+        await noteReconcileSkip(result.reason, { pending: await queue.size() });
+      } else if (!result?.skipped) {
+        await clearReconcileSkip();
+      }
+      if (await isRateLimited()) return;
+      await drain({ budget }); // process any jobs reconcile just enqueued
+      if (!(await isRateLimited())) await clearRateLimit();
+    } catch (err) {
+      if (await handleClientError(err)) return;
+      await appendLog("error", `Pull failed: ${err.message}`);
+    }
+  } finally {
+    await finalizeWakeBudget(budget, { ranWork: budget.spent > 0 });
   }
 }

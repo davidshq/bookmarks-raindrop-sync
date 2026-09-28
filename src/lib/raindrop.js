@@ -99,6 +99,39 @@ export class RaindropClient {
     this._remaining = null;
     /** @type {number|null} epoch ms from X-RateLimit-Reset */
     this._resetAt = null;
+    /** @type {{ noteRequest: (client: RaindropClient, n?: number) => void }|null} */
+    this._budget = null;
+  }
+
+  /** Latest X-RateLimit-Remaining, or null if never observed. */
+  get remaining() {
+    return this._remaining;
+  }
+
+  /** Latest X-RateLimit-Reset as epoch ms, or null. */
+  get resetAt() {
+    return this._resetAt;
+  }
+
+  /**
+   * Seed remaining/reset from a persisted rate window (SW restart).
+   * @param {{ remaining?: number|null, resetAt?: number|null }} window
+   */
+  hydrateRateWindow(window) {
+    if (window?.remaining != null && !Number.isNaN(Number(window.remaining))) {
+      this._remaining = Number(window.remaining);
+    }
+    if (window?.resetAt != null && !Number.isNaN(Number(window.resetAt))) {
+      this._resetAt = Number(window.resetAt);
+    }
+  }
+
+  /**
+   * Attach a per-wake budget so each HTTP call updates spendable.
+   * @param {{ noteRequest: (client: RaindropClient, n?: number) => void }|null} budget
+   */
+  bindBudget(budget) {
+    this._budget = budget;
   }
 
   /**
@@ -126,6 +159,7 @@ export class RaindropClient {
     });
 
     this.#noteRateHeaders(res);
+    this._budget?.noteRequest(this);
 
     if (res.status === 401 || res.status === 403) {
       throw new AuthError(`Raindrop rejected the token (HTTP ${res.status})`);

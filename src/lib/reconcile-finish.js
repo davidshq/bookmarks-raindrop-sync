@@ -70,6 +70,7 @@ async function enqueueDeleteEdge(rid, bookmarkId) {
 
 export async function finishReconcileCycle({
   client,
+  budget,
   seenIds,
   pairs,
   index,
@@ -82,7 +83,7 @@ export async function finishReconcileCycle({
   enqueued,
   pages,
 }) {
-  await finishConfirmGets(client, seenIds, pairs, index, rootId, allowlist);
+  await finishConfirmGets(client, budget, seenIds, pairs, index, rootId, allowlist);
   await finishFolderRenamePull(index, config, overrides, rootId, topRoots);
   await ensureAllowlistedOrMirrorAll(
     index,
@@ -109,13 +110,15 @@ export async function finishReconcileCycle({
 
 /**
  * Trash soft-delete fast path, then shared GET budget for delete-confirm and
- * tombstone prune (at most MAX_ALIVE_CHECKS_PER_TICK total).
+ * tombstone prune (soft max MAX_ALIVE_CHECKS_PER_TICK under wake spendable).
  */
-async function finishConfirmGets(client, seenIds, pairs, index, rootId, allowlist) {
-  const trashHandled = await finishTrashDeleteDetection(client, pairs);
-  let remaining = MAX_ALIVE_CHECKS_PER_TICK;
+async function finishConfirmGets(client, budget, seenIds, pairs, index, rootId, allowlist) {
+  const trashHandled = await finishTrashDeleteDetection(client, budget, pairs);
+  const confirmCap = Math.min(MAX_ALIVE_CHECKS_PER_TICK, budget?.allowance?.() ?? MAX_ALIVE_CHECKS_PER_TICK);
+  let remaining = confirmCap;
   remaining = await finishDeleteDetection(
     client,
+    budget,
     seenIds,
     pairs,
     remaining,
@@ -124,7 +127,7 @@ async function finishConfirmGets(client, seenIds, pairs, index, rootId, allowlis
     rootId,
     allowlist
   );
-  await finishTombstonePrune(client, seenIds, remaining);
+  await finishTombstonePrune(client, budget, seenIds, remaining);
 }
 
 /**
@@ -135,13 +138,17 @@ async function finishConfirmGets(client, seenIds, pairs, index, rootId, allowlis
  * MAX_TRASH_PAGES_PER_TICK falls through to confirm-GET.
  * @returns {Promise<Set<string>>} raindrop ids handled this pass (skip confirm GET)
  */
-async function finishTrashDeleteDetection(client, pairs) {
+async function finishTrashDeleteDetection(client, budget, pairs) {
   const handled = new Set();
   let page = 0;
   let pages = 0;
   let deleteJobs = 0;
+  const trashCap = Math.min(
+    MAX_TRASH_PAGES_PER_TICK,
+    pages + (budget?.allowance?.() ?? MAX_TRASH_PAGES_PER_TICK)
+  );
 
-  while (pages < MAX_TRASH_PAGES_PER_TICK) {
+  while (pages < trashCap && (!budget || budget.canSpend(1))) {
     const { items, count } = await client.listRaindrops(RAINDROP_TRASH_COLLECTION_ID, {
       page,
       perPage: RAINDROP_LIST_PER_PAGE,
@@ -179,16 +186,18 @@ async function finishTrashDeleteDetection(client, pairs) {
 /**
  * Walk a rotating window of candidates under a GET budget; persist offset.
  * Empty candidate list resets the offset so a later non-empty list starts at 0.
+ * Stops early when the shared wake budget is exhausted (unchecked stay deferred).
  *
  * @param {{
  *   candidates: any[],
  *   offsetKey: string,
  *   maxGets: number,
  *   visit: (candidate: any) => Promise<void>,
+ *   budget?: import("./wake-budget.js").WakeBudget|null,
  * }} opts
  * @returns {Promise<{ checked: number, remaining: number }>}
  */
-async function rotateConfirmWindow({ candidates, offsetKey, maxGets, visit }) {
+async function rotateConfirmWindow({ candidates, offsetKey, maxGets, visit, budget }) {
   const state = await getReconcileState();
   if (!candidates.length) {
     if ((state[offsetKey] || 0) !== 0) {
@@ -200,13 +209,16 @@ async function rotateConfirmWindow({ candidates, offsetKey, maxGets, visit }) {
 
   const offset = (state[offsetKey] || 0) % candidates.length;
   const toCheck = Math.min(maxGets, candidates.length);
+  let checked = 0;
   for (let n = 0; n < toCheck; n++) {
+    if (budget && !budget.canSpend(1)) break;
     await visit(candidates[(offset + n) % candidates.length]);
+    checked++;
   }
   await setReconcileState({
-    [offsetKey]: (offset + toCheck) % candidates.length,
+    [offsetKey]: (offset + checked) % candidates.length,
   });
-  return { checked: toCheck, remaining: maxGets - toCheck };
+  return { checked, remaining: maxGets - checked };
 }
 
 /** In-memory union of durable seenAcc and this cycle's live seenIds (no write). */
@@ -224,6 +236,7 @@ async function seenAccWithLive(seenIds) {
  */
 async function finishDeleteDetection(
   client,
+  budget,
   seenIds,
   pairs,
   maxGets,
@@ -269,6 +282,7 @@ async function finishDeleteDetection(
     candidates,
     offsetKey: "aliveConfirmOffset",
     maxGets,
+    budget,
     visit: async ([rid, bookmarkId]) => {
       // Pairs outside the nested root listing (e.g. cleared outside-root allowlist)
       // never appear in seenIds — confirm with a direct get before deleting Edge.
@@ -327,7 +341,7 @@ async function finishDeleteDetection(
  * Uses leftover confirm budget after delete-detection.
  * @returns {Promise<number>} unused GET budget
  */
-async function finishTombstonePrune(client, seenIds, maxGets) {
+async function finishTombstonePrune(client, budget, seenIds, maxGets) {
   const acc = await seenAccWithLive(seenIds);
 
   const stones = await getTombstones();
@@ -338,6 +352,7 @@ async function finishTombstonePrune(client, seenIds, maxGets) {
     candidates,
     offsetKey: "tombstonePruneOffset",
     maxGets,
+    budget,
     visit: async (rid) => {
       if (!(await raindropStillAlive(client, rid))) absent.push(rid);
       client.throwIfShouldPause();

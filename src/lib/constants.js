@@ -88,7 +88,8 @@ export const KEY = {
   COLLECTION_CACHE: "collectionCache", // { [collectionPath]: collectionId }
   /** Edge folder id → Raindrop collection id (for in-place folder renames). */
   FOLDER_COLLECTIONS: "folderCollections", // { [folderId]: collectionId }
-  // { pending, lastError, deletionsHalted, lastActivityAt, lastPushAt, rateLimitedUntil }
+  // { pending, lastError, deletionsHalted, lastActivityAt, lastPushAt, rateLimitedUntil,
+  //   rateRemaining, rateResetAt, rateObservedAt, lastThrottle }
   STATUS: "status",
   LOG: "log", // [ { at, level, message } ] recent ring buffer (LOG_LIMIT)
   /**
@@ -167,25 +168,49 @@ export const RATE_LIMIT_FALLBACK_MS = 60 * 1000; // if no Retry-After header
 export const STORAGE_QUOTA_FALLBACK_BYTES = 10_485_760;
 /**
  * Stop Raindrop work early when X-RateLimit-Remaining falls to this.
- * Kept low so we use most of the ~120/min budget; too high felt like
+ * MUST be ≥ worst-case nested Raindrop calls in one job (ensure-collection
+ * chains). Kept low so we use most of the ~120/min budget; too high felt like
  * "almost no traffic" then a full-minute pause (proactive RateLimitError).
  */
 export const RATE_LIMIT_RESERVE = 4;
 /**
- * Soft per-heartbeat drain cap when the queue is small. Large backlogs use
- * {@link MAX_JOBS_PER_DRAIN_BUSY} via {@link drainJobsCap}.
+ * When Remaining is unknown/stale on a *full* wake, allow only this many
+ * Raindrop requests before following headers. Never “be bold” on a cold wake.
+ */
+export const BOOTSTRAP_REQS = 6;
+/**
+ * Short/opportunistic drain (live bookmark handlers): request headroom for
+ * ensure-collection chains + one write when headers are unknown. Still far
+ * below a full wakeCap; job count stays at {@link drainJobsCap}.
+ */
+export const SHORT_WAKE_REQS = 24;
+/**
+ * Soft max Raindrop HTTP requests per heartbeat / Pull-now / Drain-now wake
+ * (MV3 / fairness backstop). Headers remain the API throttle.
+ */
+export const SOFT_MAX_REQS_PER_WAKE = 80;
+/** Soft wall-clock cap for one budgeted wake (ms). */
+export const SOFT_MAX_MS_PER_WAKE = 20_000;
+/**
+ * Soft max queue jobs completed on a *full* budgeted wake. Primary stop is
+ * spendable/wakeCap; this is only a fairness backstop.
+ */
+export const SOFT_MAX_DRAIN_JOBS_PER_WAKE = 80;
+/**
+ * Historical small/busy drain caps — used for short/opportunistic drains and
+ * bulk ETA estimates, not as the primary full-wake throttle.
  */
 export const MAX_JOBS_PER_DRAIN = 25;
 /** Pending queue size at which drain uses the busy (higher) per-tick cap. */
 export const DRAIN_BUSY_PENDING_THRESHOLD = 100;
 /**
- * Per-heartbeat drain cap when pending ≥ DRAIN_BUSY_PENDING_THRESHOLD.
- * Still well under ~120/min; leaves headroom for collection ensures / Pull.
+ * Soft/opportunistic drain cap when pending ≥ DRAIN_BUSY_PENDING_THRESHOLD.
  */
 export const MAX_JOBS_PER_DRAIN_BUSY = 55;
 
 /**
- * How many queue jobs this drain pass may complete.
+ * How many queue jobs a *short* / ETA drain pass may complete.
+ * Full heartbeat wakes use {@link SOFT_MAX_DRAIN_JOBS_PER_WAKE} under spendable.
  * @param {number} pending total durable queue size (not only due)
  */
 export function drainJobsCap(pending) {
@@ -193,20 +218,20 @@ export function drainJobsCap(pending) {
   return n >= DRAIN_BUSY_PENDING_THRESHOLD ? MAX_JOBS_PER_DRAIN_BUSY : MAX_JOBS_PER_DRAIN;
 }
 /**
- * Cap GET /raindrop/{id} confirms per reconcile finish, shared by
- * delete-detection and tombstone prune (delete-confirm runs first; prune
- * uses whatever budget remains). Unchecked work rotates next cycle.
+ * Soft max GET /raindrop/{id} confirms per reconcile finish (shared by
+ * delete-detection and tombstone prune). Primary stop is wake spendable;
+ * unchecked work rotates next cycle.
  */
-export const MAX_ALIVE_CHECKS_PER_TICK = 8;
-/** Cap Raindrop list pages (root + outside-root) per reconcile tick. */
-export const MAX_RECONCILE_PAGES_PER_TICK = 5;
+export const MAX_ALIVE_CHECKS_PER_TICK = 40;
+/** Soft max Raindrop list pages (root + outside-root) per reconcile tick. */
+export const MAX_RECONCILE_PAGES_PER_TICK = 15;
 /** Raindrop system collection for soft-deleted raindrops. */
 export const RAINDROP_TRASH_COLLECTION_ID = -99;
 /**
- * Cap Trash list pages per reconcile finish (soft-delete fast path).
+ * Soft max Trash list pages per reconcile finish (soft-delete fast path).
  * Always starts at page 0 each finish (newest soft-deletes first).
  */
-export const MAX_TRASH_PAGES_PER_TICK = 3;
+export const MAX_TRASH_PAGES_PER_TICK = 5;
 /** Raindrop list page size (API max 50). */
 export const RAINDROP_LIST_PER_PAGE = 50;
 

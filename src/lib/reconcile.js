@@ -9,9 +9,10 @@
 //
 // List paging uses RAINDROP_LIST_PER_PAGE + isListPageDone (shared with Trash).
 //
-// Rate-limit posture: shared page budget for root + outside-root listing; capped
-// GET /raindrop confirms shared by delete detection + tombstone prune; stop early
-// when the client reports low X-RateLimit-Remaining (throws RateLimitError).
+// Rate-limit posture: shared WakeBudget (headers + soft wakeCap) for root /
+// outside-root listing, Trash, and confirm GETs; stop early when the client
+// reports low X-RateLimit-Remaining (throws RateLimitError). Soft page/confirm
+// constants are fairness backstops under spendable.
 // Heartbeat starts a *new* cycle only when the quiet-time interval has elapsed
 // since the last *settled* finish (or confirm catch-up is still unsettled) and
 // the durable queue has no Raindrop-bound jobs; in-progress cursors always
@@ -50,6 +51,7 @@ import { isAllowlistActive, pruneAllowlist } from "./allowlist.js";
 import { RaindropClient } from "./raindrop.js";
 import { maybeEnqueuePullCreate } from "./reconcile-enqueue.js";
 import { finishReconcileCycle } from "./reconcile-finish.js";
+import { createWakeBudget, finalizeWakeBudget } from "./wake-budget.js";
 
 /** Job kinds that hit the Raindrop API (compete with listing for rate budget). */
 const RAINDROP_BOUND_KINDS = new Set([
@@ -73,8 +75,10 @@ let reconciling = false;
 
 /**
  * Run one reconcile pass (or continue from cursor). Safe to call from heartbeat.
- * @param {{ force?: boolean }} [opts] `force` (default true) bypasses the idle
- *   cooldown between completed cycles. Heartbeat passes `force: false`.
+ * @param {{ force?: boolean, budget?: import("./wake-budget.js").WakeBudget }} [opts]
+ *   `force` (default true) bypasses the idle cooldown between completed cycles.
+ *   Heartbeat passes `force: false`. Pass a shared wake `budget` from tick /
+ *   Pull now; when omitted, a full wake budget is created for this call.
  * @returns {{
  *   enqueued: number,
  *   pages: number,
@@ -83,7 +87,7 @@ let reconciling = false;
  *   reason?: "busy"|"rate_limited"|"cooldown",
  * }}
  */
-export async function reconcile({ force = true } = {}) {
+export async function reconcile({ force = true, budget } = {}) {
   if (reconciling) {
     return { enqueued: 0, pages: 0, done: false, skipped: true, reason: "busy" };
   }
@@ -91,10 +95,15 @@ export async function reconcile({ force = true } = {}) {
     return { enqueued: 0, pages: 0, done: false, skipped: true, reason: "rate_limited" };
   }
   reconciling = true;
+  const ownedBudget = !budget;
+  const wakeBudget = budget ?? (await createWakeBudget({ mode: "full" }));
   try {
-    return await reconcileOnce({ force });
+    return await reconcileOnce({ force, budget: wakeBudget });
   } finally {
     reconciling = false;
+    if (ownedBudget) {
+      await finalizeWakeBudget(wakeBudget, { ranWork: wakeBudget.spent > 0 });
+    }
   }
 }
 
@@ -107,7 +116,7 @@ function isReconcileInProgress(state) {
   );
 }
 
-async function reconcileOnce({ force }) {
+async function reconcileOnce({ force, budget }) {
   await ensurePairsMigrated();
   const config = await getConfig();
   if (config.syncMode !== SYNC_MODE.BIDIRECTIONAL) {
@@ -138,6 +147,7 @@ async function reconcileOnce({ force }) {
   }
 
   const client = new RaindropClient(config.token);
+  budget.bindClient(client);
   const index = await buildCollectionIndex(client);
   client.throwIfShouldPause();
   const root = findRootCollection(index, config.rootName);
@@ -169,6 +179,9 @@ async function reconcileOnce({ force }) {
   const topRoots = await getTopRoots();
   const folderMode = config.raindropFolderMode || RAINDROP_FOLDER_MODE.CREATE_AS_NEEDED;
   let allowlist = config.raindropFolderAllowlist || {};
+
+  /** Soft page backstop under spendable for this listing slice. */
+  const pageCap = () => Math.min(MAX_RECONCILE_PAGES_PER_TICK, pages + budget.allowance());
 
   try {
     // Drop allowlist ids deleted from Raindrop. Fully mirrored entries stay so
@@ -203,7 +216,8 @@ async function reconcileOnce({ force }) {
         client,
         outsideCursor,
         pullCtx,
-        MAX_RECONCILE_PAGES_PER_TICK
+        pageCap() - pages,
+        budget
       );
       enqueued += outside.enqueued;
       pages += outside.pages;
@@ -218,7 +232,7 @@ async function reconcileOnce({ force }) {
       outsideCursor = null;
       await setReconcileState({ outsideCursor: null });
     } else {
-      while (pages < MAX_RECONCILE_PAGES_PER_TICK) {
+      while (pages < pageCap() && budget.canSpend(1)) {
         const { items, count } = await client.listRaindrops(root._id, {
           page,
           perPage: RAINDROP_LIST_PER_PAGE,
@@ -240,8 +254,14 @@ async function reconcileOnce({ force }) {
           if (isAllowlistActive(allowlist)) {
             const started = startOutsideCursor(allowlist, index, root._id);
             if (started) {
-              const remaining = MAX_RECONCILE_PAGES_PER_TICK - pages;
-              const outside = await continueOutsideRoot(client, started, pullCtx, remaining);
+              const remaining = Math.max(0, pageCap() - pages);
+              const outside = await continueOutsideRoot(
+                client,
+                started,
+                pullCtx,
+                remaining,
+                budget
+              );
               enqueued += outside.enqueued;
               pages += outside.pages;
               if (!outside.done) {
@@ -257,6 +277,7 @@ async function reconcileOnce({ force }) {
 
           return finishReconcileCycle({
             client,
+            budget,
             seenIds,
             pairs,
             index,
@@ -290,6 +311,7 @@ async function reconcileOnce({ force }) {
     // outsideCursor path finished above → delete detection + ensure.
     return finishReconcileCycle({
       client,
+      budget,
       seenIds,
       pairs,
       index,
@@ -351,14 +373,14 @@ function startOutsideCursor(allowlist, index, rootId) {
  * List outside-root allowlisted collections with a shared page budget.
  * @returns {{ enqueued: number, pages: number, done: boolean, cursor: object|null }}
  */
-async function continueOutsideRoot(client, cursor, pullCtx, maxPages) {
+async function continueOutsideRoot(client, cursor, pullCtx, maxPages, budget) {
   let enqueued = 0;
   let pages = 0;
   const { ids } = cursor;
   let { i, page } = cursor;
   const { index, rootId } = pullCtx;
 
-  while (i < ids.length && pages < maxPages) {
+  while (i < ids.length && pages < maxPages && budget.canSpend(1)) {
     const id = ids[i];
     if (!getById(index, id)) {
       i++;

@@ -56,7 +56,10 @@ Chrome and Edge do not fork collections.
   pairs (e.g. cleared allowlist) are parked after confirm so they stop burning
   delete-check budget; Trash still catches soft-deletes. Options → Status shows
   pending jobs split by Edge→Raindrop vs Raindrop→Edge, and why a Raindrop check
-  was deferred (queue busy, cooldown, or bulk-queue pause).
+  was deferred (queue busy, cooldown, rate-limit pause, or bulk-queue pause).
+  Heartbeat / Pull now / Drain now size Raindrop work from
+  `X-RateLimit-Remaining` (soft per-wake cap); Status distinguishes a real
+  Raindrop pause from a self wake-cap stop.
   Throughput / cooldown design target: [`docs/sync-architecture-right-sizing.md`](docs/sync-architecture-right-sizing.md).
   **Raindrop → browser folders** chooses create-as-needed / existing-only /
   mirror-all. Outside-root allowlist picks land under Other bookmarks / Raindrop

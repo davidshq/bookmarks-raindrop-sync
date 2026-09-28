@@ -26,6 +26,7 @@ import {
   isRateLimited,
   formatReconcileSkipNotice,
 } from "../lib/store.js";
+import { formatLastThrottleNotice } from "../lib/wake-budget.js";
 import { countArchiveEntries, exportArchiveEntries, clearArchive } from "../lib/log-archive.js";
 import { getTree, mirrorPathExists, getTopRoots } from "../lib/bookmarks.js";
 import {
@@ -333,11 +334,21 @@ async function refreshStatus() {
     skipLine.classList.add("hidden");
   }
 
+  const throttleLine = $("wakeThrottleLine");
+  const throttleText = formatLastThrottleNotice(resp.status);
+  if (throttleText) {
+    throttleLine.textContent = throttleText;
+    throttleLine.classList.remove("hidden");
+  } else {
+    throttleLine.textContent = "";
+    throttleLine.classList.add("hidden");
+  }
+
   const banner = $("haltBanner");
   const rateUntil = resp.status?.rateLimitedUntil;
   if (rateUntil && rateUntil > Date.now()) {
     banner.classList.remove("hidden");
-    banner.textContent = `Paused for Raindrop rate limits until ${new Date(rateUntil).toLocaleTimeString()}. Sync resumes automatically.`;
+    banner.textContent = `Paused for Raindrop API rate limits until ${new Date(rateUntil).toLocaleTimeString()}. Sync resumes automatically.`;
   } else if (resp.status?.lastError?.startsWith("Storage write failed")) {
     banner.classList.remove("hidden");
     banner.textContent = resp.status.lastError;

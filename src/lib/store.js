@@ -650,6 +650,17 @@ export async function getStatus() {
     lastPushAt: null,
     /** @type {number|null} epoch ms — skip Raindrop API work until then */
     rateLimitedUntil: null,
+    /** @type {number|null} last observed X-RateLimit-Remaining */
+    rateRemaining: null,
+    /** @type {number|null} epoch ms — X-RateLimit-Reset */
+    rateResetAt: null,
+    /** @type {number|null} epoch ms when rateRemaining was last observed */
+    rateObservedAt: null,
+    /**
+     * Last wake stopped for a self-cap (not Raindrop pause).
+     * @type {null|"wake_cap"|"bootstrap"}
+     */
+    lastThrottle: null,
     /**
      * Why heartbeat skipped a Raindrop listing (busy / cooldown / bulk_pause).
      * Cleared when a non-skipped reconcile runs. null when idle/ok.
@@ -720,7 +731,10 @@ export function formatReconcileSkipNotice(status, pendingFallback) {
         `.`
       );
     case "rate_limited":
-      return `Raindrop check deferred for rate limits${pendingBit}.`;
+      return (
+        `Raindrop check deferred for a Raindrop API rate-limit pause${pendingBit}. ` +
+        `This is not a soft per-wake self-cap.`
+      );
     default:
       return `Raindrop check deferred (${reason})${pendingBit}.`;
   }
@@ -752,7 +766,8 @@ export async function noteRateLimitedUntil(until) {
     const status = await getStatus();
     const prev = status.rateLimitedUntil ?? 0;
     if (until <= prev) return false;
-    await setStatusUnlocked({ rateLimitedUntil: until });
+    // Real Raindrop pause supersedes any self-cap note.
+    await setStatusUnlocked({ rateLimitedUntil: until, lastThrottle: null });
     return true;
   });
 }

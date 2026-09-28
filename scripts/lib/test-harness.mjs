@@ -174,6 +174,7 @@ export async function importEngine() {
   const matchExisting = await import(`${base}/match-existing.js`);
   const queueBulkPrompt = await import(`${base}/queue-bulk-prompt.js`);
   const bulkCandidate = await import(`${base}/bulk-candidate.js`);
+  const wakeBudget = await import(`${base}/wake-budget.js`);
   return {
     constants,
     store,
@@ -185,6 +186,7 @@ export async function importEngine() {
     matchExisting,
     queueBulkPrompt,
     bulkCandidate,
+    wakeBudget,
   };
 }
 
@@ -193,7 +195,22 @@ export function patchClient(raindropMod, clientImpl) {
   for (const key of Object.keys(clientImpl)) {
     if (key.startsWith("_")) continue;
     Proto[key] = function (...args) {
-      return clientImpl[key](...args);
+      const out = clientImpl[key](...args);
+      const finish = (result) => {
+        // Simulate Raindrop rate-limit headers so WakeBudget can follow spendable
+        // (real request() does this; mocks replace methods and skip fetch).
+        // Keep Remaining above RESERVE so normal scenarios are not tripped by
+        // proactive pause; tests that need 429 still throw RateLimitError.
+        if (typeof this._remaining !== "number") this._remaining = 10_000;
+        this._remaining = Math.max(50, this._remaining - 1);
+        if (this._resetAt == null || this._resetAt <= Date.now()) {
+          this._resetAt = Date.now() + 60_000;
+        }
+        this._budget?.noteRequest(this);
+        return result;
+      };
+      if (out && typeof out.then === "function") return out.then(finish);
+      return finish(out);
     };
   }
 }

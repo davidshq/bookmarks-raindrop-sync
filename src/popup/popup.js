@@ -3,6 +3,7 @@
 import { MSG, SYNC_MODE } from "../lib/constants.js";
 import { runPullNow } from "../lib/pull-now.js";
 import { formatPendingByDirection } from "../lib/queue.js";
+import { formatLastThrottleNotice } from "../lib/wake-budget.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -35,12 +36,16 @@ async function refresh() {
 
   const halt = $("halt");
   const rateUntil = resp.status?.rateLimitedUntil;
+  const selfCap = formatLastThrottleNotice(resp.status);
   if (rateUntil && rateUntil > Date.now()) {
     halt.classList.remove("hidden");
-    halt.textContent = `Rate limited until ${new Date(rateUntil).toLocaleTimeString()}`;
+    halt.textContent = `Raindrop rate-limit pause until ${new Date(rateUntil).toLocaleTimeString()}`;
   } else if (resp.status?.deletionsHalted && resp.status?.lastError) {
     halt.classList.remove("hidden");
     halt.textContent = resp.status.lastError;
+  } else if (selfCap) {
+    halt.classList.remove("hidden");
+    halt.textContent = selfCap;
   } else {
     halt.textContent = "";
     halt.classList.add("hidden");

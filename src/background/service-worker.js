@@ -12,6 +12,7 @@ import { ALARM_NAME, HEARTBEAT_MINUTES, MSG } from "../lib/constants.js";
 import {
   tick,
   drain,
+  drainNow,
   reconcileNow,
   refreshReconcileSkipAfterBulkResume,
   handleBookmarkCreated,
@@ -111,12 +112,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       switch (msg?.type) {
         case MSG.RUN_BACKFILL: {
           const result = await startBackfill();
-          await drain();
+          await drainNow();
           sendResponse({ ok: true, ...result });
           break;
         }
         case MSG.DRAIN_NOW: {
-          await drain();
+          await drainNow();
           sendResponse({ ok: true });
           break;
         }

@@ -656,6 +656,9 @@ console.log("== rate-limit constants ==");
 {
   const {
     RATE_LIMIT_RESERVE: reserve,
+    BOOTSTRAP_REQS,
+    SOFT_MAX_REQS_PER_WAKE,
+    SOFT_MAX_DRAIN_JOBS_PER_WAKE,
     MAX_ALIVE_CHECKS_PER_TICK,
     MAX_JOBS_PER_DRAIN,
     MAX_JOBS_PER_DRAIN_BUSY,
@@ -667,7 +670,9 @@ console.log("== rate-limit constants ==");
   } = await import("../src/lib/constants.js");
   assert.ok(reserve >= 1);
   assert.ok(reserve <= 8);
-  assert.ok(MAX_ALIVE_CHECKS_PER_TICK >= 1);
+  assert.ok(BOOTSTRAP_REQS >= 1 && BOOTSTRAP_REQS < SOFT_MAX_REQS_PER_WAKE);
+  assert.ok(SOFT_MAX_DRAIN_JOBS_PER_WAKE >= MAX_JOBS_PER_DRAIN_BUSY);
+  assert.ok(MAX_ALIVE_CHECKS_PER_TICK > 8, "confirm soft backstop above legacy primary 8");
   assert.ok(MAX_JOBS_PER_DRAIN >= 1);
   assert.ok(MAX_JOBS_PER_DRAIN_BUSY > MAX_JOBS_PER_DRAIN);
   assert.equal(drainJobsCap(0), MAX_JOBS_PER_DRAIN);
@@ -684,7 +689,84 @@ console.log("== rate-limit constants ==");
   assert.equal(raindropCollectionId({ collection: { id: 7 } }), 7);
   assert.equal(raindropCollectionId({ collection: { $id: 1, id: 2 } }), 1);
   assert.equal(raindropCollectionId(null), undefined);
-  console.log("  ✔ reserve / adaptive drain caps / cooldown / proactive RateLimitError");
+  console.log("  ✔ reserve / wake budget constants / short drain caps / proactive RateLimitError");
+}
+
+console.log("== wake budget spendable / self-cap ==");
+{
+  // chrome.storage mock for persist-window / lastThrottle helpers
+  await import("./lib/test-harness.mjs");
+  const { BOOTSTRAP_REQS, SHORT_WAKE_REQS, SOFT_MAX_REQS_PER_WAKE } = await import(
+    "../src/lib/constants.js"
+  );
+  assert.ok(SHORT_WAKE_REQS > BOOTSTRAP_REQS);
+  const {
+    WakeBudget,
+    formatLastThrottleNotice,
+    loadPersistedRateWindow,
+  } = await import("../src/lib/wake-budget.js");
+  const { setStatus, getStatus, noteRateLimitedUntil, clearRateLimit } = await import(
+    "../src/lib/store.js"
+  );
+
+  const boot = new WakeBudget({
+    mode: "full",
+    headerRemaining: null,
+    headerResetAt: null,
+    wakeCapReqs: SOFT_MAX_REQS_PER_WAKE,
+  });
+  assert.equal(boot.allowance(), BOOTSTRAP_REQS);
+  for (let i = 0; i < BOOTSTRAP_REQS; i++) boot.noteRequest(null);
+  assert.equal(boot.allowance(), 0);
+  assert.equal(boot.consumeSelfCapReason(), "bootstrap");
+  assert.ok(formatLastThrottleNotice({ lastThrottle: "bootstrap", rateLimitedUntil: null }));
+
+  const rich = new WakeBudget({
+    mode: "full",
+    headerRemaining: 100,
+    headerResetAt: Date.now() + 60_000,
+  });
+  assert.ok(rich.allowance() > 25, "header spendable exceeds legacy drain primary 25");
+  assert.ok(rich.allowance() > 8, "header spendable exceeds legacy confirm primary 8");
+  // Soft wake cap still binds.
+  const capped = new WakeBudget({
+    mode: "full",
+    headerRemaining: 100,
+    headerResetAt: Date.now() + 60_000,
+    wakeCapReqs: 3,
+  });
+  capped.noteRequest({ remaining: 99, resetAt: Date.now() + 60_000 });
+  capped.noteRequest({ remaining: 98, resetAt: Date.now() + 60_000 });
+  capped.noteRequest({ remaining: 97, resetAt: Date.now() + 60_000 });
+  assert.equal(capped.allowance(), 0);
+  assert.equal(capped.consumeSelfCapReason(), "wake_cap");
+  assert.ok(formatLastThrottleNotice({ lastThrottle: "wake_cap" })?.includes("wake"));
+  assert.equal(
+    formatLastThrottleNotice({
+      lastThrottle: "wake_cap",
+      rateLimitedUntil: Date.now() + 60_000,
+    }),
+    null,
+    "active Raindrop pause hides self-cap copy"
+  );
+
+  await setStatus({
+    rateRemaining: 80,
+    rateResetAt: Date.now() + 120_000,
+    rateObservedAt: Date.now(),
+  });
+  const win = await loadPersistedRateWindow();
+  assert.equal(win.remaining, 80);
+  await setStatus({ rateResetAt: Date.now() - 1 });
+  const stale = await loadPersistedRateWindow();
+  assert.equal(stale.remaining, null, "stale reset → bootstrap");
+
+  await clearRateLimit();
+  await setStatus({ lastThrottle: "wake_cap" });
+  await noteRateLimitedUntil(Date.now() + 30_000);
+  assert.equal((await getStatus()).lastThrottle, null, "real pause clears self-cap note");
+  await clearRateLimit();
+  console.log("  ✔ bootstrap / spendable / wake_cap / persist window / Status copy");
 }
 
 console.log("== bulk candidate heuristics ==");
