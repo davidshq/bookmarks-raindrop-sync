@@ -6,6 +6,9 @@
 // they stop re-candidating (option C). Follow-ons (collection 0, lastUpdate):
 // docs/raindrop-delete-detection-options.md
 //
+// While confirm catch-up is unsettled, finish keeps `seenAcc` and heartbeat may
+// call runConfirmCatchUp (Trash + confirms only — no nested re-list).
+//
 // Trash listing also writes the trash hygiene snapshot (safe-to-empty Status).
 // Trash + confirm-GET both enqueue via enqueueDeleteEdge (shared job id/payload).
 // Delete-confirm and tombstone-prune share rotateConfirmWindow for GET-budget fairness.
@@ -16,6 +19,7 @@ import {
   MAX_TRASH_PAGES_PER_TICK,
   RAINDROP_LIST_PER_PAGE,
   RAINDROP_TRASH_COLLECTION_ID,
+  SOFT_MAX_REQS_PER_WAKE,
   isListPageDone,
 } from "./constants.js";
 import { rootTitlesEqual } from "./bookmark-roots.js";
@@ -55,7 +59,7 @@ import {
   raindropCollectionId,
 } from "./raindrop.js";
 import { ensureAllowlistedOrMirrorAll } from "./reconcile-enqueue.js";
-import { writeTrashHygieneSnapshot } from "./trash-hygiene.js";
+import { writeTrashHygieneSnapshot, getTrashHygieneNextPage } from "./trash-hygiene.js";
 
 /**
  * Enqueue a local Edge delete for a raindrop that is gone (trash or confirm-GET).
@@ -96,7 +100,9 @@ export async function finishReconcileCycle({
   enqueued,
   pages,
 }) {
-  await finishConfirmGets(client, budget, seenIds, pairs, index, rootId, allowlist);
+  await finishConfirmGets(client, budget, seenIds, pairs, index, rootId, allowlist, {
+    catchUp: false,
+  });
   await finishFolderRenamePull(index, config, overrides, rootId, topRoots);
   await ensureAllowlistedOrMirrorAll(
     index,
@@ -107,13 +113,19 @@ export async function finishReconcileCycle({
     folderMode,
     allowlist
   );
+  // Persist the completed listing's presence oracle. While confirm catch-up is
+  // unsettled, keep seenAcc so later heartbeats can confirm-only without
+  // re-listing; clear it once deferred confirms drain (settled).
+  const after = await getReconcileState();
+  const presence = new Set((after.seenAcc || []).map(String));
+  for (const id of seenIds) presence.add(String(id));
   await setReconcileState({
     running: false,
     cursorPage: 0,
     outsideCursor: null,
     lastRunAt: Date.now(),
     lastError: null,
-    seenAcc: null,
+    seenAcc: after.unsettledConfirmCatchUp ? [...presence] : null,
   });
   if (enqueued > 0) {
     await appendLog("info", `Pull queued ${enqueued} Raindrop change(s).`);
@@ -122,12 +134,57 @@ export async function finishReconcileCycle({
 }
 
 /**
- * Trash soft-delete fast path, then shared GET budget for delete-confirm and
- * tombstone prune (soft max MAX_ALIVE_CHECKS_PER_TICK under wake spendable).
+ * Confirm-only wake: reuse durable seenAcc (no nested re-list). Same Trash /
+ * confirm / park / delete-edge safety as a normal finish; spends leftover
+ * wake budget with a higher soft confirm backstop so catch-up can drain.
+ *
+ * @param {{
+ *   client: import("./raindrop.js").RaindropClient,
+ *   budget: import("./wake-budget.js").WakeBudget|null|undefined,
+ *   index: object,
+ *   rootId: number|string,
+ *   allowlist: object,
+ * }} args
  */
-async function finishConfirmGets(client, budget, seenIds, pairs, index, rootId, allowlist) {
+export async function runConfirmCatchUp({ client, budget, index, rootId, allowlist }) {
+  const pairs = await getPairs();
+  const state = await getReconcileState();
+  const seenIds = new Set((state.seenAcc || []).map(String));
+  await finishConfirmGets(client, budget, seenIds, pairs, index, rootId, allowlist, {
+    catchUp: true,
+  });
+  const after = await getReconcileState();
+  await setReconcileState({
+    lastRunAt: Date.now(),
+    lastError: null,
+    seenAcc: after.unsettledConfirmCatchUp ? after.seenAcc : null,
+  });
+  if (!after.unsettledConfirmCatchUp) {
+    await appendLog("info", "Missing-raindrop confirm catch-up settled.");
+  }
+  return { enqueued: 0, pages: 0, done: true, confirmCatchUp: true };
+}
+
+/**
+ * Trash soft-delete fast path, then shared GET budget for delete-confirm and
+ * tombstone prune. Soft confirm backstop is MAX_ALIVE_CHECKS_PER_TICK on a
+ * normal finish; catch-up may use up to SOFT_MAX_REQS_PER_WAKE under spendable.
+ *
+ * @param {{ catchUp?: boolean }} [opts]
+ */
+async function finishConfirmGets(
+  client,
+  budget,
+  seenIds,
+  pairs,
+  index,
+  rootId,
+  allowlist,
+  opts = {}
+) {
   const trashHandled = await finishTrashDeleteDetection(client, budget, pairs);
-  const confirmCap = Math.min(MAX_ALIVE_CHECKS_PER_TICK, budget?.allowance?.() ?? MAX_ALIVE_CHECKS_PER_TICK);
+  const softBackstop = opts.catchUp ? SOFT_MAX_REQS_PER_WAKE : MAX_ALIVE_CHECKS_PER_TICK;
+  const confirmCap = Math.min(softBackstop, budget?.allowance?.() ?? softBackstop);
   let remaining = confirmCap;
   remaining = await finishDeleteDetection(
     client,
@@ -159,22 +216,22 @@ async function finishConfirmGets(client, budget, seenIds, pairs, index, rootId, 
  */
 async function finishTrashDeleteDetection(client, budget, pairs, source = "reconcile") {
   const handled = new Set();
-  let page = 0;
+  // Heartbeat: always page 0 (newest soft-deletes). Check Trash: continue cursor.
+  let page = source === "check-trash" ? await getTrashHygieneNextPage() : 0;
   let pages = 0;
   let deleteJobs = 0;
   let pairedPending = 0;
   let scanComplete = false;
-  const trashCap = Math.min(
-    MAX_TRASH_PAGES_PER_TICK,
-    pages + (budget?.allowance?.() ?? MAX_TRASH_PAGES_PER_TICK)
-  );
+  // Heartbeat finish shares leftover spendable (≤ MAX_TRASH_PAGES). Explicit
+  // Check Trash may burn more of the wake so large Trash can still complete.
+  const softPageCap =
+    source === "check-trash"
+      ? Math.max(MAX_TRASH_PAGES_PER_TICK, SOFT_MAX_REQS_PER_WAKE)
+      : MAX_TRASH_PAGES_PER_TICK;
+  const trashCap = Math.min(softPageCap, budget?.allowance?.() ?? softPageCap);
 
+  // No request left — do not stamp a false "incomplete" over a prior good peek.
   if (trashCap <= 0 || (budget && !budget.canSpend(1))) {
-    await writeTrashHygieneSnapshot({
-      scanComplete: false,
-      pairedPending: 0,
-      source,
-    });
     return handled;
   }
 
@@ -218,6 +275,8 @@ async function finishTrashDeleteDetection(client, budget, pairs, source = "recon
     page++;
   }
 
+  if (pages === 0) return handled;
+
   if (deleteJobs > 0) {
     await appendLog(
       "info",
@@ -225,10 +284,18 @@ async function finishTrashDeleteDetection(client, budget, pairs, source = "recon
     );
   }
 
+  // Heartbeat truncated peeks only enroll — don't thrash Status to "partial".
+  // Check Trash owns the complete-scan oracle (and Continue cursor).
+  if (source === "reconcile" && !scanComplete) {
+    return handled;
+  }
+
   await writeTrashHygieneSnapshot({
     scanComplete,
     pairedPending,
     source,
+    // After incomplete Check Trash, next click resumes here (not page 0 again).
+    nextPage: scanComplete ? 0 : page,
   });
   return handled;
 }

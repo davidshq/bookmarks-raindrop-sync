@@ -82,6 +82,13 @@ When sync mode is `bidirectional`, periodic Raindrop→Edge reconcile on the hea
 - **AND** the durable queue is idle
 - **THEN** the next heartbeat does not skip reconcile solely for quiet-time cooldown
 
+#### Scenario: Unsettled confirm catch-up does not re-list
+- **WHEN** bidirectional mode is on and confirm catch-up is unsettled with a retained scoped `seenAcc` snapshot
+- **AND** the heartbeat has leftover wake spendable and no in-progress list cursor
+- **THEN** the engine runs Trash peek and missing-raindrop confirm GETs without starting a new nested sync-root listing
+- **AND** confirm GETs may use up to the soft wake request cap under spendable
+- **AND** a user-triggered "Pull now" still starts a fresh listing that replaces the snapshot
+
 #### Scenario: Remote deletes wait while uploads drain
 - **WHEN** bidirectional mode is on and raindrops were deleted remotely
 - **AND** the durable queue still has upload jobs draining to Raindrop

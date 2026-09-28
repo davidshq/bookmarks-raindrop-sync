@@ -1187,8 +1187,34 @@ async function scenario68_rateLimitBudget() {
   const forced = await eng.reconcile.reconcile({ force: true });
   assert.notEqual(forced.skipped, true, "manual reconcile bypasses cooldown");
 
-  // Unsettled confirm catch-up: no cooldown even if lastRunAt is fresh.
+  // Unsettled confirm catch-up: no cooldown; with seenAcc → confirm-only (no re-list).
   await eng.queue.clear(); // forced reconcile may have re-queued delete-edge work
+  await eng.store.setReconcileState({
+    cursorPage: 0,
+    outsideCursor: null,
+    seenAcc: ["keep-presence"],
+    running: false,
+    lastRunAt: Date.now(),
+    lastSettledAt: Date.now(),
+    unsettledConfirmCatchUp: true,
+    lastError: null,
+  });
+  let listCalls = 0;
+  const prevList = Proto.listRaindrops;
+  Proto.listRaindrops = async function (collectionId, ...args) {
+    // Trash peek (-99) is allowed on confirm-only; nested root list is not.
+    if (collectionId !== -99) listCalls++;
+    return prevList.apply(this, [collectionId, ...args]);
+  };
+  const catchUp = await eng.reconcile.reconcile({ force: false });
+  Proto.listRaindrops = prevList;
+  assert.notEqual(catchUp.reason, "cooldown", "unsettled catch-up skips cooldown");
+  assert.notEqual(catchUp.skipped, true, "unsettled catch-up runs");
+  assert.equal(catchUp.confirmCatchUp, true, "unsettled + seenAcc is confirm-only");
+  assert.equal(listCalls, 0, "confirm-only does not nested-list the sync root");
+
+  // Unsettled without a presence snapshot still starts a listing rebuild.
+  await eng.queue.clear();
   await eng.store.setReconcileState({
     cursorPage: 0,
     outsideCursor: null,
@@ -1199,9 +1225,10 @@ async function scenario68_rateLimitBudget() {
     unsettledConfirmCatchUp: true,
     lastError: null,
   });
-  const catchUp = await eng.reconcile.reconcile({ force: false });
-  assert.notEqual(catchUp.reason, "cooldown", "unsettled catch-up skips cooldown");
-  assert.notEqual(catchUp.skipped, true, "unsettled catch-up starts listing");
+  const catchUpList = await eng.reconcile.reconcile({ force: false });
+  assert.notEqual(catchUpList.reason, "cooldown", "unsettled without seenAcc skips cooldown");
+  assert.notEqual(catchUpList.skipped, true, "unsettled without seenAcc starts listing");
+  assert.notEqual(catchUpList.confirmCatchUp, true, "missing snapshot is not confirm-only");
 
   // Adaptive: quiet install honors a short configured interval.
   await eng.queue.clear();
@@ -1545,7 +1572,23 @@ async function scenario68e_trashSafeStatus() {
     "paired pending ⇒ waiting"
   );
 
-  console.log("  ✔ unknown → Check Trash safe; partial/waiting; one-way blocked");
+  // Exhausted wake must not stomp a prior complete snapshot with "incomplete".
+  await eng.store.setReconcileState({
+    trashHygieneAt: 42,
+    trashScanComplete: true,
+    trashPairedPending: 0,
+    trashHygieneSource: "check-trash",
+  });
+  await eng.reconcileFinish.runTrashHygienePeek({
+    client: new eng.raindropMod.RaindropClient("mock"),
+    budget: { canSpend: () => false, allowance: () => 0 },
+  });
+  const preserved = await eng.store.getReconcileState();
+  assert.equal(preserved.trashHygieneAt, 42, "zero-budget peek keeps prior at");
+  assert.equal(preserved.trashScanComplete, true, "zero-budget peek keeps complete");
+  assert.equal(deriveTrashSafeState(preserved), "safe");
+
+  console.log("  ✔ unknown → Check Trash safe; partial/waiting; one-way blocked; no zero-budget stomp");
 }
 
 async function scenario68c_parkOutOfScopeAlives() {

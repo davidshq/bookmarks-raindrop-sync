@@ -5,7 +5,7 @@
 // ids still needing enroll (not tombstoned, no queued delete-edge).
 // See docs/raindrop-delete-detection-options.md and OpenSpec trash-safe-status.
 
-import { setReconcileState } from "./store.js";
+import { getReconcileState, setReconcileState } from "./store.js";
 
 /** @typedef {"safe"|"waiting"|"partial"|"unknown"} TrashSafeState */
 
@@ -29,7 +29,7 @@ export function deriveTrashSafeState(snapshot) {
 }
 
 /**
- * User-facing Status line for trash-safe state (bidirectional only).
+ * Short Status line for trash-safe state (bidirectional only).
  * @param {{
  *   trashHygieneAt?: number|null,
  *   trashScanComplete?: boolean,
@@ -39,29 +39,24 @@ export function deriveTrashSafeState(snapshot) {
  * @returns {string}
  */
 export function formatTrashSafeNotice(snapshot, state = deriveTrashSafeState(snapshot)) {
-  const when =
-    snapshot?.trashHygieneAt != null
-      ? ` (as of ${new Date(snapshot.trashHygieneAt).toLocaleString()})`
-      : "";
   switch (state) {
     case "safe":
-      return `Safe to empty Raindrop Trash${when}. Discovery debt is clear; queued local deletes may still finish.`;
+      return "Safe to empty Raindrop Trash.";
     case "waiting": {
       const n = Number(snapshot?.trashPairedPending) || 0;
-      return (
-        `Waiting on Trash sync: ${n} paired item(s) still need enroll${when}. ` +
-        `Do not empty Raindrop Trash yet.`
-      );
+      return `Don't empty Trash yet — ${n} delete(s) still syncing.`;
     }
     case "partial":
-      return (
-        `Trash peek incomplete${when} — deeper than we scanned this pass. ` +
-        `Check Trash or wait for more heartbeats before emptying.`
-      );
+      return "Still checking Raindrop Trash — click Continue.";
     case "unknown":
     default:
-      return "Trash not checked yet — Check Trash or wait for a Raindrop pull before emptying Trash.";
+      return "Click Check Trash before emptying Raindrop Trash.";
   }
+}
+
+/** Button label for the trash hygiene control. */
+export function trashSafeButtonLabel(state) {
+  return state === "partial" ? "Continue" : "Check Trash";
 }
 
 /**
@@ -70,6 +65,7 @@ export function formatTrashSafeNotice(snapshot, state = deriveTrashSafeState(sna
  *   scanComplete: boolean,
  *   pairedPending: number,
  *   source?: "reconcile"|"check-trash",
+ *   nextPage?: number,
  *   at?: number,
  * }} opts
  */
@@ -77,6 +73,7 @@ export async function writeTrashHygieneSnapshot({
   scanComplete,
   pairedPending,
   source = "reconcile",
+  nextPage = 0,
   at = Date.now(),
 }) {
   await setReconcileState({
@@ -84,6 +81,7 @@ export async function writeTrashHygieneSnapshot({
     trashScanComplete: !!scanComplete,
     trashPairedPending: Math.max(0, Number(pairedPending) || 0),
     trashHygieneSource: source === "check-trash" ? "check-trash" : "reconcile",
+    trashHygieneNextPage: scanComplete ? 0 : Math.max(0, Number(nextPage) || 0),
   });
 }
 
@@ -94,6 +92,7 @@ export async function writeTrashHygieneSnapshot({
  *   trashScanComplete?: boolean,
  *   trashPairedPending?: number,
  *   trashHygieneSource?: string|null,
+ *   trashHygieneNextPage?: number,
  * }|null|undefined} snapshot
  */
 export function buildTrashSafePayload(snapshot) {
@@ -101,9 +100,17 @@ export function buildTrashSafePayload(snapshot) {
   return {
     state,
     notice: formatTrashSafeNotice(snapshot, state),
+    buttonLabel: trashSafeButtonLabel(state),
     trashHygieneAt: snapshot?.trashHygieneAt ?? null,
     trashScanComplete: !!snapshot?.trashScanComplete,
     trashPairedPending: Number(snapshot?.trashPairedPending) || 0,
     trashHygieneSource: snapshot?.trashHygieneSource ?? null,
+    trashHygieneNextPage: Number(snapshot?.trashHygieneNextPage) || 0,
   };
+}
+
+/** @returns {Promise<number>} next Trash list page for an explicit Check Trash continue */
+export async function getTrashHygieneNextPage() {
+  const state = await getReconcileState();
+  return Math.max(0, Number(state.trashHygieneNextPage) || 0);
 }

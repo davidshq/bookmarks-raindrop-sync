@@ -15,9 +15,11 @@
 // constants are fairness backstops under spendable.
 // Heartbeat prefer-drains first (tick), then may start a *new* cycle when the
 // quiet-time interval has elapsed since the last *settled* finish (or confirm
-// catch-up is still unsettled). Raindrop-bound queue jobs do NOT hard-skip
-// listing — leftover spendable funds Trash / list / confirm. In-progress
-// cursors always continue. Pull now (force) bypasses interval.
+// catch-up is still unsettled). Unsettled catch-up with a durable seenAcc does
+// confirm/park/Trash only — it does not re-list until Pull now or the mountain
+// settles. Raindrop-bound queue jobs do NOT hard-skip listing — leftover
+// spendable funds Trash / list / confirm. In-progress cursors always continue.
+// Pull now (force) bypasses interval and refreshes the listing.
 
 import {
   SYNC_MODE,
@@ -51,7 +53,7 @@ import {
 import { isAllowlistActive, pruneAllowlist } from "./allowlist.js";
 import { RaindropClient } from "./raindrop.js";
 import { maybeEnqueuePullCreate } from "./reconcile-enqueue.js";
-import { finishReconcileCycle } from "./reconcile-finish.js";
+import { finishReconcileCycle, runConfirmCatchUp } from "./reconcile-finish.js";
 import { createWakeBudget, finalizeWakeBudget } from "./wake-budget.js";
 
 /** Job kinds that hit the Raindrop API (compete with listing for rate budget). */
@@ -108,12 +110,26 @@ export async function reconcile({ force = true, budget } = {}) {
   }
 }
 
-/** Durable signals that a multi-tick scan is mid-flight. */
+/**
+ * Durable signals that a multi-tick *listing* is mid-flight.
+ * Unsettled confirm catch-up keeps `seenAcc` as a presence snapshot — that is
+ * not an in-progress list cursor (confirm-only wakes reuse it).
+ */
 function isReconcileInProgress(state) {
+  if ((state.cursorPage || 0) > 0 || state.outsideCursor != null) return true;
+  if (state.unsettledConfirmCatchUp) return false;
+  return Array.isArray(state.seenAcc) && state.seenAcc.length > 0;
+}
+
+/** True when heartbeat should drain deferred confirms without re-listing. */
+function canConfirmCatchUpOnly(state, force) {
   return (
-    (state.cursorPage || 0) > 0 ||
-    state.outsideCursor != null ||
-    (Array.isArray(state.seenAcc) && state.seenAcc.length > 0)
+    !force &&
+    !!state.unsettledConfirmCatchUp &&
+    Array.isArray(state.seenAcc) &&
+    state.seenAcc.length > 0 &&
+    (state.cursorPage || 0) === 0 &&
+    state.outsideCursor == null
   );
 }
 
@@ -130,11 +146,12 @@ async function reconcileOnce({ force, budget }) {
 
   const state = await getReconcileState();
   const inProgress = isReconcileInProgress(state);
+  const confirmOnly = canConfirmCatchUpOnly(state, force);
   // Heartbeat only: after in-progress continues, honor quiet-time only after a
   // *settled* finish. Unsettled confirm catch-up skips cooldown so Status never
   // shows “0 pending + wait N minutes” over a postponed confirm mountain.
   // Queue work is not a hard skip — tick prefer-drains first; leftover spendable
-  // funds Trash/list. Pull now (force) bypasses cooldown; rateLimitedUntil gated.
+  // funds Trash/list/confirm. Pull now (force) bypasses cooldown; rateLimitedUntil gated.
   // Skip reason `busy` is only the in-process reconciling reentrancy above.
   if (!force && !inProgress) {
     if (!state.unsettledConfirmCatchUp) {
@@ -172,9 +189,31 @@ async function reconcileOnce({ force, budget }) {
     return { enqueued: 0, pages: 0, done: true };
   }
 
+  // Unsettled + durable presence snapshot → confirm/park/Trash only (no nested
+  // re-list). Pull now (force) always refreshes the listing instead.
+  if (confirmOnly) {
+    return runConfirmCatchUp({
+      client,
+      budget,
+      index,
+      rootId: root._id,
+      allowlist: config.raindropFolderAllowlist || {},
+    });
+  }
+
   let page = state.cursorPage || 0;
   let outsideCursor = state.outsideCursor || null;
-  await setReconcileState({ running: true, lastError: null });
+  // Fresh listing must not union a prior catch-up seenAcc into the new scan.
+  if (!inProgress) {
+    await setReconcileState({
+      running: true,
+      lastError: null,
+      seenAcc: null,
+      unsettledConfirmCatchUp: false,
+    });
+  } else {
+    await setReconcileState({ running: true, lastError: null });
+  }
 
   let enqueued = 0;
   let pages = 0;

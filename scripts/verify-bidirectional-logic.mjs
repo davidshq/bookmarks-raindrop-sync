@@ -1087,6 +1087,7 @@ console.log("== trash-safe Status derive ==");
     deriveTrashSafeState,
     formatTrashSafeNotice,
     buildTrashSafePayload,
+    trashSafeButtonLabel,
   } = await import("../src/lib/trash-hygiene.js");
   assert.equal(deriveTrashSafeState(null), "unknown");
   assert.equal(deriveTrashSafeState({}), "unknown");
@@ -1102,15 +1103,17 @@ console.log("== trash-safe Status derive ==");
     deriveTrashSafeState({ trashHygieneAt: 1, trashScanComplete: true, trashPairedPending: 0 }),
     "safe"
   );
-  assert.ok(formatTrashSafeNotice(null).includes("not checked"));
-  assert.ok(
-    formatTrashSafeNotice({ trashHygieneAt: 1, trashScanComplete: true, trashPairedPending: 0 }).includes(
-      "Safe to empty"
-    )
+  assert.equal(formatTrashSafeNotice(null), "Click Check Trash before emptying Raindrop Trash.");
+  assert.equal(
+    formatTrashSafeNotice({ trashHygieneAt: 1, trashScanComplete: true, trashPairedPending: 0 }),
+    "Safe to empty Raindrop Trash."
   );
+  assert.ok(formatTrashSafeNotice({ trashHygieneAt: 1, trashScanComplete: false }).includes("Continue"));
+  assert.equal(trashSafeButtonLabel("partial"), "Continue");
+  assert.equal(trashSafeButtonLabel("safe"), "Check Trash");
   assert.equal(buildTrashSafePayload(null).state, "unknown");
-  assert.ok(buildTrashSafePayload(null).notice);
-  console.log("  ✔ unknown / partial / waiting / safe");
+  assert.equal(buildTrashSafePayload(null).buttonLabel, "Check Trash");
+  console.log("  ✔ unknown / partial / waiting / safe + short copy");
 }
 
 console.log("== postpone confirm log copy ==");
@@ -1118,6 +1121,10 @@ console.log("== postpone confirm log copy ==");
   const fs = await import("node:fs/promises");
   const finishSrc = await fs.readFile(
     new URL("../src/lib/reconcile-finish.js", import.meta.url),
+    "utf8"
+  );
+  const reconcileSrc = await fs.readFile(
+    new URL("../src/lib/reconcile.js", import.meta.url),
     "utf8"
   );
   assert.ok(
@@ -1128,7 +1135,19 @@ console.log("== postpone confirm log copy ==");
     !finishSrc.includes("rate-limit budget; continues next cycle"),
     "postpone log must not blame rate-limit budget"
   );
-  console.log("  ✔ postpone log honesty");
+  assert.ok(
+    finishSrc.includes("runConfirmCatchUp"),
+    "confirm-only catch-up export exists"
+  );
+  assert.ok(
+    finishSrc.includes("after.unsettledConfirmCatchUp ? [...presence]"),
+    "finish keeps seenAcc while unsettled"
+  );
+  assert.ok(
+    reconcileSrc.includes("canConfirmCatchUpOnly"),
+    "reconcile gates confirm-only catch-up"
+  );
+  console.log("  ✔ postpone log honesty + confirm-only catch-up hooks");
 }
 
 console.log("== pulled-path folderCollections zip ==");

@@ -487,7 +487,11 @@ export async function getReconcileState() {
      * lastRunAt at the cooldown gate for upgrade continuity.
      */
     lastSettledAt: null,
-    /** True when finish deferred unparked missing-raindrop confirms. */
+    /**
+     * True when finish deferred unparked missing-raindrop confirms.
+     * While true, heartbeat skips quiet-time cooldown. When `seenAcc` is also
+     * present, heartbeat runs confirm-only catch-up (no nested re-list).
+     */
     unsettledConfirmCatchUp: false,
     lastError: null,
     /** Rotating index into delete-confirm candidates (survives completed cycles). */
@@ -508,6 +512,8 @@ export async function getReconcileState() {
     trashPairedPending: 0,
     /** @type {"reconcile"|"check-trash"|null} */
     trashHygieneSource: null,
+    /** Next Trash list page for Check Trash continue (0 after complete). */
+    trashHygieneNextPage: 0,
   });
 }
 

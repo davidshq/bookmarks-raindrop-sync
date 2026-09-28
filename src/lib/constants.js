@@ -86,7 +86,7 @@ export const KEY = {
   // reconcile: { cursorPage, outsideCursor, running, lastRunAt, lastSettledAt,
   //   unsettledConfirmCatchUp, lastError, seenAcc, aliveConfirmOffset,
   //   tombstonePruneOffset, parkedAliveIds, trashHygieneAt, trashScanComplete,
-  //   trashPairedPending, trashHygieneSource }
+  //   trashPairedPending, trashHygieneSource, trashHygieneNextPage }
   RECONCILE: "reconcile",
   COLLECTION_CACHE: "collectionCache", // { [collectionPath]: collectionId }
   /** Edge folder id → Raindrop collection id (for in-place folder renames). */
@@ -221,9 +221,10 @@ export function drainJobsCap(pending) {
   return n >= DRAIN_BUSY_PENDING_THRESHOLD ? MAX_JOBS_PER_DRAIN_BUSY : MAX_JOBS_PER_DRAIN;
 }
 /**
- * Soft max GET /raindrop/{id} confirms per reconcile finish (shared by
+ * Soft max GET /raindrop/{id} confirms per *normal* reconcile finish (shared by
  * delete-detection and tombstone prune). Primary stop is wake spendable;
- * unchecked work rotates next cycle.
+ * unchecked work rotates next cycle. Unsettled confirm catch-up may use up to
+ * {@link SOFT_MAX_REQS_PER_WAKE} under the same spendable/wakeCap.
  */
 export const MAX_ALIVE_CHECKS_PER_TICK = 40;
 /** Soft max Raindrop list pages (root + outside-root) per reconcile tick. */

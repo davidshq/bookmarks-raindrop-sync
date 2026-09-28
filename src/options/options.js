@@ -27,7 +27,7 @@ import {
   formatReconcileSkipNotice,
 } from "../lib/store.js";
 import { formatLastThrottleNotice } from "../lib/wake-budget.js";
-import { formatTrashSafeNotice } from "../lib/trash-hygiene.js";
+import { formatTrashSafeNotice, trashSafeButtonLabel } from "../lib/trash-hygiene.js";
 import { countArchiveEntries, exportArchiveEntries, clearArchive } from "../lib/log-archive.js";
 import { getTree, mirrorPathExists, getTopRoots } from "../lib/bookmarks.js";
 import {
@@ -344,13 +344,21 @@ async function refreshStatus() {
 
   const trashRow = $("trashSafeRow");
   const trashLine = $("trashSafeLine");
+  const checkTrashBtn = $("checkTrash");
+  const checkTrashStatus = $("checkTrashStatus");
   if (resp.syncMode === SYNC_MODE.BIDIRECTIONAL && resp.trashSafe) {
     trashRow.classList.remove("hidden");
     trashLine.textContent =
       resp.trashSafe.notice || formatTrashSafeNotice(resp.trashSafe, resp.trashSafe.state);
+    if (checkTrashBtn) {
+      checkTrashBtn.textContent =
+        resp.trashSafe.buttonLabel || trashSafeButtonLabel(resp.trashSafe.state);
+    }
   } else {
     trashRow.classList.add("hidden");
     trashLine.textContent = "";
+    if (checkTrashStatus) checkTrashStatus.textContent = "";
+    if (checkTrashBtn) checkTrashBtn.textContent = "Check Trash";
   }
 
   const banner = $("haltBanner");
@@ -1333,11 +1341,8 @@ $("checkTrash").addEventListener("click", async () => {
     } else if (!resp?.ok) {
       out.textContent = resp?.error || "Check Trash failed.";
     } else {
-      out.textContent =
-        resp.trashSafe?.notice ||
-        (resp.scanComplete
-          ? "Trash check complete."
-          : "Trash check ran (partial scan).");
+      // Full notice lives on #trashSafeLine after refreshStatus — keep this short.
+      out.textContent = resp.trashSafe?.state === "partial" ? "More to scan." : "Done.";
     }
     await refreshStatus();
   } catch (err) {

@@ -2,6 +2,8 @@
 
 Notes from reviewing the Raindrop REST API against this extension’s bidirectional reconcile. Not a product spec — a decision memo for how we might detect remote deletes more efficiently than today’s capped per-id confirms.
 
+See also: [`raindrop-api-best-practices.md`](./raindrop-api-best-practices.md) for general API usage rules.
+
 ## Current behavior
 
 Reconcile:
@@ -69,20 +71,36 @@ Raindrop moved out of sync tree
 
 Trash listing should capture the vast majority of real “user deleted in Raindrop” cases. The leftover confirm backlog is a different problem (scope mismatch), addressed by parking (C).
 
+### Confirm catch-up (unsettled)
+
+After a finished listing, pairs absent from `seenAcc` are confirm candidates. A soft per-finish confirm backstop (`MAX_ALIVE_CHECKS_PER_TICK`) may leave thousands deferred — logged as “postponed N missing-raindrop check(s)”.
+
+While catch-up is **unsettled**, heartbeat:
+
+1. Skips quiet-time cooldown.
+2. **Keeps** the completed listing’s `seenAcc` as a presence snapshot.
+3. Runs **confirm-only** wakes (Trash peek + confirm GETs + park) without re-listing the sync root — so almost all leftover spendable goes to shrinking the mountain.
+4. Raises the soft confirm backstop to the wake cap for those wakes.
+
+**Pull now** still forces a fresh nested list (clears the snapshot) so presence stays honest after allowlist/root changes. Safety is unchanged: confirm-before-delete, park out-of-scope alives, Trash for soft-deletes.
+
+Math for ~4700 candidates: re-list-every-cycle wasted most of ~80 req/wake on pages; confirm-only can spend ~50–70 GETs/wake → roughly an hour of heartbeats, and parking permanently removes out-of-scope alives from the candidate set.
+
 ## Safe to empty Raindrop Trash (Status)
 
-Emptying Trash removes the soft-delete signal. Options → Status (bidirectional only) shows a **trash hygiene** snapshot:
+Emptying Trash removes the soft-delete signal. Options → Status (bidirectional) shows one short line:
 
-| Status | Meaning |
-|--------|---------|
-| **Safe to empty** | Last Trash peek **completed** and found **zero** paired ids still needing enroll |
-| **Waiting** | Paired items in Trash still need enroll |
-| **Partial** | Peek stopped early (page/budget cap) — not safe |
-| **Unknown** | No peek yet |
+| Status | Meaning | What to do |
+|--------|---------|------------|
+| **Safe to empty Raindrop Trash.** | Full Trash scan done; nothing paired left to enroll | Empty Trash if you want |
+| **Don't empty… N still syncing** | Paired deletes still need enroll | Wait / Check Trash |
+| **Still checking… click Continue.** | Scan not finished (large Trash or budget) | Click **Continue** (resumes; does not restart) |
+| **Click Check Trash before…** | Never checked | Click **Check Trash** |
 
-**Discovery debt vs apply debt:** Safe-to-empty means soft-deletes have been *enrolled* (`delete-edge` queued or already tombstoned). Queued Edge deletes may still drain afterward — that is normal apply debt (Raindrop→Edge pending). **Check Trash** runs a Trash-only peek without a full Pull now.
+Heartbeat lists newest Trash for enroll but does **not** flip Status to “still checking” on a truncated pass. **Check Trash / Continue** is the complete-scan oracle and keeps a page cursor so each click advances.
 
-Do **not** empty Trash while Status says waiting, partial, or unknown.
+**Discovery debt vs apply debt:** Safe means soft-deletes were *enrolled*. Queued Edge deletes may still finish afterward (normal Raindrop→Edge pending).
+
 
 ## Related implementation changes
 

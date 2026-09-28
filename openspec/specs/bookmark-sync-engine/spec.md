@@ -282,6 +282,15 @@ When sync mode is `bidirectional`, the engine SHALL run Raindrop reconciliation 
 - **THEN** the engine does not skip with reason `cooldown`
 - **AND** it starts or continues reconcile subject to rate-limit pause
 
+#### Scenario: Unsettled confirm catch-up does not re-list
+- **WHEN** a bidirectional reconcile cycle finishes with unparked missing-raindrop confirms still deferred
+- **AND** the finished cycle's scoped `seenAcc` presence snapshot is retained
+- **AND** the heartbeat fires with leftover wake spendable and no in-progress list cursor
+- **THEN** the engine runs Trash peek and missing-raindrop confirm GETs against that snapshot without starting a new nested sync-root listing
+- **AND** confirm GETs may use up to the soft wake request cap under spendable (not only the normal finish confirm backstop)
+- **AND** out-of-scope alive parking and delete-edge enqueue behavior remain unchanged
+- **AND** a user-triggered "Pull now" still starts a fresh listing that replaces the snapshot
+
 ### Requirement: Honest deferred confirm messaging
 When reconcile finish postpones unparked missing-raindrop confirm GETs because spendable, the soft wake cap, or a soft confirm backstop is exhausted, the activity log SHALL state that work continues on a later cycle due to the confirm/wake budget, and SHALL NOT attribute that postponement to Raindrop rate-limit exhaustion unless a rate-limit pause is actually active.
 

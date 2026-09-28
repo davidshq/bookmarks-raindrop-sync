@@ -175,12 +175,14 @@ export async function importEngine() {
   const queueBulkPrompt = await import(`${base}/queue-bulk-prompt.js`);
   const bulkCandidate = await import(`${base}/bulk-candidate.js`);
   const wakeBudget = await import(`${base}/wake-budget.js`);
+  const reconcileFinish = await import(`${base}/reconcile-finish.js`);
   return {
     constants,
     store,
     queue,
     sync,
     reconcile,
+    reconcileFinish,
     raindropMod,
     backfill,
     matchExisting,

@@ -95,10 +95,6 @@
             <button id="checkTrash" type="button" class="secondary">Check Trash</button>
             <span id="checkTrashStatus" class="hint" role="status"></span>
           </div>
-          <p class="hint">
-            Safe to empty means paired soft-deletes in Raindrop Trash have been enrolled for
-            browser sync. Queued local deletes may still finish afterward.
-          </p>
         </div>
         <p class="status-line muted">Local storage: <span id="storageUsage">—</span></p>
         <div id="deadLetterRow" class="row hidden">
@@ -213,7 +209,8 @@
             How often to start a full Raindrop check when confirm catch-up is settled. Each
             heartbeat prefers draining the sync queue, then uses leftover Raindrop budget for
             Trash / list work — queued jobs do not hard-block listing. Unfinished missing-raindrop
-            checks continue every minute. Use <strong>Pull now</strong> for an immediate check.
+            checks continue every minute as confirm-only (no full re-list) until the backlog drains
+            or parks. Use <strong>Pull now</strong> for an immediate full check.
           </p>
           <label>
             Raindrop → browser folders
