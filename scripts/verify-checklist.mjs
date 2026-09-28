@@ -1370,6 +1370,10 @@ async function scenario68_rateLimitBudget() {
   assert.equal(manual.skipped, true, "reconcileNow returns skipped on 429");
   assert.equal(manual.reason, "rate_limited", "reconcileNow skip reason is rate_limited");
   assert.equal(await eng.store.isRateLimited(), true, "reconcileNow 429 sets global pause");
+  assert.ok(
+    typeof manual.rateLimitedUntil === "number" && manual.rateLimitedUntil > Date.now(),
+    "reconcileNow exposes rateLimitedUntil for UI wait-and-resume"
+  );
 
   console.log(
     "  ✔ global gate, capped confirms, round-robin, skip reasons, settled cooldown, " +

@@ -60,6 +60,8 @@ Chrome and Edge do not fork collections.
   cooldown, rate-limit pause, or bulk-queue pause). Heartbeat / Pull now /
   Drain now size Raindrop work from `X-RateLimit-Remaining` (soft per-wake
   cap); Status distinguishes a real Raindrop pause from a self wake-cap stop.
+  **Pull now** waits out a Raindrop rate-limit pause and continues the same
+  click (heartbeat also resumes if you close the UI).
   Throughput / cooldown design target: [`docs/sync-architecture-right-sizing.md`](docs/sync-architecture-right-sizing.md).
   **Raindrop → browser folders** chooses create-as-needed / existing-only /
   mirror-all. Outside-root allowlist picks land under Other bookmarks / Raindrop

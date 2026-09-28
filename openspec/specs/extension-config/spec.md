@@ -211,11 +211,16 @@ When bidirectional mode is selected, the options UI SHALL present a short warnin
 - **THEN** the status or log view reflects that activity
 
 ### Requirement: Manual reconcile control
-When bidirectional mode is enabled, the extension SHALL provide a "Pull now" control that triggers an immediate Raindrop reconcile. The control SHALL be hidden in one-way mode. Its help text SHALL state that this brings Raindrop changes into Edge, can remove Edge bookmarks whose Raindrop copy is gone, and does not upload existing Edge bookmarks. Progress for this control SHALL be shown separately from the import control.
+When bidirectional mode is enabled, the extension SHALL provide a "Pull now" control that triggers an immediate Raindrop reconcile. The control SHALL be hidden in one-way mode. Its help text SHALL state that this brings Raindrop changes into Edge, can remove Edge bookmarks whose Raindrop copy is gone, and does not upload existing Edge bookmarks. Progress for this control SHALL be shown separately from the import control. When a Pull now loop receives a `rate_limited` skip, it SHALL wait until the global Raindrop pause ends (using `rateLimitedUntil` when provided), show resuming progress copy, and continue that same pull without requiring another click, subject to a bounded max wait count after which copy MAY note that heartbeat continues.
 
 #### Scenario: User runs reconcile
 - **WHEN** sync mode is `bidirectional` and the user triggers "Pull now"
 - **THEN** a reconcile pass is scheduled/started for the configured root tree
+
+#### Scenario: Pull now waits out a rate-limit pause
+- **WHEN** sync mode is `bidirectional` and Pull now receives `rate_limited` with a future `rateLimitedUntil`
+- **THEN** the Manual Sync / popup progress shows that pull will resume after the pause
+- **AND** the same Pull now loop continues after the wait without requiring another click
 
 #### Scenario: Pull control hidden in one-way
 - **WHEN** sync mode is `one-way`

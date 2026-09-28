@@ -10,6 +10,7 @@
 import { SYNC_MODE } from "./constants.js";
 import {
   getConfig,
+  getStatus,
   appendLog,
   isRateLimited,
   clearRateLimit,
@@ -42,32 +43,60 @@ export async function refreshReconcileSkipAfterBulkResume() {
   await clearReconcileSkip();
 }
 
+/** Skip payload for Pull now / UI wait-and-resume. */
+async function rateLimitedSkipResult() {
+  await noteReconcileSkip("rate_limited", { pending: await queue.size() });
+  const { rateLimitedUntil } = await getStatus();
+  return {
+    enqueued: 0,
+    pages: 0,
+    done: false,
+    skipped: true,
+    reason: "rate_limited",
+    rateLimitedUntil: rateLimitedUntil ?? null,
+  };
+}
+
 /**
  * Options/popup "Pull now": force past idle cooldown, then drain.
  * Rate-limit / auth errors use the same global gate as the heartbeat so a
  * manual 429 cannot leave rateLimitedUntil unset while the alarm keeps firing.
+ * Returns `rateLimitedUntil` on rate_limited skips so the UI can wait and resume.
  */
 export async function reconcileNow() {
   const budget = await createWakeBudget({ mode: "full" });
   try {
     if (await isRateLimited()) {
-      await noteReconcileSkip("rate_limited", { pending: await queue.size() });
-      return { enqueued: 0, pages: 0, done: false, skipped: true, reason: "rate_limited" };
+      return await rateLimitedSkipResult();
     }
     const result = await reconcile({ force: true, budget });
     if (result?.skipped && result.reason) {
       await noteReconcileSkip(result.reason, { pending: await queue.size() });
+      if (result.reason === "rate_limited") {
+        const { rateLimitedUntil } = await getStatus();
+        return { ...result, rateLimitedUntil: rateLimitedUntil ?? null };
+      }
     } else if (!result?.skipped) {
       await clearReconcileSkip();
     }
-    if (await isRateLimited()) return result;
+    if (await isRateLimited()) {
+      // Skip drain under the pause. If listing already finished, keep done so
+      // Pull now can end this click instead of waiting and calling again.
+      if (result?.done) return result;
+      const { rateLimitedUntil } = await getStatus();
+      return {
+        ...(result ?? { enqueued: 0, pages: 0, done: false }),
+        skipped: true,
+        reason: "rate_limited",
+        rateLimitedUntil: rateLimitedUntil ?? null,
+      };
+    }
     await drain({ budget });
     return result;
   } catch (err) {
     if (await handleClientError(err)) {
       if (err instanceof RateLimitError) {
-        await noteReconcileSkip("rate_limited", { pending: await queue.size() });
-        return { enqueued: 0, pages: 0, done: false, skipped: true, reason: "rate_limited" };
+        return await rateLimitedSkipResult();
       }
       throw err;
     }

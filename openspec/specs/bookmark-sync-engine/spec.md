@@ -131,7 +131,8 @@ The extension SHALL provide a user-triggered backfill that walks the existing bo
 - **WHEN** a user-triggered "Pull now" hits HTTP 429 or a proactive rate-budget pause
 - **THEN** the engine sets the same global Raindrop pause used by the heartbeat
 - **AND** defers due queue jobs until that pause ends
-- **AND** returns a `rate_limited` skip result to the Options/popup UI
+- **AND** returns a `rate_limited` skip result (including `rateLimitedUntil` when known) to the Options/popup UI
+- **AND** the Options/popup Pull now loop waits until that pause ends and continues the same pull (subject to a max wait count) instead of asking the user to click Pull now again
 
 #### Scenario: Worker restarts during backfill
 - **WHEN** the service worker restarts partway through a backfill

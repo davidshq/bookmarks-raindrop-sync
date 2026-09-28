@@ -41,10 +41,11 @@ import {
   DEFAULT_RECONCILE_INTERVAL_MINUTES,
   MIN_RECONCILE_INTERVAL_MINUTES,
   MAX_RECONCILE_INTERVAL_MINUTES,
+  MSG,
   reconcileIntervalMs,
 } from "../src/lib/constants.js";
 import { normalizeConfig, clampReconcileIntervalMinutes } from "../src/lib/store.js";
-import { runPullNow } from "../src/lib/pull-now.js";
+import { MAX_PULL_RATE_WAITS, runPullNow } from "../src/lib/pull-now.js";
 import {
   isAllowlistActive,
   isCollectionAllowed,
@@ -281,7 +282,75 @@ console.log("== pull now loop ==");
   const capped = await runPullNow(async () => ({ ok: true, done: false, enqueued: 0 }));
   assert.match(capped.text, /Manual Sync/);
   assert.doesNotMatch(capped.text, /Settings/);
-  console.log("  ✔ popup and options share the pass loop");
+
+  let rateCalls = 0;
+  const slept = [];
+  const until = Date.now() + 5_000;
+  const resumed = await runPullNow(
+    async (msg) => {
+      if (msg.type === MSG.GET_STATUS) {
+        return { ok: true, status: { rateLimitedUntil: until } };
+      }
+      rateCalls++;
+      if (rateCalls === 1) {
+        return {
+          ok: true,
+          skipped: true,
+          reason: "rate_limited",
+          rateLimitedUntil: until,
+          enqueued: 2,
+        };
+      }
+      return { ok: true, done: true, enqueued: 1 };
+    },
+    { sleepFn: async (ms) => { slept.push(ms); } }
+  );
+  assert.equal(rateCalls, 2, "waits out rate limit then continues");
+  assert.equal(slept.length, 1, "sleeps once for the pause");
+  assert.ok(slept[0] >= 250, "pads past rateLimitedUntil");
+  assert.equal(resumed.totalQueued, 3, "keeps enqueued count across the wait");
+  assert.match(resumed.text, /Pull finished: queued 3/);
+  assert.doesNotMatch(resumed.text, /try Pull now again/);
+
+  let exhaustionCalls = 0;
+  const exhausted = await runPullNow(
+    async () => {
+      exhaustionCalls++;
+      return {
+        ok: true,
+        skipped: true,
+        reason: "rate_limited",
+        rateLimitedUntil: Date.now() + 1_000,
+      };
+    },
+    { sleepFn: async () => {} }
+  );
+  assert.equal(exhaustionCalls, MAX_PULL_RATE_WAITS + 1, "stops after max rate waits");
+  assert.match(exhausted.text, /still limited after several waits/);
+
+  // Contract with reconcileNow: when listing already finished under a pause,
+  // return done (not skipped) so Pull now ends without sleeping again.
+  let doneCalls = 0;
+  const doneUnderPause = await runPullNow(
+    async () => {
+      doneCalls++;
+      return {
+        ok: true,
+        done: true,
+        enqueued: 1,
+        rateLimitedUntil: Date.now() + 60_000,
+      };
+    },
+    {
+      sleepFn: async () => {
+        throw new Error("must not sleep when already done");
+      },
+    }
+  );
+  assert.equal(doneCalls, 1, "done under pause finishes in one pass");
+  assert.match(doneUnderPause.text, /Pull finished: queued 1/);
+
+  console.log("  ✔ popup and options share the pass loop / wait-and-resume rate limit");
 }
 
 console.log("== collection path under root ==");
