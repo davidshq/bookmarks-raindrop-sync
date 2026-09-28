@@ -700,14 +700,26 @@ console.log("== wake budget spendable / self-cap ==");
     "../src/lib/constants.js"
   );
   assert.ok(SHORT_WAKE_REQS > BOOTSTRAP_REQS);
+  assert.ok(SHORT_WAKE_REQS < SOFT_MAX_REQS_PER_WAKE, "short wake is below full wakeCap");
   const {
     WakeBudget,
+    createWakeBudget,
     formatLastThrottleNotice,
     loadPersistedRateWindow,
   } = await import("../src/lib/wake-budget.js");
   const { setStatus, getStatus, noteRateLimitedUntil, clearRateLimit } = await import(
     "../src/lib/store.js"
   );
+
+  // Opportunistic drains (live handlers) seed a short budget; full wakes use soft max.
+  const shortBoot = new WakeBudget({
+    mode: "short",
+    headerRemaining: null,
+    headerResetAt: null,
+  });
+  assert.equal(shortBoot.mode, "short");
+  assert.equal(shortBoot.allowance(), SHORT_WAKE_REQS, "short bootstrap equals SHORT_WAKE_REQS");
+  assert.equal(shortBoot.wakeCapReqs, SHORT_WAKE_REQS);
 
   const boot = new WakeBudget({
     mode: "full",
@@ -766,7 +778,23 @@ console.log("== wake budget spendable / self-cap ==");
   await noteRateLimitedUntil(Date.now() + 30_000);
   assert.equal((await getStatus()).lastThrottle, null, "real pause clears self-cap note");
   await clearRateLimit();
-  console.log("  ✔ bootstrap / spendable / wake_cap / persist window / Status copy");
+
+  await setStatus({
+    rateRemaining: 90,
+    rateResetAt: Date.now() + 120_000,
+    rateObservedAt: Date.now(),
+  });
+  const fullFromStore = await createWakeBudget({ mode: "full" });
+  const shortFromStore = await createWakeBudget({ mode: "short" });
+  assert.equal(fullFromStore.mode, "full");
+  assert.equal(shortFromStore.mode, "short");
+  assert.ok(
+    fullFromStore.allowance() > shortFromStore.wakeCapReqs,
+    "full wakeCap exceeds short wakeCap under same headers"
+  );
+  assert.equal(shortFromStore.wakeCapReqs, SHORT_WAKE_REQS);
+
+  console.log("  ✔ bootstrap / short vs full / spendable / wake_cap / persist window / Status copy");
 }
 
 console.log("== bulk candidate heuristics ==");
@@ -1125,7 +1153,20 @@ console.log("== Options HTML bulk lane controls ==");
     !/Other\s+favorites\s+repair/i.test(html),
     "no Other-favorites repair product control"
   );
-  console.log("  ✔ bulk banner + Match existing; no Other-favorites repair");
+  assert.ok(html.includes('id="reconcileIntervalHelp"'), "reconcile interval help");
+  assert.ok(
+    /leftover Raindrop budget/i.test(html),
+    "interval help describes leftover spendable for Trash/list"
+  );
+  assert.ok(
+    /do not hard-block listing/i.test(html),
+    "interval help says queued jobs do not hard-block listing"
+  );
+  assert.ok(
+    !/busy queue defers listing/i.test(html),
+    "stale queue-busy deferral copy removed"
+  );
+  console.log("  ✔ bulk banner + Match existing; leftover-budget interval help; no Other-favorites repair");
 }
 
 console.log("\nAll offline checks passed.");

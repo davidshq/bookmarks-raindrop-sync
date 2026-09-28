@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /**
  * Isolated checklist verification for bidirectional sync, folder policies,
- * rate-limit / dead-letter paths, and export/queue bulk-lane engine wiring
- * (scenarios 6.2–7.7). Pure bulk heuristics / Match planner live in
- * verify-bidirectional-logic.mjs.
+ * rate-limit / shared wake spendable / dead-letter paths, and export/queue
+ * bulk-lane engine wiring (scenarios 6.2–7.7). Scenario 6.8 covers ordered
+ * prefer-drain + leftover listing (including tick) and reentrancy `busy`.
+ * Pure bulk heuristics / Match planner live in verify-bidirectional-logic.mjs.
  *
  * SAFETY:
  * - Edge bookmarks are 100% in-memory mocks — never touches the real Edge tree.
@@ -1280,6 +1281,84 @@ async function scenario68_rateLimitBudget() {
   assert.notEqual(midCycle.skipped, true, "in-progress cursor continues listing");
   await eng.queue.clear();
 
+  // Helper still reports Raindrop-bound queue work (no longer a reconcile busy gate).
+  await eng.queue.enqueue(bm.id);
+  assert.equal(
+    await eng.reconcile.hasRaindropBoundQueueWork(),
+    true,
+    "hasRaindropBoundQueueWork sees upload jobs"
+  );
+  await eng.queue.clear();
+  assert.equal(
+    await eng.reconcile.hasRaindropBoundQueueWork(),
+    false,
+    "hasRaindropBoundQueueWork false when empty"
+  );
+
+  // Reentrancy: overlapping reconcile returns busy (not queue contention).
+  let releaseRoots;
+  const rootsGate = new Promise((resolve) => {
+    releaseRoots = resolve;
+  });
+  let enteredRoots = false;
+  Proto.getRootCollections = async function (...args) {
+    enteredRoots = true;
+    await rootsGate;
+    return prevRootCount.apply(this, args);
+  };
+  const firstReconcile = eng.reconcile.reconcile({ force: true });
+  for (let i = 0; i < 40 && !enteredRoots; i++) {
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  assert.equal(enteredRoots, true, "first reconcile reached collection index");
+  const overlapped = await eng.reconcile.reconcile({ force: true });
+  assert.equal(overlapped.skipped, true, "overlapping reconcile is skipped");
+  assert.equal(overlapped.reason, "busy", "busy means in-process reentrancy");
+  releaseRoots();
+  await firstReconcile;
+  Proto.getRootCollections = prevRootCount;
+
+  // Heartbeat tick: prefer-drain clears a queued upload, then leftover spendable lists.
+  await eng.queue.clear();
+  await eng.store.clearRateLimit();
+  await eng.store.setConfig({ reconcileIntervalMinutes: 1 });
+  await eng.store.setReconcileState({
+    cursorPage: 0,
+    outsideCursor: null,
+    seenAcc: null,
+    running: false,
+    lastRunAt: Date.now() - 90_000,
+    lastSettledAt: Date.now() - 90_000,
+    unsettledConfirmCatchUp: false,
+    lastError: null,
+  });
+  const tickBm = await chrome.bookmarks.create({
+    parentId: "1",
+    title: "ers-tick-prefer-drain",
+    url: "https://example.com/ers-tick-prefer-drain",
+  });
+  await eng.queue.enqueue(tickBm.id);
+  const listBeforeTick = mock._calls.listRaindrops;
+  const createBeforeTick = mock._calls.createRaindrop;
+  await eng.sync.tick();
+  assert.ok(
+    mock._calls.createRaindrop > createBeforeTick,
+    "tick prefer-drain uploads the queued bookmark"
+  );
+  const stillQueued = (await eng.queue.list()).some(
+    (j) => j.id === tickBm.id && eng.queue.jobKind(j) === JOB.UPLOAD
+  );
+  assert.equal(stillQueued, false, "tick prefer-drain cleared the upload job");
+  assert.ok(
+    mock._calls.listRaindrops > listBeforeTick,
+    "tick leftover spendable still runs Trash/list after drain"
+  );
+  assert.notEqual(
+    (await eng.store.getStatus()).reconcileSkipReason,
+    "busy",
+    "tick with prior queue work does not stamp queue-contention busy"
+  );
+
   // Manual reconcileNow must set the global gate on RateLimitError (not only fail the UI).
   await eng.store.clearRateLimit();
   const prevRoot = Proto.getRootCollections;
@@ -1294,7 +1373,8 @@ async function scenario68_rateLimitBudget() {
 
   console.log(
     "  ✔ global gate, capped confirms, round-robin, skip reasons, settled cooldown, " +
-      "unsettled catch-up, ordered share, empty-budget gate, reconcileNow gate"
+      "unsettled catch-up, ordered share, empty-budget gate, reentrancy busy, " +
+      "tick prefer-drain+list, reconcileNow gate"
   );
 }
 
