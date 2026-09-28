@@ -313,6 +313,20 @@ export async function clear() {
   });
 }
 
+/**
+ * Remove every queued job matching `pred` (same lock as enqueue/remove).
+ * @param {(job: object) => boolean} pred
+ * @returns {Promise<number>} how many jobs were removed
+ */
+export async function removeWhere(pred) {
+  return withLock(async () => {
+    const jobs = await readQueue();
+    const kept = jobs.filter((j) => !pred(j));
+    if (kept.length !== jobs.length) await writeQueue(kept);
+    return jobs.length - kept.length;
+  });
+}
+
 /** Empty the dead-letter list without re-enqueueing. */
 export async function clearDeadLetter() {
   return withLock(async () => {

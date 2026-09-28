@@ -29,6 +29,7 @@ import {
   patchClient,
   edgeUrls,
   findEdgeByUrl,
+  bookmarks as harnessBookmarks,
   bookmarks,
   storage,
 } from "./lib/test-harness.mjs";
@@ -3170,6 +3171,32 @@ async function scenario76_applyMatchExistingAndImportSkip() {
   assert.equal(conflicted.paired, 0);
   assert.equal(await eng.store.getRaindropId(matchedBm.id), "42", "conflict does not overwrite");
 
+  // Race: plan saw a ghost forward link (replacesRid) and would rebind to R1.
+  // Before Apply, an upload re-paired the bookmark to a brand-new R2 that is not
+  // in the export snapshot. Apply must keep R2, not rebind to R1.
+  const racer = await chrome.bookmarks.create({
+    parentId: "1",
+    title: "ERS match race",
+    url: "https://example.com/ers-match-race",
+  });
+  await eng.store.recordSynced(racer.id, "1867674199"); // ghost at plan time
+  await eng.store.recordSynced(racer.id, "7002"); // new raindrop after plan
+  const raced = await applyMatchExisting(
+    [{ bookmarkId: racer.id, raindropId: "7001", replacesRid: "1867674199" }],
+    { liveRaindropIds: ["7001"] }
+  );
+  assert.equal(raced.paired, 0, "changed-since-plan row skipped");
+  assert.equal(await eng.store.getRaindropId(racer.id), "7002", "new pair kept");
+
+  // Same row with the ghost still in place → rebinds.
+  await eng.store.recordSynced(racer.id, "1867674199");
+  const rebound = await applyMatchExisting(
+    [{ bookmarkId: racer.id, raindropId: "7001", replacesRid: "1867674199" }],
+    { liveRaindropIds: ["7001"] }
+  );
+  assert.equal(rebound.paired, 1);
+  assert.equal(await eng.store.getRaindropId(racer.id), "7001", "ghost rebound to live raindrop");
+
   const scope = await eng.backfill.scanImportScope();
   assert.ok(!scope.unpairedIds.includes(matchedBm.id), "matched id not in Import unpaired");
   assert.ok(scope.unpairedIds.includes(unpairedBm.id), "unpaired still enqueueable");
@@ -3201,6 +3228,229 @@ async function scenario76_applyMatchExistingAndImportSkip() {
   assert.ok(afterMatch.snoozedBelow != null);
 
   console.log("  ✔ apply pairs only; Import skip; resolveBulkPromptAfterMatch snoozes");
+}
+
+
+async function scenario78_deleteCircuitBreaker() {
+  console.log("\n== 7.8 Delete circuit breaker holds deletes past the rolling limit ==");
+  const eng = await importEngine();
+  const { POLICY, SYNC_MODE, JOB, MSG, DELETE_BREAKER_MIN } = eng.constants;
+  void MSG;
+  await resetAll(eng.store);
+  const mock = makeMockRaindrop();
+  patchClient(eng.raindropMod, mock);
+  await eng.store.setConfig({
+    token: "mock",
+    rootName: "ERS-Verify-Breaker",
+    syncMode: SYNC_MODE.BIDIRECTIONAL,
+    defaultPolicy: POLICY.SYNC_KEEP,
+  });
+
+  // limit = max(50, 2% of pairs) → 50 for a small map. Queue 55 delete-edge jobs
+  // for 55 real, paired Edge bookmarks whose raindrops are gone.
+  const HELD = 5;
+  const total = DELETE_BREAKER_MIN + HELD;
+  const ids = [];
+  for (let i = 0; i < total; i++) {
+    const bm = await chrome.bookmarks.create({
+      parentId: "2",
+      title: `ERS breaker ${i}`,
+      url: `https://example.com/ers-breaker-${i}`,
+    });
+    const rid = String(900000 + i);
+    await eng.store.recordSynced(bm.id, rid);
+    await eng.queue.enqueueJob({ id: `de-${rid}`, kind: JOB.DELETE_EDGE, raindropId: rid, bookmarkId: bm.id });
+    ids.push(bm.id);
+  }
+  // Drain more than once — per-wake job caps must not mask the window count.
+  for (let n = 0; n < 6; n++) await eng.sync.drain();
+
+  const remaining = ids.filter((id) => chromeBookmarkExists(id));
+  assert.equal(remaining.length, HELD, "deletes past the limit are held");
+  const status = await eng.store.getStatus();
+  assert.equal(status.deleteBreakerTripped, true, "breaker tripped");
+  assert.equal(status.deletionsHalted, true, "deletionsHalted set");
+  assert.ok(String(status.lastError).includes("circuit breaker"), "halt reason names the breaker");
+  const held = (await eng.queue.list()).filter((j) => j.kind === JOB.DELETE_EDGE);
+  assert.equal(held.length, HELD, "held delete jobs stay queued");
+  const breaker = await eng.store.getDeleteBreaker();
+  assert.equal(breaker.count, DELETE_BREAKER_MIN, "window counted executed deletes only");
+
+  // Non-delete work still runs while tripped.
+  const fresh = await chrome.bookmarks.create({
+    parentId: "2",
+    title: "ERS breaker upload",
+    url: "https://example.com/ers-breaker-upload",
+  });
+  await eng.queue.enqueue(fresh.id);
+  const createBefore = mock._calls.createRaindrop;
+  await eng.sync.drain();
+  assert.equal(mock._calls.createRaindrop, createBefore + 1, "uploads continue while deletes are held");
+  assert.equal((await eng.store.getStatus()).deleteBreakerTripped, true, "drain does not clear the trip");
+
+  // Allow → every held job released in one click, none counted, no re-trip.
+  const heldIds = (await eng.queue.list())
+    .filter((j) => j.kind === JOB.DELETE_EDGE)
+    .map((j) => j.id);
+  await eng.store.resetDeleteBreaker({ allowJobIds: heldIds });
+  await eng.sync.drain();
+  assert.equal(ids.filter((id) => chromeBookmarkExists(id)).length, 0, "all held deletes ran after one Allow");
+  const after = await eng.store.getStatus();
+  assert.equal(after.deleteBreakerTripped, false);
+  assert.equal(after.deletionsHalted, false);
+  assert.equal(after.lastError, null);
+  assert.equal((await eng.store.getDeleteBreaker()).count, 0, "released deletes do not count");
+  assert.deepEqual(after.allowedDeleteJobIds, [], "released ids consumed");
+
+  // Discard path: trip again with one held job, then drop it.
+  await eng.store.resetDeleteBreaker();
+  const victim = await chrome.bookmarks.create({
+    parentId: "2",
+    title: "ERS breaker discard",
+    url: "https://example.com/ers-breaker-discard",
+  });
+  await eng.store.recordSynced(victim.id, "910000");
+  await eng.store.tripDeleteBreaker(DELETE_BREAKER_MIN);
+  await eng.queue.enqueueJob({ id: "de-910000", kind: JOB.DELETE_EDGE, raindropId: "910000", bookmarkId: victim.id });
+  await eng.sync.drain();
+  assert.ok(chromeBookmarkExists(victim.id), "tripped breaker holds a new delete");
+  const dropped = await eng.queue.removeWhere((j) => j.kind === JOB.DELETE_EDGE);
+  assert.equal(dropped, 1);
+  await eng.store.resetDeleteBreaker();
+  assert.equal(await eng.store.getRaindropId(victim.id), "910000", "discard keeps the pair");
+  console.log("  ✔ breaker trips at limit, holds deletes, Allow releases, Discard drops jobs");
+}
+
+function chromeBookmarkExists(id) {
+  return harnessBookmarks.has(String(id));
+}
+
+async function scenario79_repairPairs() {
+  console.log("\n== 7.9 Repair pairs prunes dead pairs, rebinds by URL, clears alive tombstones ==");
+  const eng = await importEngine();
+  const { POLICY, SYNC_MODE, JOB } = eng.constants;
+  const { planRepairFromInputs, planRepairPairs, applyRepairPairs } = eng.repairPairs;
+  await resetAll(eng.store);
+  const mock = makeMockRaindrop();
+  mock.exportRaindropsCsv = async () =>
+    "id,title,url\n" +
+    "100,keep,https://example.com/ers-repair-keep\n" +
+    "200,ghost-orig,https://example.com/ers-repair-ghost\n" +
+    "300,dead-edge,https://example.com/ers-repair-deadedge\n" +
+    "400,tomb-alive,https://example.com/ers-repair-tomb\n";
+  patchClient(eng.raindropMod, mock);
+  await eng.store.setConfig({
+    token: "mock",
+    rootName: "ERS-Verify-Repair",
+    syncMode: SYNC_MODE.BIDIRECTIONAL,
+    defaultPolicy: POLICY.SYNC_KEEP,
+  });
+
+  const keep = await chrome.bookmarks.create({ parentId: "2", title: "keep", url: "https://example.com/ers-repair-keep" });
+  const ghost = await chrome.bookmarks.create({ parentId: "2", title: "ghost", url: "https://example.com/ers-repair-ghost" });
+  const tomb = await chrome.bookmarks.create({ parentId: "2", title: "tomb", url: "https://example.com/ers-repair-tomb" });
+  const edgeOnly = await chrome.bookmarks.create({ parentId: "2", title: "edge only", url: "https://example.com/ers-repair-edge-only" });
+  void edgeOnly;
+
+  await eng.store.recordSynced(keep.id, "100"); // live ↔ live
+  await eng.store.recordSynced(ghost.id, "1867674133"); // Edge live, raindrop ghost (URL alive as 200)
+  await eng.store.recordSynced("bm-dead-1", "300"); // Edge id dead, raindrop alive
+  await eng.store.recordSynced("bm-dead-2", "1867674134"); // both dead
+  // Reverse link on the surviving raindrop still points at a dead Edge id.
+  await eng.store.recordSynced("bm-dead-3", "200");
+  await eng.store.addTombstone("400", "raindrop-remote-delete"); // alive in export → clear
+  await eng.store.addTombstone("1867674135", "raindrop-remote-delete"); // gone → keep
+  await eng.store.addTombstone("100", "edge-offload"); // alive on purpose → never cleared
+  await eng.queue.enqueueJob({ id: "de-1867674133", kind: JOB.DELETE_EDGE, raindropId: "1867674133", bookmarkId: ghost.id });
+  await eng.queue.enqueueJob({ id: "pull-400", kind: JOB.PULL_CREATE, raindropId: "400", link: "https://example.com/ers-repair-tomb" });
+
+  const plan = await planRepairPairs();
+  assert.equal(plan.ok, true);
+  assert.equal(plan.pairsBefore, 5);
+  assert.equal(plan.keptLive, 1, "only keep↔100 is live on both sides");
+  assert.equal(plan.pruneRaindropDead, 1, "ghost forward link pruned");
+  assert.equal(plan.pruneEdgeDead, 2, "dead Edge ids with live raindrops pruned");
+  assert.equal(plan.pruneBothDead, 1);
+  assert.deepEqual(
+    plan.matched.map((m) => [m.bookmarkId, m.raindropId]).sort(),
+    [[ghost.id, "200"], [tomb.id, "400"]].sort(),
+    "rebinds ghost→surviving raindrop and tombstoned URL"
+  );
+  assert.equal(plan.conflicts, 0);
+  assert.equal(plan.edgeOnly, 1);
+  assert.deepEqual(plan.tombstonesAlive, ["400"]);
+  assert.equal(plan.queuedDeletes, 1);
+
+  // Drain keeps running while the confirm dialog is open: a new upload pairs a
+  // fresh bookmark after the dry-run. Apply must keep it.
+  const late = await chrome.bookmarks.create({ parentId: "2", title: "late", url: "https://example.com/ers-repair-late" });
+  await eng.store.recordSynced(late.id, "555");
+
+  const createBefore = mock._calls.createRaindrop;
+  const deleteBefore = mock._calls.deleteRaindrop;
+  const result = await applyRepairPairs(plan);
+  assert.equal(result.ok, true);
+  assert.equal(result.pairs, 4);
+  assert.equal(result.rebound, 2);
+  assert.equal(result.tombstonesCleared, 1);
+  assert.equal(result.deletesDropped, 1);
+  assert.equal(mock._calls.createRaindrop, createBefore, "no Raindrop writes");
+  assert.equal(mock._calls.deleteRaindrop, deleteBefore, "no Raindrop deletes");
+  assert.ok(chromeBookmarkExists(ghost.id), "no Edge writes");
+
+  const pairs = await eng.store.getPairs();
+  assert.deepEqual(pairs.byBookmark, {
+    [keep.id]: "100",
+    [ghost.id]: "200",
+    [tomb.id]: "400",
+    [late.id]: "555",
+  });
+  assert.deepEqual(pairs.byRaindrop, { "100": keep.id, "200": ghost.id, "400": tomb.id, "555": late.id });
+  assert.equal(await eng.store.hasTombstone("400"), false, "alive delete tombstone cleared");
+  assert.equal(await eng.store.hasTombstone("100"), true, "offload tombstone never cleared");
+  assert.equal(await eng.store.hasTombstone("1867674135"), true, "dead tombstone kept");
+  const jobs = await eng.queue.list();
+  assert.equal(jobs.some((j) => j.kind === JOB.DELETE_EDGE), false, "queued delete dropped");
+  assert.equal(jobs.some((j) => j.kind === JOB.PULL_CREATE), true, "non-delete jobs kept");
+  const rs = await eng.store.getReconcileState();
+  assert.equal(rs.seenAcc, null);
+  assert.equal(rs.unsettledConfirmCatchUp, false);
+  assert.deepEqual(rs.parkedAliveIds, []);
+
+  // Pure planner: a reverse-only entry counts as both-dead noise, not a kept pair.
+  const pure = planRepairFromInputs(
+    "id,url\n1,https://a.example/\n",
+    [{ id: "b1", url: "https://a.example/" }],
+    { byBookmark: {}, byRaindrop: { "999": "b-old" } },
+    {}
+  );
+  assert.equal(pure.pruneBothDead, 1);
+  assert.equal(pure.matched.length, 1);
+
+  // Merge: a pair removed after the plan (a delete completed) is not resurrected,
+  // and a rebind never steals a raindrop id claimed after the plan.
+  const merged = eng.repairPairs.mergeRepairPlan(
+    {
+      pairsSnapshot: { a: "1", b: "2" },
+      keptPairs: { a: "1", b: "2" },
+      matched: [{ bookmarkId: "c", raindropId: "9" }],
+    },
+    { a: "1", d: "9" }, // b removed after plan; d claimed 9 after plan
+    new Set(["a", "b", "c", "d"])
+  );
+  assert.deepEqual(merged.byBookmark, { a: "1", d: "9" });
+  assert.equal(merged.result.rebound, 0);
+
+  // Empty export (header only) with pairs present → refused, map untouched.
+  mock.exportRaindropsCsv = async () => "id,title,url\n";
+  const before = await eng.store.getPairs();
+  const refused = await planRepairPairs();
+  assert.equal(refused.ok, false);
+  assert.match(refused.error, /no items/);
+  assert.deepEqual(await eng.store.getPairs(), before, "pairs untouched");
+  const refusedApply = await applyRepairPairs({ ...plan, raindropCount: 0 });
+  assert.equal(refusedApply.ok, false, "apply refuses a plan from an empty export");
+  console.log("  ✔ repair plan/apply (offload kept, post-plan pairs kept, empty export refused)");
 }
 
 async function scenario77_scanImportScopeAndPullBulkGate() {
@@ -3302,6 +3552,8 @@ async function main() {
   await scenario75_bulkDrainPauseAndResume();
   await scenario76_applyMatchExistingAndImportSkip();
   await scenario77_scanImportScopeAndPullBulkGate();
+  await scenario78_deleteCircuitBreaker();
+  await scenario79_repairPairs();
   await optionalLiveSmoke();
 
   console.log("\nAll checklist scenarios passed.");

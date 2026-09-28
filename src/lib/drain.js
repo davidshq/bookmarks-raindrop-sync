@@ -6,11 +6,16 @@ import {
   JOB,
   SOFT_MAX_DRAIN_JOBS_PER_WAKE,
   drainJobsCap,
+  deleteBreakerLimit,
 } from "./constants.js";
 import {
   getConfig,
   getOverrides,
   getCollectionCache,
+  getPairs,
+  getDeleteBreaker,
+  tripDeleteBreaker,
+  consumeAllowedDeleteJob,
   setStatus,
   appendLog,
   ensurePairsMigrated,
@@ -29,6 +34,32 @@ import {
 import { createWakeBudget, finalizeWakeBudget } from "./wake-budget.js";
 
 let draining = false; // best-effort in-memory reentrancy guard (idempotent anyway)
+
+/** Job kinds that remove something on one side. */
+const DELETE_KINDS = new Set([JOB.DELETE_EDGE, JOB.DELETE_RAINDROP]);
+
+/**
+ * Delete circuit breaker gate. True when delete jobs must stay queued this
+ * wake. Trips (and logs once) when the rolling-window count has reached the
+ * limit; stays tripped until Options → Allow / Discard.
+ * @returns {Promise<boolean>}
+ */
+async function deletesHeld() {
+  const breaker = await getDeleteBreaker();
+  if (breaker.tripped) return true;
+  const pairs = await getPairs();
+  const limit = deleteBreakerLimit(Object.keys(pairs.byBookmark || {}).length);
+  if (breaker.count < limit) return false;
+  const newlyTripped = await tripDeleteBreaker(limit);
+  if (newlyTripped) {
+    await appendLog(
+      "error",
+      `Delete circuit breaker tripped: ${breaker.count} deletes in the last 24h ` +
+        `(limit ${limit}). Further deletes are held — review in Options → Status.`
+    );
+  }
+  return true;
+}
 /** @type {Promise<unknown>|null} */
 let rootsMigration = null;
 
@@ -111,7 +142,15 @@ async function drainLoop(budget) {
   const getIndex = async () => (index ??= await buildCollectionIndex(client));
 
   let processed = 0;
+  let heldDeletes = 0;
   for (const job of dueJobs) {
+    const isDelete = DELETE_KINDS.has(queue.jobKind(job));
+    // Jobs released by Allow run past the gate and do not count toward the window.
+    const released = isDelete && (await getDeleteBreaker()).allowedJobIds.has(String(job.id));
+    if (isDelete && !released && (await deletesHeld())) {
+      heldDeletes++;
+      continue;
+    }
     if (processed >= jobCap || !budget.canSpend(1)) {
       const reason = budget.consumeSelfCapReason();
       const why =
@@ -130,7 +169,15 @@ async function drainLoop(budget) {
       break;
     }
     try {
-      await processJob(job, { client, config, overrides, cache, getIndex });
+      await processJob(job, {
+        client,
+        config,
+        overrides,
+        cache,
+        getIndex,
+        countDelete: !released,
+      });
+      if (released) await consumeAllowedDeleteJob(job.id);
       processed++;
       budget.syncFromClient(client);
       client.throwIfShouldPause();
@@ -157,10 +204,12 @@ async function drainLoop(budget) {
     }
   }
 
+  // A tripped breaker keeps deletionsHalted / lastError until Allow or Discard.
+  const breaker = await getDeleteBreaker();
   await setStatus({
-    deletionsHalted: false,
-    lastError: null,
+    ...(breaker.tripped ? {} : { deletionsHalted: false, lastError: null }),
     lastActivityAt: Date.now(),
     pending: await queue.size(),
+    heldDeletes,
   });
 }

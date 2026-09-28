@@ -15,7 +15,7 @@ const chromeApi = {
 
 export default [
   {
-    ignores: ["node_modules/**", ".tmp/**", "openspec/**"],
+    ignores: ["node_modules/**", ".tmp/**", "openspec/**", "tools/**"],
   },
 
   js.configs.recommended,

@@ -959,14 +959,36 @@ console.log("== export URL match + Match existing planner ==");
   assert.equal(amb.matched.length, 0);
   assert.equal(amb.ambiguous, 2);
 
-  // Conflict: bookmark paired to different raindrop
+  // Conflict: bookmark paired to a different raindrop that is still alive in the export
   const conflict = planMatchFromExport(
-    "id,url\n99,https://z.example/\n",
+    "id,url\n99,https://z.example/\n1,https://z-other.example/\n",
     [{ id: "z1", url: "https://z.example/" }],
     { byBookmark: { z1: "1" }, byRaindrop: { "1": "z1" } }
   );
   assert.equal(conflict.matched.length, 0);
   assert.equal(conflict.conflicts, 1);
+
+  // Stale forward link: paired raindrop id is NOT in the export (ghost from a
+  // trashed fork) → not a conflict; rebind to the surviving raindrop by URL.
+  const staleForward = planMatchFromExport(
+    "id,url\n99,https://z.example/\n",
+    [{ id: "z1", url: "https://z.example/" }],
+    { byBookmark: { z1: "1867674133" }, byRaindrop: { "1867674133": "z1" } }
+  );
+  assert.equal(staleForward.conflicts, 0);
+  assert.equal(staleForward.matched.length, 1);
+  assert.equal(staleForward.matched[0].raindropId, "99");
+  assert.equal(staleForward.matched[0].replacesRid, "1867674133", "row records the ghost it replaces");
+  assert.ok(Array.isArray(staleForward.raindropIds) && staleForward.raindropIds.includes("99"));
+
+  // classifyPairClaim without the export set keeps the old strict behaviour.
+  const { classifyPairClaim } = await import("../src/lib/match-existing.js");
+  const ghostPairs = { byBookmark: { z1: "1867674133" }, byRaindrop: { "1867674133": "z1" } };
+  assert.equal(classifyPairClaim("z1", "99", ghostPairs, new Set(["z1"])), "conflict");
+  assert.equal(
+    classifyPairClaim("z1", "99", ghostPairs, new Set(["z1"]), new Set(["99"])),
+    "match"
+  );
 
   const pairedOk = planMatchFromExport(
     "id,url\n5,https://ok.example/\n",
@@ -1268,7 +1290,9 @@ console.log("== Options HTML bulk lane controls ==");
   assert.ok(html.includes('id="bulkQueueMatch"'), "Match from queue banner");
   assert.ok(html.includes('id="bulkQueueContinue"'), "Continue drip on Status");
   assert.ok(html.includes('id="matchExisting"'), "Manual Sync Match existing");
-  assert.ok(!/id=["'][^"']*repair[^"']*["']/i.test(html), "no repair control id");
+  // Only the pair-map repair control may exist; no Edge-tree "repair" product control.
+  const repairIds = [...html.matchAll(/id=["']([^"']*repair[^"']*)["']/gi)].map((m) => m[1]);
+  assert.deepEqual(repairIds.sort(), ["repairPairs", "repairPairsStatus"], "repair controls");
   assert.ok(
     !/Other\s+favorites\s+repair/i.test(html),
     "no Other-favorites repair product control"

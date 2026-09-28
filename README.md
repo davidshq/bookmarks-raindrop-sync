@@ -72,6 +72,16 @@ Chrome and Edge do not fork collections.
   overwritten from the browser.
 - **Import to Raindrop** — one-shot upload of existing bookmarks that are not
   synced yet.
+- **Repair pairs** (Manual Sync) — rebuilds the pair map from what exists now:
+  drops pairs whose browser id or raindrop id is gone, re-pairs by URL against
+  the Raindrop export, clears tombstones for raindrops that are alive, and drops
+  queued deletes. Use after the browser renumbered bookmark ids (never edit the
+  `Bookmarks` file on disk — see `AGENTS.md`) or after a duplicate storm. Pair
+  map only; no uploads, pulls, moves, or deletes.
+- **Delete circuit breaker** — executed deletes in either direction are counted
+  in a rolling 24h window. Past `max(50, 2% of pairs)` further delete jobs stay
+  queued, Status shows the halt, and you choose **Allow these deletes** or
+  **Discard pending deletes**. A stale pair map cannot silently empty a side.
 - **Crash-safe** — durable queue, pair map, rate-limit gates, and heartbeat drain.
   Create intents (`createAttemptedAt` / `pullCreateAttemptedAt`) reclaim orphans
   if the worker dies between the API create and the pair write.

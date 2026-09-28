@@ -26,6 +26,7 @@ import {
   POLICY,
   SYNC_MODE,
   STORAGE_QUOTA_FALLBACK_BYTES,
+  DELETE_BREAKER_WINDOW_MS,
 } from "./constants.js";
 import { withLock } from "./mutex.js";
 import { appendArchiveEntry } from "./log-archive.js";
@@ -268,6 +269,30 @@ export async function forgetSynced(bookmarkId) {
     if (rid != null) delete pairs.byRaindrop[String(rid)];
     delete pairs.byBookmark[bookmarkId];
     await write(KEY.PAIRS, pairs);
+  });
+}
+
+/**
+ * Rewrite the whole pair map atomically (Repair pairs apply). `fn` receives the
+ * current `byBookmark` read under the pair lock and returns the next one, so a
+ * pair recorded by drain between a dry-run and apply is seen, not clobbered.
+ * Both indexes are rebuilt from the returned `byBookmark` so they cannot drift.
+ * @template T
+ * @param {(current: Record<string, string>) => { byBookmark: Record<string, string>, result: T }} fn
+ * @returns {Promise<T>}
+ */
+export async function rewritePairs(fn) {
+  return withLock(async () => {
+    const current = await loadPairsUnlocked();
+    const { byBookmark, result } = fn({ ...current.byBookmark });
+    const pairs = emptyPairs();
+    for (const [bid, rid] of Object.entries(byBookmark || {})) {
+      if (rid == null || bid == null) continue;
+      pairs.byBookmark[String(bid)] = String(rid);
+      pairs.byRaindrop[String(rid)] = String(bid);
+    }
+    await write(KEY.PAIRS, pairs);
+    return result;
   });
 }
 
@@ -687,6 +712,104 @@ export async function getStatus() {
     reconcileSkipAt: null,
     /** @type {number|null} queue depth when skip was recorded */
     reconcileSkipPending: null,
+    /** Delete circuit breaker: epoch ms when the rolling window started. */
+    deleteWindowStartAt: null,
+    /** Delete circuit breaker: executed deletes in the current window. */
+    deleteWindowCount: 0,
+    /** Delete circuit breaker: true while delete jobs are held (Allow / Discard). */
+    deleteBreakerTripped: false,
+    /** Delete circuit breaker: limit in force when it tripped (Status copy). */
+    deleteBreakerLimit: null,
+    /**
+     * Delete circuit breaker: job ids the user released with Allow. They run
+     * past the gate and do not count toward the next window.
+     * @type {string[]}
+     */
+    allowedDeleteJobIds: [],
+  });
+}
+
+/* ---- delete circuit breaker ---- */
+
+/**
+ * Rolling-window view of executed deletes. Expired windows read as empty.
+ * @param {number} [now]
+ * @returns {Promise<{ count: number, startAt: number|null, tripped: boolean, limit: number|null }>}
+ */
+export async function getDeleteBreaker(now = Date.now()) {
+  const status = await getStatus();
+  const startAt = status.deleteWindowStartAt;
+  const expired = startAt == null || now - startAt >= DELETE_BREAKER_WINDOW_MS;
+  return {
+    count: expired ? 0 : Number(status.deleteWindowCount) || 0,
+    startAt: expired ? null : startAt,
+    tripped: !!status.deleteBreakerTripped,
+    limit: status.deleteBreakerLimit ?? null,
+    allowedJobIds: new Set((status.allowedDeleteJobIds || []).map(String)),
+  };
+}
+
+/** Drop one released job id once it has run (or left the queue). */
+export async function consumeAllowedDeleteJob(jobId) {
+  return withLock(async () => {
+    const status = await getStatus();
+    const ids = (status.allowedDeleteJobIds || []).map(String);
+    const next = ids.filter((id) => id !== String(jobId));
+    if (next.length !== ids.length) await setStatusUnlocked({ allowedDeleteJobIds: next });
+  });
+}
+
+/** Count one executed delete (Edge or Raindrop side) in the rolling window. */
+export async function noteDeleteExecuted(now = Date.now()) {
+  return withLock(async () => {
+    const status = await getStatus();
+    const startAt = status.deleteWindowStartAt;
+    const expired = startAt == null || now - startAt >= DELETE_BREAKER_WINDOW_MS;
+    await setStatusUnlocked({
+      deleteWindowStartAt: expired ? now : startAt,
+      deleteWindowCount: expired ? 1 : (Number(status.deleteWindowCount) || 0) + 1,
+    });
+  });
+}
+
+/**
+ * Trip the breaker (idempotent). Returns true when this call newly tripped it
+ * so the caller can log once.
+ * @param {number} limit
+ */
+export async function tripDeleteBreaker(limit) {
+  return withLock(async () => {
+    const status = await getStatus();
+    if (status.deleteBreakerTripped) return false;
+    await setStatusUnlocked({
+      deleteBreakerTripped: true,
+      deleteBreakerLimit: limit,
+      deletionsHalted: true,
+      lastError: `Delete circuit breaker: ${limit} deletes reached in 24h. Queued deletes are held until you Allow or Discard them in Options → Status.`,
+    });
+    return true;
+  });
+}
+
+/**
+ * Clear the trip and start a fresh window.
+ * Allow passes the currently queued delete job ids in `allowJobIds`: those jobs
+ * all run on the next drain without counting toward the new window, so one
+ * click releases every held delete. Discard / Repair pass nothing.
+ * @param {{ allowJobIds?: Iterable<string> }} [opts]
+ */
+export async function resetDeleteBreaker({ allowJobIds } = {}) {
+  return withLock(async () => {
+    const status = await getStatus();
+    const wasBreaker = !!status.deleteBreakerTripped;
+    await setStatusUnlocked({
+      deleteWindowStartAt: null,
+      deleteWindowCount: 0,
+      deleteBreakerTripped: false,
+      deleteBreakerLimit: null,
+      allowedDeleteJobIds: allowJobIds ? [...allowJobIds].map(String) : [],
+      ...(wasBreaker ? { deletionsHalted: false, lastError: null } : {}),
+    });
   });
 }
 

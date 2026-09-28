@@ -19,12 +19,14 @@ import {
  * @typedef {{
  *   bookmarkId: string,
  *   raindropId: string,
+ *   replacesRid?: string|null,
  * }} MatchPair
  */
 
 /**
  * @typedef {{
  *   ok: boolean,
+ *   raindropIds?: string[],
  *   matched: MatchPair[],
  *   alreadyPaired: number,
  *   ambiguous: number,
@@ -40,14 +42,21 @@ import {
 
 /**
  * Shared plan/apply rule for claiming a (bookmarkId, raindropId) pair.
- * Stale reverse-map ids (bookmark gone after Edge Sync) are not conflicts.
+ * Stale ids on either side are not conflicts:
+ *  - reverse link to a bookmark id missing from `liveIds` (bookmark gone /
+ *    Edge renumbered ids) → the raindrop is claimable;
+ *  - forward link to a raindrop id missing from `liveRaindropIds` (ghost
+ *    from a trashed fork, when the export set is supplied) → the bookmark is
+ *    claimable. Without `liveRaindropIds` a differing forward link still
+ *    counts as a conflict (older callers).
  * @param {string} bid
  * @param {string} rid
  * @param {{ byBookmark?: Record<string, string>, byRaindrop?: Record<string, string> }} pairs
- * @param {Set<string>} liveIds
+ * @param {Set<string>} liveIds live Edge bookmark ids
+ * @param {Set<string>} [liveRaindropIds] live raindrop ids (export)
  * @returns {'already' | 'conflict' | 'match'}
  */
-export function classifyPairClaim(bid, rid, pairs, liveIds) {
+export function classifyPairClaim(bid, rid, pairs, liveIds, liveRaindropIds) {
   const byBookmark = pairs.byBookmark || {};
   const byRaindrop = pairs.byRaindrop || {};
   const bidS = String(bid);
@@ -59,7 +68,8 @@ export function classifyPairClaim(bid, rid, pairs, liveIds) {
     return "already";
   }
   if (existingRid != null && String(existingRid) !== ridS) {
-    return "conflict";
+    const forwardIsStale = liveRaindropIds != null && !liveRaindropIds.has(String(existingRid));
+    if (!forwardIsStale) return "conflict";
   }
   if (
     existingBid != null &&
@@ -83,6 +93,8 @@ export function planMatchFromExport(csvText, edgeBookmarks, pairs) {
   const { byKey, raindropIds, raindropCount } = indexExportByUrl(csvText);
   /** Live Edge ids — stale pair map entries (Edge Sync rewrite) are not conflicts. */
   const liveIds = new Set(edgeBookmarks.map((b) => String(b.id)));
+  /** Live raindrop ids — a forward link to an id outside the export is a ghost, not a conflict. */
+  const liveRaindropIds = new Set([...raindropIds].map(String));
 
   /** @type {Map<string, Set<string>>} bid → candidate rids */
   const candidates = new Map();
@@ -131,7 +143,7 @@ export function planMatchFromExport(csvText, edgeBookmarks, pairs) {
       continue;
     }
     const bid = bids[0];
-    const verdict = classifyPairClaim(bid, rid, pairs, liveIds);
+    const verdict = classifyPairClaim(bid, rid, pairs, liveIds, liveRaindropIds);
     if (verdict === "already") {
       alreadyPaired++;
       claimedRids.add(rid);
@@ -141,7 +153,14 @@ export function planMatchFromExport(csvText, edgeBookmarks, pairs) {
       conflicts++;
       continue;
     }
-    matched.push({ bookmarkId: bid, raindropId: rid });
+    // Record the forward link this row replaces (a stale ghost id, or none) so
+    // Apply can refuse if drain re-paired the bookmark after the export.
+    const prior = pairs.byBookmark?.[bid];
+    matched.push({
+      bookmarkId: bid,
+      raindropId: rid,
+      replacesRid: prior != null ? String(prior) : null,
+    });
     claimedRids.add(rid);
   }
 
@@ -161,6 +180,8 @@ export function planMatchFromExport(csvText, edgeBookmarks, pairs) {
     raindropOnly,
     edgeScanned: edgeBookmarks.length,
     raindropCount,
+    /** Export ids, so Apply can honour the same stale-forward-link rule. */
+    raindropIds: [...liveRaindropIds],
   };
 }
 
@@ -207,11 +228,13 @@ export async function planMatchExisting() {
 }
 
 /**
- * Apply a previously computed plan (or re-plan then apply when matched omitted).
+ * Apply a previously computed plan.
  * @param {MatchPair[]} matched
+ * @param {{ liveRaindropIds?: Iterable<string> }} [opts] export ids from the plan;
+ *   when given, a forward link to an id outside the export is stale (rebind).
  * @returns {Promise<{ ok: boolean, paired: number, error?: string, reason?: string }>}
  */
-export async function applyMatchExisting(matched) {
+export async function applyMatchExisting(matched, { liveRaindropIds } = {}) {
   await ensurePairsMigrated();
 
   if (!Array.isArray(matched)) {
@@ -221,6 +244,7 @@ export async function applyMatchExisting(matched) {
   const liveIds = new Set(
     (await collectAllBookmarks()).map(({ node }) => String(node.id))
   );
+  const liveRids = liveRaindropIds ? new Set([...liveRaindropIds].map(String)) : undefined;
 
   let paired = 0;
   for (const row of matched) {
@@ -229,7 +253,14 @@ export async function applyMatchExisting(matched) {
     const rid = String(row.raindropId);
     if (!liveIds.has(bid)) continue;
     const pairs = await getPairs();
-    if (classifyPairClaim(bid, rid, pairs, liveIds) !== "match") continue;
+    // Changed since the plan (e.g. an upload paired it to a new raindrop that
+    // is not in the export snapshot) → skip; the new pair wins.
+    const now = pairs.byBookmark?.[bid];
+    const planned = row.replacesRid ?? null;
+    if ((now != null ? String(now) : null) !== (planned != null ? String(planned) : null)) {
+      continue;
+    }
+    if (classifyPairClaim(bid, rid, pairs, liveIds, liveRids) !== "match") continue;
     await recordSynced(bid, rid);
     paired++;
   }

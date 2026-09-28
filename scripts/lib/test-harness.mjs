@@ -176,7 +176,11 @@ export async function importEngine() {
   const bulkCandidate = await import(`${base}/bulk-candidate.js`);
   const wakeBudget = await import(`${base}/wake-budget.js`);
   const reconcileFinish = await import(`${base}/reconcile-finish.js`);
+  const repairPairs = await import(`${base}/repair-pairs.js`);
+  const drainMod = await import(`${base}/drain.js`);
   return {
+    repairPairs,
+    drainMod,
     constants,
     store,
     queue,

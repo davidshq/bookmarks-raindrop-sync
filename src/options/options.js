@@ -378,6 +378,7 @@ async function refreshStatus() {
   }
 
   renderBulkQueueBanner(resp);
+  renderDeleteBreaker(resp);
 
   const log = $("log");
   log.innerHTML = "";
@@ -592,6 +593,7 @@ async function runMatchExistingFlow({ statusEl, offerDryRun }) {
     const resp = await chrome.runtime.sendMessage({
       type: MSG.MATCH_EXISTING_APPLY,
       matched: plan.matched,
+      raindropIds: plan.raindropIds,
     });
     if (!resp?.ok) {
       statusEl.textContent = `Apply failed: ${resp?.error ?? "unknown error"}`;
@@ -699,6 +701,73 @@ async function runReconcile(pendingMsg) {
 async function runMatchExistingUi() {
   await runMatchExistingFlow({ statusEl: $("matchExistingStatus"), offerDryRun: false });
   refreshStatus();
+}
+
+/**
+ * Repair pairs: dry-run summary, confirm, apply. Pair map only — no Edge or
+ * Raindrop writes. Drops queued delete jobs and resets presence state.
+ */
+async function runRepairPairsUi() {
+  const out = $("repairPairsStatus");
+  out.textContent = "Downloading Raindrop export + checking pairs…";
+  try {
+    const plan = await chrome.runtime.sendMessage({ type: MSG.REPAIR_PAIRS_PLAN });
+    if (plan?.reason === "rate_limited") {
+      out.textContent = "Paused for Raindrop rate limits — wait a minute, then try again.";
+      return;
+    }
+    if (!plan?.ok) {
+      out.textContent = `Repair failed: ${plan?.error ?? "unknown error"}`;
+      return;
+    }
+    const pruned = plan.pruneBothDead + plan.pruneEdgeDead + plan.pruneRaindropDead;
+    const summary =
+      `Pairs now ${plan.pairsBefore}: keep ${plan.keptLive} live, rebind ${plan.matched.length} by URL, ` +
+      `prune ${pruned} dead (${plan.pruneEdgeDead} Edge id gone, ${plan.pruneRaindropDead} raindrop gone, ` +
+      `${plan.pruneBothDead} both). Ambiguous ${plan.ambiguous}, conflicts ${plan.conflicts}, ` +
+      `Edge-only ${plan.edgeOnly}, Raindrop-only ${plan.raindropOnly}. ` +
+      `Clear ${plan.tombstonesAlive.length} of ${plan.tombstonesTotal} tombstone(s) (raindrop alive), ` +
+      `drop ${plan.queuedDeletes} queued delete(s).`;
+    out.textContent = summary;
+    const nothing = plan.matched.length === 0 && pruned === 0 && plan.tombstonesAlive.length === 0;
+    if (nothing) {
+      out.textContent = `${summary} Nothing to repair.`;
+      return;
+    }
+    const go = window.confirm(
+      `Repair pairs?\n\n${summary}\n\n` +
+        "Rewrites the pair map only. Does not upload, pull, move, or delete bookmarks. " +
+        "Anything present on one side only will be treated as new by the next sync."
+    );
+    if (!go) {
+      out.textContent = `${summary} (cancelled)`;
+      return;
+    }
+    out.textContent = "Applying…";
+    const resp = await chrome.runtime.sendMessage({ type: MSG.REPAIR_PAIRS_APPLY, plan });
+    out.textContent = resp?.ok
+      ? `Repaired: ${resp.pairs} pair(s), ${resp.rebound} rebound, ${resp.tombstonesCleared} tombstone(s) cleared, ${resp.deletesDropped} delete(s) dropped.`
+      : `Apply failed: ${resp?.error ?? "unknown error"}`;
+  } catch (err) {
+    out.textContent = `Repair failed: ${err.message}`;
+  }
+  refreshStatus();
+}
+
+function renderDeleteBreaker(resp) {
+  const row = $("deleteBreakerRow");
+  const text = $("deleteBreakerText");
+  const b = resp.deleteBreaker;
+  if (!row || !b) return;
+  if (!b.tripped) {
+    row.classList.add("hidden");
+    text.textContent = "";
+    return;
+  }
+  row.classList.remove("hidden");
+  text.textContent =
+    `Delete circuit breaker: ${b.count} delete(s) ran in the last 24h (limit ${b.limit ?? "?"}). ` +
+    `${b.queuedDeletes} delete job(s) are held. Allow runs them; Discard drops them and keeps the pairs.`;
 }
 
 /* ---- folder policy editor (draft until Apply) ---- */
@@ -1322,6 +1391,30 @@ $("testToken").addEventListener("click", testToken);
 $("backfill").addEventListener("click", runBackfill);
 $("reconcile").addEventListener("click", () => runReconcile());
 $("matchExisting").addEventListener("click", () => void runMatchExistingUi());
+$("repairPairs").addEventListener("click", () => void runRepairPairsUi());
+$("allowDeletes").addEventListener("click", async () => {
+  const out = $("deleteBreakerStatus");
+  out.textContent = "Allowing…";
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: MSG.ALLOW_DELETES });
+    out.textContent = resp?.ok ? "Deletes allowed; draining." : `Failed: ${resp?.error}`;
+  } catch (err) {
+    out.textContent = `Failed: ${err.message}`;
+  }
+  refreshStatus();
+});
+$("discardDeletes").addEventListener("click", async () => {
+  if (!window.confirm("Drop every queued delete job? Pairs are kept; nothing is deleted.")) return;
+  const out = $("deleteBreakerStatus");
+  out.textContent = "Discarding…";
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: MSG.DISCARD_DELETES });
+    out.textContent = resp?.ok ? `Dropped ${resp.dropped} delete job(s).` : `Failed: ${resp?.error}`;
+  } catch (err) {
+    out.textContent = `Failed: ${err.message}`;
+  }
+  refreshStatus();
+});
 $("bulkQueueMatch").addEventListener("click", () => void matchFromBulkQueueBanner());
 $("bulkQueueContinue").addEventListener("click", () => void continueBulkDripFromStatus());
 $("checkTrash").addEventListener("click", async () => {

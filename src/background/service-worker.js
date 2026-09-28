@@ -8,7 +8,7 @@
 // alive through fetch/storage. The heartbeat is (re)created on every SW
 // evaluation, not only onInstalled/onStartup.
 
-import { ALARM_NAME, HEARTBEAT_MINUTES, MSG, SYNC_MODE } from "../lib/constants.js";
+import { ALARM_NAME, HEARTBEAT_MINUTES, JOB, MSG, SYNC_MODE } from "../lib/constants.js";
 import {
   tick,
   drain,
@@ -28,6 +28,7 @@ import {
   emptyPlan,
   RateLimitError,
 } from "../lib/match-existing.js";
+import { planRepairPairs, applyRepairPairs, emptyRepairPlan } from "../lib/repair-pairs.js";
 import { handleClientError } from "../lib/client-errors.js";
 import * as queue from "../lib/queue.js";
 import {
@@ -39,6 +40,8 @@ import {
   ensurePairsMigrated,
   healStoredConfig,
   getStorageUsage,
+  getDeleteBreaker,
+  resetDeleteBreaker,
 } from "../lib/store.js";
 import {
   noteQueueDepthForBulkPrompt,
@@ -154,7 +157,59 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             bulkEtaMinutes: estimateDrainEtaMinutes(pending),
             bulkNotice: formatBulkQueueNotice(pending),
             trashSafe,
+            deleteBreaker: {
+              ...(await getDeleteBreaker()),
+              queuedDeletes: (await queue.list()).filter((j) => {
+                const k = queue.jobKind(j);
+                return k === JOB.DELETE_EDGE || k === JOB.DELETE_RAINDROP;
+              }).length,
+            },
           });
+          break;
+        }
+        case MSG.ALLOW_DELETES: {
+          const held = (await queue.list())
+            .filter((j) => {
+              const k = queue.jobKind(j);
+              return k === JOB.DELETE_EDGE || k === JOB.DELETE_RAINDROP;
+            })
+            .map((j) => String(j.id));
+          await resetDeleteBreaker({ allowJobIds: held });
+          await appendLog(
+            "info",
+            `Delete circuit breaker: user allowed ${held.length} held delete(s); they run without counting toward the next window.`
+          );
+          await drain();
+          sendResponse({ ok: true });
+          break;
+        }
+        case MSG.DISCARD_DELETES: {
+          const dropped = await queue.removeWhere((j) => {
+            const k = queue.jobKind(j);
+            return k === JOB.DELETE_EDGE || k === JOB.DELETE_RAINDROP;
+          });
+          await resetDeleteBreaker();
+          await appendLog("info", `Discarded ${dropped} queued delete job(s); pairs kept.`);
+          sendResponse({ ok: true, dropped });
+          break;
+        }
+        case MSG.REPAIR_PAIRS_PLAN: {
+          try {
+            sendResponse(await planRepairPairs());
+          } catch (err) {
+            if (await handleClientError(err)) {
+              if (err instanceof RateLimitError) {
+                sendResponse(emptyRepairPlan({ reason: "rate_limited" }));
+                break;
+              }
+            }
+            throw err;
+          }
+          break;
+        }
+        case MSG.REPAIR_PAIRS_APPLY: {
+          const result = await applyRepairPairs(msg?.plan);
+          sendResponse(result);
           break;
         }
         case MSG.GET_BULK_PROMPT: {
@@ -215,7 +270,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             sendResponse({ ok: false, paired: 0, error: "Missing matched list from dry-run" });
             break;
           }
-          const result = await applyMatchExisting(matched);
+          const result = await applyMatchExisting(matched, {
+            liveRaindropIds: Array.isArray(msg?.raindropIds) ? msg.raindropIds : undefined,
+          });
           if (result?.ok) {
             // Resume drip after pairing; snooze so a still-large queue does not re-arm immediately.
             await resolveBulkPromptAfterMatch();

@@ -40,6 +40,7 @@ import {
   releaseExtensionCreate,
   suppressChange,
   appendLog,
+  noteDeleteExecuted,
 } from "./store.js";
 import * as queue from "./queue.js";
 import {
@@ -787,6 +788,7 @@ async function processDeleteRaindrop(job, ctx) {
 
   try {
     await client.deleteRaindrop(rid);
+    if (ctx.countDelete !== false) await noteDeleteExecuted();
   } catch (err) {
     // Already gone is fine.
     if (!isNotFoundError(err)) throw err;
@@ -825,6 +827,7 @@ async function processDeleteEdge(job, ctx) {
         } else {
           await suppressRemove(bookmarkId);
           await removeNode(bookmarkId);
+          if (ctx.countDelete !== false) await noteDeleteExecuted();
           if (config.pruneEmpty) await pruneIfEmpty(parentId, config, overrides);
           await appendLog(
             "info",

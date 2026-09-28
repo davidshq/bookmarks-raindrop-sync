@@ -96,6 +96,14 @@
             <span id="checkTrashStatus" class="hint" role="status"></span>
           </div>
         </div>
+        <div id="deleteBreakerRow" class="banner warn hidden" role="alert">
+          <p id="deleteBreakerText"></p>
+          <div class="row">
+            <button id="allowDeletes" type="button">Allow these deletes</button>
+            <button id="discardDeletes" type="button" class="secondary">Discard pending deletes</button>
+            <span id="deleteBreakerStatus" class="hint" role="status"></span>
+          </div>
+        </div>
         <p class="status-line muted">Local storage: <span id="storageUsage">—</span></p>
         <div id="deadLetterRow" class="row hidden">
           <button id="retryDeadLetter" type="button" class="secondary">Retry dead-lettered</button>
@@ -311,6 +319,19 @@
                 Match existing
               </button>
               <span id="matchExistingStatus" class="hint" role="status"></span>
+            </div>
+          </div>
+          <div class="manual-action">
+            <p class="action-title">Repair pairs</p>
+            <p class="hint action-help">
+              Rebuild the pair map from what exists now: drop pairs whose browser id or raindrop id
+              is gone, re-pair by URL, clear tombstones for raindrops that are alive, and drop queued
+              deletes. Use after the browser renumbered bookmark ids or after a duplicate storm.
+              Pair map only — does not upload, pull, move, or delete bookmarks.
+            </p>
+            <div class="row">
+              <button id="repairPairs" type="button" class="secondary">Repair pairs</button>
+              <span id="repairPairsStatus" class="hint" role="status"></span>
             </div>
           </div>
         </div>

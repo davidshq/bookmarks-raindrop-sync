@@ -67,7 +67,33 @@ export const MSG = {
   CONTINUE_BULK_DRIP: "continueBulkDrip",
   /** Bidirectional: Trash-only hygiene peek (safe-to-empty Status). */
   CHECK_TRASH: "checkTrash",
+  /** Repair pairs: dry-run plan (prune dead pairs, rebind by URL, clear alive tombstones). */
+  REPAIR_PAIRS_PLAN: "repairPairsPlan",
+  /** Repair pairs: apply a dry-run plan. */
+  REPAIR_PAIRS_APPLY: "repairPairsApply",
+  /** Delete circuit breaker: allow the halted deletes (reset the rolling window). */
+  ALLOW_DELETES: "allowDeletes",
+  /** Delete circuit breaker: drop queued delete jobs, keep pairs. */
+  DISCARD_DELETES: "discardDeletes",
 };
+
+/**
+ * Delete circuit breaker. Executed deletes (either direction) are counted in a
+ * rolling window; once the count reaches max(DELETE_BREAKER_MIN, fraction of
+ * live pairs) further delete jobs stay queued and Status shows a halt with
+ * Allow / Discard. A slow bleed of a few deletes per cycle (the Sep 2026
+ * ghost-pair incident) trips this within the first hour; a per-wake cap never
+ * would have.
+ */
+export const DELETE_BREAKER_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const DELETE_BREAKER_MIN = 50;
+export const DELETE_BREAKER_PAIR_FRACTION = 0.02;
+
+/** @param {number} livePairs */
+export function deleteBreakerLimit(livePairs) {
+  const n = Number(livePairs) || 0;
+  return Math.max(DELETE_BREAKER_MIN, Math.ceil(n * DELETE_BREAKER_PAIR_FRACTION));
+}
 
 // chrome.storage.local keys. Everything durable lives under these — the MV3
 // service worker holds no state across events.
