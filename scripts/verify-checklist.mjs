@@ -4,6 +4,7 @@
  * rate-limit / shared wake spendable / dead-letter paths, and export/queue
  * bulk-lane engine wiring (scenarios 6.2–7.7). Scenario 6.8 covers ordered
  * prefer-drain + leftover listing (including tick) and reentrancy `busy`.
+ * Scenario 6.8d covers Pull now wait-and-resume through real reconcileNow.
  * Pure bulk heuristics / Match planner live in verify-bidirectional-logic.mjs.
  *
  * SAFETY:
@@ -11,6 +12,7 @@
  * - Raindrop calls (if RAINDROP_TOKEN / .tmp/raindrop_token is set) only create and
  *   delete items under a disposable root collection named ERS-Verify-<timestamp>.
  * - Without a token, Raindrop is also mocked in-memory (still validates engine logic).
+ * - Scenarios only create/assert ERS-Verify-* collections and example.com/ers-* URLs.
  *
  * Usage:
  *   node scripts/verify-checklist.mjs
@@ -19,6 +21,7 @@
 
 import assert from "node:assert/strict";
 import { RAINDROP_API } from "../src/lib/constants.js";
+import { runPullNow } from "../src/lib/pull-now.js";
 import {
   loadToken,
   importEngine,
@@ -1461,7 +1464,88 @@ async function scenario68b_trashFastPath() {
     "confirm-GET fallback enqueues delete-edge for permanent delete"
   );
 
+  const hygiene = await eng.store.getReconcileState();
+  assert.ok(hygiene.trashHygieneAt != null, "trash hygiene snapshot stamped");
+  assert.equal(hygiene.trashScanComplete, true, "small Trash scan completes");
+  assert.equal(hygiene.trashPairedPending, 0, "enrolled paired trash clears discovery debt");
+  const { deriveTrashSafeState } = await import("../src/lib/trash-hygiene.js");
+  assert.equal(deriveTrashSafeState(hygiene), "safe", "complete clear ⇒ safe to empty");
+
   console.log("  ✔ paired trash → delete-edge; unpaired ignored; confirm fallback for hard delete");
+}
+
+async function scenario68e_trashSafeStatus() {
+  console.log("\n== 6.8e Trash-safe Status snapshot + Check Trash ==");
+  const eng = await importEngine();
+  const { POLICY, SYNC_MODE, JOB } = eng.constants;
+  const { deriveTrashSafeState } = await import("../src/lib/trash-hygiene.js");
+  await resetAll(eng.store);
+
+  const mock = makeMockRaindrop();
+  patchClient(eng.raindropMod, mock);
+
+  await eng.store.setConfig({
+    token: "mock",
+    rootName: "ERS-Verify-TrashSafe",
+    syncMode: SYNC_MODE.ONE_WAY,
+    defaultPolicy: POLICY.SYNC_KEEP,
+  });
+  const oneWay = await eng.sync.checkTrashNow();
+  assert.equal(oneWay.ok, false, "Check Trash blocked in one-way");
+  assert.equal(oneWay.reason, "one_way");
+
+  await eng.store.setConfig({
+    token: "mock",
+    rootName: "ERS-Verify-TrashSafe",
+    syncMode: SYNC_MODE.BIDIRECTIONAL,
+    defaultPolicy: POLICY.SYNC_KEEP,
+  });
+  const root = await mock.createCollection("ERS-Verify-TrashSafe", null);
+  const live = mock._seedRich(root._id, {
+    link: "https://example.com/ers-trash-safe",
+    title: "trash-safe",
+  });
+  await eng.store.recordSynced("bm-trash-safe", String(live._id));
+  await mock.deleteRaindrop(live._id);
+
+  const before = await eng.store.getReconcileState();
+  assert.equal(before.trashHygieneAt, null, "no peek yet");
+  assert.equal(deriveTrashSafeState(before), "unknown");
+
+  const peek = await eng.sync.checkTrashNow();
+  assert.equal(peek.ok, true, "Check Trash ok");
+  assert.equal(peek.trashSafe?.state, "safe", "Check Trash enrolls and reports safe");
+  const stillPaired = (await eng.store.getPairs()).byRaindrop[String(live._id)];
+  const queued = (await eng.queue.list()).some(
+    (j) => j.kind === JOB.DELETE_EDGE && String(j.raindropId) === String(live._id)
+  );
+  assert.ok(queued || !stillPaired, "Check Trash enrolled or applied delete-edge");
+
+  await eng.store.setReconcileState({
+    trashHygieneAt: Date.now(),
+    trashScanComplete: false,
+    trashPairedPending: 0,
+    trashHygieneSource: "check-trash",
+  });
+  assert.equal(
+    deriveTrashSafeState(await eng.store.getReconcileState()),
+    "partial",
+    "incomplete peek is not safe"
+  );
+
+  await eng.store.setReconcileState({
+    trashHygieneAt: Date.now(),
+    trashScanComplete: true,
+    trashPairedPending: 3,
+    trashHygieneSource: "reconcile",
+  });
+  assert.equal(
+    deriveTrashSafeState(await eng.store.getReconcileState()),
+    "waiting",
+    "paired pending ⇒ waiting"
+  );
+
+  console.log("  ✔ unknown → Check Trash safe; partial/waiting; one-way blocked");
 }
 
 async function scenario68c_parkOutOfScopeAlives() {
@@ -1552,6 +1636,138 @@ async function scenario68c_parkOutOfScopeAlives() {
   );
 
   console.log("  ✔ park out-of-scope; skip re-confirm; Trash still deletes; in-scope not parked");
+}
+
+/**
+ * Engine integration for Pull now wait-and-resume.
+ * Only touches disposable ERS-Verify-PullWait* Raindrop fixtures and
+ * example.com/ers-pull-wait-* Edge URLs on the in-memory tree.
+ */
+async function scenario68d_pullNowWaitAndResume() {
+  console.log("\n== 6.8d Pull now waits out rate limit and resumes ==");
+  const eng = await importEngine();
+  const { POLICY, SYNC_MODE, JOB, MSG } = eng.constants;
+  await resetAll(eng.store);
+
+  const mock = makeMockRaindrop();
+  patchClient(eng.raindropMod, mock);
+
+  const rootName = "ERS-Verify-PullWait";
+  const resumeUrl = "https://example.com/ers-pull-wait-resume";
+  const doneUrl = "https://example.com/ers-pull-wait-done";
+
+  await eng.store.setConfig({
+    token: "mock",
+    rootName,
+    syncMode: SYNC_MODE.BIDIRECTIONAL,
+    defaultPolicy: POLICY.SYNC_KEEP,
+  });
+
+  const root = await mock.createCollection(rootName, null);
+  const bar = await mock.createCollection("Bookmarks bar", root._id);
+  const folder = await mock.createCollection("ERS-Verify-PullWait-Folder", bar._id);
+  const remote = mock._seedRich(folder._id, {
+    link: resumeUrl,
+    title: "ERS pull wait resume",
+  });
+
+  // First Pull now pass hits the global pause; sleepFn clears only our pause.
+  await eng.store.noteRateLimitedUntil(Date.now() + 5_000);
+  let slept = 0;
+  const pulled = await runPullNow(
+    async (msg) => {
+      if (msg.type === MSG.GET_STATUS) {
+        return { ok: true, status: await eng.store.getStatus() };
+      }
+      if (msg.type === MSG.RECONCILE_NOW) {
+        try {
+          const result = await eng.sync.reconcileNow();
+          return { ok: true, ...result };
+        } catch (err) {
+          return { ok: false, error: err.message };
+        }
+      }
+      return { ok: false, error: `unexpected message ${msg.type}` };
+    },
+    {
+      sleepFn: async () => {
+        slept++;
+        await eng.store.clearRateLimit();
+      },
+    }
+  );
+
+  assert.equal(slept, 1, "Pull now waited out the rate-limit pause once");
+  assert.match(pulled.text, /Pull finished/);
+  assert.ok(pulled.totalQueued >= 1, "resumed pull enqueued at least the seeded raindrop");
+
+  const edge = findEdgeByUrl(resumeUrl);
+  assert.ok(edge, "resumed pull created Edge bookmark for the test raindrop");
+  assert.equal(
+    await eng.store.getBookmarkIdForRaindrop(String(remote._id)),
+    edge.id,
+    "pair maps only our seeded raindrop"
+  );
+  assert.deepEqual(
+    edgeUrls().filter((u) => u.includes("ers-pull-wait")),
+    [resumeUrl],
+    "only the test pull-wait URL was created on Edge"
+  );
+  assert.equal(
+    [...mock._raindrops.values()].every((r) => String(r.link).includes("ers-pull-wait")),
+    true,
+    "mock Raindrop library only holds this scenario's fixtures"
+  );
+
+  // Done under pause: listing finishes while rateLimitedUntil is armed — must
+  // keep done (not rewrite as skipped rate_limited) and skip drain.
+  await resetAll(eng.store);
+  const mockDone = makeMockRaindrop();
+  patchClient(eng.raindropMod, mockDone);
+  await eng.store.setConfig({
+    token: "mock",
+    rootName,
+    syncMode: SYNC_MODE.BIDIRECTIONAL,
+    defaultPolicy: POLICY.SYNC_KEEP,
+  });
+  const rootDone = await mockDone.createCollection(rootName, null);
+  const barDone = await mockDone.createCollection("Bookmarks bar", rootDone._id);
+  const folderDone = await mockDone.createCollection("ERS-Verify-PullWait-Done", barDone._id);
+  mockDone._seedRich(folderDone._id, {
+    link: doneUrl,
+    title: "ERS pull wait done",
+  });
+
+  const origList = mockDone.listRaindrops.bind(mockDone);
+  mockDone.listRaindrops = async (...args) => {
+    const page = await origList(...args);
+    // Arm pause after API work so post-reconcile gate trips before drain.
+    await eng.store.noteRateLimitedUntil(Date.now() + 60_000);
+    return page;
+  };
+  const doneResult = await eng.sync.reconcileNow();
+  mockDone.listRaindrops = origList;
+
+  assert.equal(doneResult.done, true, "listing finished under pause");
+  assert.notEqual(
+    doneResult.skipped,
+    true,
+    "done under pause is not rewritten as rate_limited skip"
+  );
+  assert.equal(await eng.store.isRateLimited(), true, "pause remains for drain skip");
+  assert.equal(
+    !!findEdgeByUrl(doneUrl),
+    false,
+    "drain skipped — Edge bookmark not created yet"
+  );
+  assert.ok(
+    (await eng.queue.list()).some(
+      (j) => eng.queue.jobKind(j) === JOB.PULL_CREATE && j.link === doneUrl
+    ),
+    "pull-create for the test URL stayed queued when drain was skipped"
+  );
+
+  console.log("  ✔ Pull now wait-and-resume + done-under-pause preserves finish");
 }
 
 async function scenario69_bookmarkMoves() {
@@ -3030,7 +3246,9 @@ async function main() {
   await scenario67_raindropFolderAllowlist();
   await scenario68_rateLimitBudget();
   await scenario68b_trashFastPath();
+  await scenario68e_trashSafeStatus();
   await scenario68c_parkOutOfScopeAlives();
+  await scenario68d_pullNowWaitAndResume();
   await scenario69_bookmarkMoves();
   await scenario70_onChangedAndFolderRename();
   await scenario71_tombstonePruneAndPullUpdate();

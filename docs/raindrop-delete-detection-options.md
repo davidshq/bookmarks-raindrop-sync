@@ -69,7 +69,23 @@ Raindrop moved out of sync tree
 
 Trash listing should capture the vast majority of real “user deleted in Raindrop” cases. The leftover confirm backlog is a different problem (scope mismatch), addressed by parking (C).
 
+## Safe to empty Raindrop Trash (Status)
+
+Emptying Trash removes the soft-delete signal. Options → Status (bidirectional only) shows a **trash hygiene** snapshot:
+
+| Status | Meaning |
+|--------|---------|
+| **Safe to empty** | Last Trash peek **completed** and found **zero** paired ids still needing enroll |
+| **Waiting** | Paired items in Trash still need enroll |
+| **Partial** | Peek stopped early (page/budget cap) — not safe |
+| **Unknown** | No peek yet |
+
+**Discovery debt vs apply debt:** Safe-to-empty means soft-deletes have been *enrolled* (`delete-edge` queued or already tombstoned). Queued Edge deletes may still drain afterward — that is normal apply debt (Raindrop→Edge pending). **Check Trash** runs a Trash-only peek without a full Pull now.
+
+Do **not** empty Trash while Status says waiting, partial, or unknown.
+
 ## Related implementation changes
 
 - OpenSpec `trash-fast-path-delete-detection` — option A.
 - OpenSpec `park-out-of-scope-alives` — option C (keep Edge + pair; durable `parkedAliveIds`).
+- OpenSpec `trash-safe-status` — Status safe-to-empty + Check Trash.

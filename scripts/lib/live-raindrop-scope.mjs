@@ -42,6 +42,33 @@ export async function waitUntilRaindropListed(client, collectionId, raindropId, 
   );
 }
 
+/**
+ * Poll nested listing under the sync root (what heartbeat / Pull now reconcile uses).
+ * Prefer {@link waitUntilRaindropListed} on the leaf when you only need create visibility;
+ * use this before exercising live reconcileNow against a freshly created item.
+ *
+ * @param {import("../../src/lib/raindrop.js").RaindropClient} client
+ * @param {number|string} rootId
+ * @param {number|string} raindropId
+ * @param {number} [maxWaitMs]
+ */
+export async function waitUntilNestedUnderRoot(client, rootId, raindropId, maxWaitMs = 20000) {
+  const want = String(raindropId);
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    const { items } = await gateClient(
+      client,
+      () => client.listRaindrops(rootId, { nested: true, page: 0, perPage: 50 }),
+      { label: "waitUntilNestedUnderRoot" }
+    );
+    if (items.some((i) => String(i._id) === want)) return;
+    await sleep(LIST_SETTLE_MS);
+  }
+  throw new Error(
+    `raindrop ${raindropId} not visible in nested list under root ${rootId} within ${maxWaitMs}ms`
+  );
+}
+
 /** @type {{ all: object[], byId: Map<number|string, object> } | null} */
 let collectionIndexCache = null;
 

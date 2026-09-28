@@ -16,13 +16,16 @@ import {
   clearRateLimit,
   noteReconcileSkip,
   clearReconcileSkip,
+  getReconcileState,
 } from "./store.js";
-import { RateLimitError } from "./raindrop.js";
+import { RaindropClient, RateLimitError } from "./raindrop.js";
 import { reconcile } from "./reconcile.js";
+import { runTrashHygienePeek } from "./reconcile-finish.js";
 import { handleClientError } from "./client-errors.js";
 import { drain } from "./drain.js";
 import { isBulkDrainPausedNow } from "./queue-bulk-prompt.js";
 import { createWakeBudget, finalizeWakeBudget } from "./wake-budget.js";
+import { buildTrashSafePayload } from "./trash-hygiene.js";
 import * as queue from "./queue.js";
 
 export { drain } from "./drain.js";
@@ -113,6 +116,71 @@ export async function drainNow() {
   try {
     if (await isRateLimited()) return;
     await drain({ budget });
+  } finally {
+    await finalizeWakeBudget(budget, { ranWork: budget.spent > 0 });
+  }
+}
+
+/**
+ * Options Status "Check Trash": Trash-only peek + hygiene snapshot (no full pull).
+ * Safe-to-empty is discovery debt only — may drain leftover budget for enqueued deletes.
+ */
+export async function checkTrashNow() {
+  const config = await getConfig();
+  if (config.syncMode !== SYNC_MODE.BIDIRECTIONAL) {
+    return {
+      ok: false,
+      reason: "one_way",
+      trashSafe: buildTrashSafePayload(null),
+    };
+  }
+  const budget = await createWakeBudget({ mode: "full" });
+  try {
+    if (await isRateLimited()) {
+      const { rateLimitedUntil } = await getStatus();
+      return {
+        ok: false,
+        reason: "rate_limited",
+        rateLimitedUntil: rateLimitedUntil ?? null,
+        trashSafe: buildTrashSafePayload(await getReconcileState()),
+      };
+    }
+    if (!config.token) {
+      return {
+        ok: false,
+        reason: "no_token",
+        trashSafe: buildTrashSafePayload(null),
+      };
+    }
+    const client = new RaindropClient(config.token);
+    budget.bindClient(client);
+    const peek = await runTrashHygienePeek({ client, budget });
+    if (!(await isRateLimited())) {
+      await drain({ budget });
+    }
+    const reconcile = await getReconcileState();
+    return {
+      ok: true,
+      scanComplete: peek.scanComplete,
+      pairedPending: peek.pairedPending,
+      trashSafe: buildTrashSafePayload(reconcile),
+      reconcile,
+    };
+  } catch (err) {
+    if (await handleClientError(err)) {
+      if (err instanceof RateLimitError) {
+        const { rateLimitedUntil } = await getStatus();
+        return {
+          ok: false,
+          reason: "rate_limited",
+          rateLimitedUntil: rateLimitedUntil ?? null,
+          trashSafe: buildTrashSafePayload(await getReconcileState()),
+        };
+      }
+      throw err;
+    }
+    await appendLog("error", `Check Trash failed: ${err.message}`);
+    throw err;
   } finally {
     await finalizeWakeBudget(budget, { ranWork: budget.spent > 0 });
   }

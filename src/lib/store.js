@@ -499,6 +499,15 @@ export async function getReconcileState() {
      * until they reappear in seenAcc (moved back into scope / re-allowlisted).
      */
     parkedAliveIds: [],
+    /**
+     * Trash hygiene snapshot (bidirectional discovery debt for safe-to-empty).
+     * Missing trashHygieneAt ⇒ Status unknown. See trash-hygiene.js.
+     */
+    trashHygieneAt: null,
+    trashScanComplete: false,
+    trashPairedPending: 0,
+    /** @type {"reconcile"|"check-trash"|null} */
+    trashHygieneSource: null,
   });
 }
 

@@ -27,6 +27,7 @@ import {
   formatReconcileSkipNotice,
 } from "../lib/store.js";
 import { formatLastThrottleNotice } from "../lib/wake-budget.js";
+import { formatTrashSafeNotice } from "../lib/trash-hygiene.js";
 import { countArchiveEntries, exportArchiveEntries, clearArchive } from "../lib/log-archive.js";
 import { getTree, mirrorPathExists, getTopRoots } from "../lib/bookmarks.js";
 import {
@@ -339,6 +340,17 @@ async function refreshStatus() {
   } else {
     throttleLine.textContent = "";
     throttleLine.classList.add("hidden");
+  }
+
+  const trashRow = $("trashSafeRow");
+  const trashLine = $("trashSafeLine");
+  if (resp.syncMode === SYNC_MODE.BIDIRECTIONAL && resp.trashSafe) {
+    trashRow.classList.remove("hidden");
+    trashLine.textContent =
+      resp.trashSafe.notice || formatTrashSafeNotice(resp.trashSafe, resp.trashSafe.state);
+  } else {
+    trashRow.classList.add("hidden");
+    trashLine.textContent = "";
   }
 
   const banner = $("haltBanner");
@@ -1304,6 +1316,34 @@ $("reconcile").addEventListener("click", () => runReconcile());
 $("matchExisting").addEventListener("click", () => void runMatchExistingUi());
 $("bulkQueueMatch").addEventListener("click", () => void matchFromBulkQueueBanner());
 $("bulkQueueContinue").addEventListener("click", () => void continueBulkDripFromStatus());
+$("checkTrash").addEventListener("click", async () => {
+  const out = $("checkTrashStatus");
+  out.textContent = "Checking Trash…";
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: MSG.CHECK_TRASH });
+    if (resp?.reason === "rate_limited") {
+      const until = resp.rateLimitedUntil
+        ? new Date(resp.rateLimitedUntil).toLocaleTimeString()
+        : "later";
+      out.textContent = `Paused for Raindrop rate limits until ${until}.`;
+    } else if (resp?.reason === "one_way") {
+      out.textContent = "Check Trash is only for bidirectional mode.";
+    } else if (resp?.reason === "no_token") {
+      out.textContent = "Save a Raindrop token first.";
+    } else if (!resp?.ok) {
+      out.textContent = resp?.error || "Check Trash failed.";
+    } else {
+      out.textContent =
+        resp.trashSafe?.notice ||
+        (resp.scanComplete
+          ? "Trash check complete."
+          : "Trash check ran (partial scan).");
+    }
+    await refreshStatus();
+  } catch (err) {
+    out.textContent = err?.message || String(err);
+  }
+});
 $("retryDeadLetter").addEventListener("click", async () => {
   const out = $("deadLetterStatus");
   out.textContent = "Retrying…";

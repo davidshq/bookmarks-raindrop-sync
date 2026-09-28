@@ -9,8 +9,9 @@
  *   `test-edge-raindrop-sync` only; cleaned before and after each scenario.
  * - API rationing: proactive pause when quota is low (same as the extension),
  *   paced pauses between scenarios/deletes (see live-raindrop-scope.mjs), no GET-per-row cleanup loops.
- * - Raindrop→Edge scenarios enqueue pull jobs directly (reconcile listing lags live API);
- *   reconcile listing remains covered by verify-checklist.mjs.
+ * - Most Raindrop→Edge scenarios enqueue pull jobs directly (reconcile nested
+ *   listing can lag / return stale ids). Pull now wait-and-resume drives the
+ *   real pause → resume loop, then pulls the seeded item the same explicit way.
  *
  * Usage:
  *   RAINDROP_TOKEN=… npm run test:integration
@@ -18,6 +19,7 @@
  */
 
 import assert from "node:assert/strict";
+import { runPullNow } from "../src/lib/pull-now.js";
 import {
   loadToken,
   importEngine,
@@ -433,6 +435,106 @@ async function scenarioRaindropFolderRename(eng, client, rootId) {
   console.log("  ✔ Raindrop collection rename pulled to mock Edge folder");
 }
 
+/**
+ * Live Pull now wait-and-resume under test-edge-raindrop-sync only.
+ *
+ * Raindrop nested listing under the root can lag / return stale ids (leaf list
+ * is current) — same reason other Raindrop→Edge live scenarios enqueue pulls.
+ * This scenario still drives the real runPullNow → reconcileNow loop through a
+ * durable rateLimitedUntil pause, then pulls the seeded live item via an
+ * explicit PULL_CREATE + drain (live API + engine), without touching anything
+ * outside the test root.
+ */
+async function scenarioPullNowWaitAndResume(eng, client, rootId) {
+  console.log("\n== integration: Pull now waits out rate limit and resumes ==");
+  const { constants, store, sync, queue } = eng;
+  const { MSG, JOB } = constants;
+  await resetAll(store, { integration: true });
+  await liveConfig(store, constants);
+
+  const leaf = await ensureCollectionPathUnderRoot(client, rootId, [
+    "Favorites bar",
+    "Integration-PullNow-Wait",
+  ]);
+  const link = "https://example.com/ers-integration-pull-now-wait";
+  const created = await gateClient(
+    client,
+    () =>
+      client.createRaindrop({
+        link,
+        title: "Pull now wait resume",
+        collectionId: leaf._id,
+      }),
+    { label: "seed pull-now-wait raindrop" }
+  );
+  await assertCollectionUnderTestRoot(client, rootId, created.collection?.$id);
+  await waitUntilRaindropListed(client, leaf._id, created._id);
+  await getRaindropInRoot(client, rootId, created._id);
+
+  // Synthetic pause = same store gate as HTTP 429 / proactive budget stop
+  // (avoids burning account quota to force a real 429).
+  await store.noteRateLimitedUntil(Date.now() + 5_000);
+
+  let slept = 0;
+  let reconcilePasses = 0;
+  const { text } = await runPullNow(
+    async (msg) => {
+      if (msg.type === MSG.GET_STATUS) {
+        return { ok: true, status: await store.getStatus() };
+      }
+      if (msg.type === MSG.RECONCILE_NOW) {
+        reconcilePasses++;
+        try {
+          const result = await sync.reconcileNow();
+          return { ok: true, ...result };
+        } catch (err) {
+          return { ok: false, error: err.message };
+        }
+      }
+      return { ok: false, error: `unexpected message ${msg.type}` };
+    },
+    {
+      sleepFn: async () => {
+        slept++;
+        await store.clearRateLimit();
+      },
+    }
+  );
+
+  assert.equal(slept, 1, "Pull now waited out the rate-limit pause once");
+  assert.ok(reconcilePasses >= 2, "skipped once under pause, then resumed reconcileNow");
+  assert.equal(await store.isRateLimited(), false, "pause cleared before resume pass");
+  assert.match(text, /Pull finished/);
+
+  // Live nested root list can be stale; pull the seeded item explicitly (same
+  // pattern as scenarioPullCreate) after wait-and-resume already ran.
+  await queue.enqueueJob({
+    id: `pull-${created._id}`,
+    kind: JOB.PULL_CREATE,
+    raindropId: String(created._id),
+    link: created.link,
+    title: created.title,
+    relativeSegments: ["Favorites bar", "Integration-PullNow-Wait"],
+    collectionId: String(leaf._id),
+  });
+  await drainWithRetry(client, sync);
+
+  const edge = findEdgeByUrl(link);
+  assert.ok(edge, "seeded live raindrop pulled into mock Edge");
+  assert.equal(edge.title, "Pull now wait resume");
+  assert.equal(
+    await store.getBookmarkIdForRaindrop(String(created._id)),
+    edge.id,
+    "pair maps only our seeded raindrop"
+  );
+  const parent = (await chrome.bookmarks.get(edge.parentId))[0];
+  assert.equal(parent.title, "Integration-PullNow-Wait");
+  assert.ok(await raindropAlive(client, created._id), "seed raindrop still alive under test root");
+  await assertCollectionUnderTestRoot(client, rootId, created.collection?.$id);
+
+  console.log("  ✔ Pull now waited/resumed; seeded live raindrop pulled under test root");
+}
+
 async function main() {
   console.log("Integration mode: mock Edge + live Raindrop");
   console.log(`Edge container: Favorites bar / ${TEST_ROOT_NAME} (id ${TEST_EDGE_CONTAINER_ID})`);
@@ -481,6 +583,10 @@ async function main() {
     await pauseBetweenScenarios();
 
     await scenarioRaindropFolderRename(eng, client, rootId);
+    await gateClient(client, () => cleanupTestRoot(client, rootId), { label: "cleanupTestRoot" });
+    await pauseBetweenScenarios();
+
+    await scenarioPullNowWaitAndResume(eng, client, rootId);
     await gateClient(client, () => cleanupTestRoot(client, rootId), { label: "cleanupTestRoot" });
   } finally {
     if (rootId != null) {

@@ -6,6 +6,7 @@
 // they stop re-candidating (option C). Follow-ons (collection 0, lastUpdate):
 // docs/raindrop-delete-detection-options.md
 //
+// Trash listing also writes the trash hygiene snapshot (safe-to-empty Status).
 // Trash + confirm-GET both enqueue via enqueueDeleteEdge (shared job id/payload).
 // Delete-confirm and tombstone-prune share rotateConfirmWindow for GET-budget fairness.
 
@@ -33,6 +34,7 @@ import {
   parkAliveIds,
   unparkAliveIds,
   setParkedAliveIds,
+  getPairs,
   appendLog,
 } from "./store.js";
 import * as queue from "./queue.js";
@@ -53,6 +55,7 @@ import {
   raindropCollectionId,
 } from "./raindrop.js";
 import { ensureAllowlistedOrMirrorAll } from "./reconcile-enqueue.js";
+import { writeTrashHygieneSnapshot } from "./trash-hygiene.js";
 
 /**
  * Enqueue a local Edge delete for a raindrop that is gone (trash or confirm-GET).
@@ -65,6 +68,16 @@ async function enqueueDeleteEdge(rid, bookmarkId) {
     kind: JOB.DELETE_EDGE,
     raindropId: rid,
     bookmarkId,
+  });
+}
+
+/** True when a delete-edge job for this raindrop is already queued. */
+async function hasQueuedDeleteEdge(rid) {
+  const target = String(rid);
+  const jobs = await queue.list();
+  return jobs.some((j) => {
+    if (queue.jobKind(j) !== JOB.DELETE_EDGE) return false;
+    return j.raindropId != null && String(j.raindropId) === target;
   });
 }
 
@@ -136,17 +149,34 @@ async function finishConfirmGets(client, budget, seenIds, pairs, index, rootId, 
  * Always starts at page 0 (newest first under Raindrop's default sort) so
  * recent soft-deletes are not starved by a forward cursor; overflow beyond
  * MAX_TRASH_PAGES_PER_TICK falls through to confirm-GET.
+ * Writes trash hygiene snapshot (discovery debt for Status safe-to-empty).
+ *
+ * @param {import("./raindrop.js").RaindropClient} client
+ * @param {import("./wake-budget.js").WakeBudget|null|undefined} budget
+ * @param {{ byRaindrop: Record<string, string> }} pairs
+ * @param {"reconcile"|"check-trash"} [source]
  * @returns {Promise<Set<string>>} raindrop ids handled this pass (skip confirm GET)
  */
-async function finishTrashDeleteDetection(client, budget, pairs) {
+async function finishTrashDeleteDetection(client, budget, pairs, source = "reconcile") {
   const handled = new Set();
   let page = 0;
   let pages = 0;
   let deleteJobs = 0;
+  let pairedPending = 0;
+  let scanComplete = false;
   const trashCap = Math.min(
     MAX_TRASH_PAGES_PER_TICK,
     pages + (budget?.allowance?.() ?? MAX_TRASH_PAGES_PER_TICK)
   );
+
+  if (trashCap <= 0 || (budget && !budget.canSpend(1))) {
+    await writeTrashHygieneSnapshot({
+      scanComplete: false,
+      pairedPending: 0,
+      source,
+    });
+    return handled;
+  }
 
   while (pages < trashCap && (!budget || budget.canSpend(1))) {
     const { items, count } = await client.listRaindrops(RAINDROP_TRASH_COLLECTION_ID, {
@@ -165,12 +195,26 @@ async function finishTrashDeleteDetection(client, budget, pairs) {
         handled.add(rid);
         continue;
       }
+      if (await hasQueuedDeleteEdge(rid)) {
+        handled.add(rid);
+        continue;
+      }
+      // Still needs enroll — count, then enroll so post-peek pending drops.
+      pairedPending++;
       handled.add(rid);
       const added = await enqueueDeleteEdge(rid, bookmarkId);
-      if (added) deleteJobs++;
+      if (added) {
+        deleteJobs++;
+        pairedPending--;
+      } else if (await hasQueuedDeleteEdge(rid)) {
+        pairedPending--;
+      }
     }
 
-    if (isListPageDone(page, RAINDROP_LIST_PER_PAGE, items, count)) break;
+    if (isListPageDone(page, RAINDROP_LIST_PER_PAGE, items, count)) {
+      scanComplete = true;
+      break;
+    }
     page++;
   }
 
@@ -180,7 +224,34 @@ async function finishTrashDeleteDetection(client, budget, pairs) {
       `Pull queued ${deleteJobs} local delete(s) for raindrops found in Trash.`
     );
   }
+
+  await writeTrashHygieneSnapshot({
+    scanComplete,
+    pairedPending,
+    source,
+  });
   return handled;
+}
+
+/**
+ * Trash-only hygiene peek (Check Trash): list Trash, enroll paired deletes,
+ * refresh the durable snapshot. Does not run confirm-GET or full reconcile.
+ *
+ * @param {{
+ *   client: import("./raindrop.js").RaindropClient,
+ *   budget?: import("./wake-budget.js").WakeBudget|null,
+ * }} opts
+ * @returns {Promise<{ handled: number, scanComplete: boolean, pairedPending: number }>}
+ */
+export async function runTrashHygienePeek({ client, budget }) {
+  const pairs = await getPairs();
+  await finishTrashDeleteDetection(client, budget, pairs, "check-trash");
+  const state = await getReconcileState();
+  return {
+    handled: 0,
+    scanComplete: !!state.trashScanComplete,
+    pairedPending: Number(state.trashPairedPending) || 0,
+  };
 }
 
 /**

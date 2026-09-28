@@ -1081,6 +1081,38 @@ console.log("== reconcile skip Status copy ==");
   console.log("  ✔ busy / cooldown / bulk_pause notices");
 }
 
+console.log("== trash-safe Status derive ==");
+{
+  const {
+    deriveTrashSafeState,
+    formatTrashSafeNotice,
+    buildTrashSafePayload,
+  } = await import("../src/lib/trash-hygiene.js");
+  assert.equal(deriveTrashSafeState(null), "unknown");
+  assert.equal(deriveTrashSafeState({}), "unknown");
+  assert.equal(
+    deriveTrashSafeState({ trashHygieneAt: 1, trashScanComplete: false, trashPairedPending: 0 }),
+    "partial"
+  );
+  assert.equal(
+    deriveTrashSafeState({ trashHygieneAt: 1, trashScanComplete: true, trashPairedPending: 2 }),
+    "waiting"
+  );
+  assert.equal(
+    deriveTrashSafeState({ trashHygieneAt: 1, trashScanComplete: true, trashPairedPending: 0 }),
+    "safe"
+  );
+  assert.ok(formatTrashSafeNotice(null).includes("not checked"));
+  assert.ok(
+    formatTrashSafeNotice({ trashHygieneAt: 1, trashScanComplete: true, trashPairedPending: 0 }).includes(
+      "Safe to empty"
+    )
+  );
+  assert.equal(buildTrashSafePayload(null).state, "unknown");
+  assert.ok(buildTrashSafePayload(null).notice);
+  console.log("  ✔ unknown / partial / waiting / safe");
+}
+
 console.log("== postpone confirm log copy ==");
 {
   const fs = await import("node:fs/promises");

@@ -8,12 +8,13 @@
 // alive through fetch/storage. The heartbeat is (re)created on every SW
 // evaluation, not only onInstalled/onStartup.
 
-import { ALARM_NAME, HEARTBEAT_MINUTES, MSG } from "../lib/constants.js";
+import { ALARM_NAME, HEARTBEAT_MINUTES, MSG, SYNC_MODE } from "../lib/constants.js";
 import {
   tick,
   drain,
   drainNow,
   reconcileNow,
+  checkTrashNow,
   refreshReconcileSkipAfterBulkResume,
   handleBookmarkCreated,
   handleBookmarkRemoved,
@@ -46,6 +47,7 @@ import {
   estimateDrainEtaMinutes,
   formatBulkQueueNotice,
 } from "../lib/queue-bulk-prompt.js";
+import { buildTrashSafePayload } from "../lib/trash-hygiene.js";
 
 function ensureHeartbeat() {
   chrome.alarms.create(ALARM_NAME, { periodInMinutes: HEARTBEAT_MINUTES });
@@ -133,6 +135,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           const pendingByDirection = await queue.sizeByDirection();
           const pending = pendingByDirection.total;
           const bulkPrompt = await noteQueueDepthForBulkPrompt(pending);
+          const reconcile = await getReconcileState();
+          const trashSafe =
+            config.syncMode === SYNC_MODE.BIDIRECTIONAL
+              ? buildTrashSafePayload(reconcile)
+              : null;
           sendResponse({
             ok: true,
             status: await getStatus(),
@@ -141,11 +148,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             deadLetter: await queue.deadLetterSize(),
             storage: await getStorageUsage(),
             log: await getLog(),
-            reconcile: await getReconcileState(),
+            reconcile,
             syncMode: config.syncMode,
             bulkPrompt,
             bulkEtaMinutes: estimateDrainEtaMinutes(pending),
             bulkNotice: formatBulkQueueNotice(pending),
+            trashSafe,
           });
           break;
         }
@@ -166,6 +174,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           await refreshReconcileSkipAfterBulkResume();
           await drain();
           sendResponse({ ok: true, bulkPrompt });
+          break;
+        }
+        case MSG.CHECK_TRASH: {
+          const result = await checkTrashNow();
+          sendResponse({ ok: !!result.ok, ...result });
           break;
         }
         case MSG.RETRY_DEAD_LETTER: {

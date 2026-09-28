@@ -65,6 +65,8 @@ export const MSG = {
   GET_BULK_PROMPT: "getBulkPrompt",
   /** Queue-depth bulk prompt: continue drip (clear pause + snooze). */
   CONTINUE_BULK_DRIP: "continueBulkDrip",
+  /** Bidirectional: Trash-only hygiene peek (safe-to-empty Status). */
+  CHECK_TRASH: "checkTrash",
 };
 
 // chrome.storage.local keys. Everything durable lives under these — the MV3
@@ -83,7 +85,8 @@ export const KEY = {
   SUPPRESS: "suppress", // { removes, creates, changes: { [bookmarkId]: expiresAt } }
   // reconcile: { cursorPage, outsideCursor, running, lastRunAt, lastSettledAt,
   //   unsettledConfirmCatchUp, lastError, seenAcc, aliveConfirmOffset,
-  //   tombstonePruneOffset, parkedAliveIds }
+  //   tombstonePruneOffset, parkedAliveIds, trashHygieneAt, trashScanComplete,
+  //   trashPairedPending, trashHygieneSource }
   RECONCILE: "reconcile",
   COLLECTION_CACHE: "collectionCache", // { [collectionPath]: collectionId }
   /** Edge folder id → Raindrop collection id (for in-place folder renames). */

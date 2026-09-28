@@ -89,6 +89,17 @@
         </p>
         <p id="reconcileSkipLine" class="status-line muted hidden" role="status"></p>
         <p id="wakeThrottleLine" class="status-line muted hidden" role="status"></p>
+        <div id="trashSafeRow" class="hidden">
+          <p id="trashSafeLine" class="status-line muted" role="status"></p>
+          <div class="row">
+            <button id="checkTrash" type="button" class="secondary">Check Trash</button>
+            <span id="checkTrashStatus" class="hint" role="status"></span>
+          </div>
+          <p class="hint">
+            Safe to empty means paired soft-deletes in Raindrop Trash have been enrolled for
+            browser sync. Queued local deletes may still finish afterward.
+          </p>
+        </div>
         <p class="status-line muted">Local storage: <span id="storageUsage">—</span></p>
         <div id="deadLetterRow" class="row hidden">
           <button id="retryDeadLetter" type="button" class="secondary">Retry dead-lettered</button>
