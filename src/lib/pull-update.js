@@ -4,6 +4,7 @@
 // must agree on title/URL/parent drift and the create-path / exclude gates.
 // Both call computePullUpdatePlan so those decisions cannot diverge.
 
+import { sameBookmarkUrl } from "./url-match.js";
 import { canCreateRaindropOnlyPath } from "./allowlist.js";
 import { ancestorIdsFromFolder, resolveExistingMirrorParent } from "./bookmarks.js";
 import { isExcluded } from "./policy.js";
@@ -76,7 +77,9 @@ export async function computePullUpdatePlan(opts) {
   }
 
   const titleDiff = (node.title || "") !== title;
-  const urlDiff = (node.url || "") !== link;
+  // Browser-normalized compare: a verbatim Raindrop link that Chromium
+  // rewrites on save (e.g. trailing "/" on an origin) is not drift.
+  const urlDiff = !sameBookmarkUrl(node.url || "", link);
 
   const existingParent = await resolveExistingMirrorParent(relative, rootName, topRoots);
   let shouldCreatePath = false;

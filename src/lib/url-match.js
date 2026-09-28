@@ -40,3 +40,24 @@ export function urlMatchKeys(u) {
   }
   return keys;
 }
+
+/**
+ * True when two URLs are the same bookmark target after the browser's own
+ * normalization (WHATWG URL parsing, which Chromium applies on bookmark
+ * create/update). Raindrop keeps links verbatim, so `https://example.com`
+ * there becomes `https://example.com/` in the browser; a raw string compare
+ * then reports a difference on every reconcile and writes the same URL back
+ * forever (WebAwesome: 228 identical pull-updates, Sep 18–28 2026).
+ * Deliberately stricter than urlMatchKeys: query, case of path, and `www.`
+ * still count as real differences.
+ * @param {string} a
+ * @param {string} b
+ */
+export function sameBookmarkUrl(a, b) {
+  if ((a || "") === (b || "")) return true;
+  try {
+    return new URL(a).href === new URL(b).href;
+  } catch {
+    return false;
+  }
+}

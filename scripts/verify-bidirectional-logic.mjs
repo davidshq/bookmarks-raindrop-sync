@@ -905,6 +905,32 @@ console.log("== bulk candidate heuristics ==");
   console.log("  ✔ assessFromScope / assessPullFromScope / prompt copy");
 }
 
+console.log("== browser-normalized URL compare (pull-update drift) ==");
+{
+  const { sameBookmarkUrl } = await import("../src/lib/url-match.js");
+  assert.equal(sameBookmarkUrl("https://webawesome.com/", "https://webawesome.com"), true);
+  assert.equal(sameBookmarkUrl("HTTPS://Example.com", "https://example.com/"), true);
+  assert.equal(sameBookmarkUrl("edge://history/all", "edge://history/all"), true);
+  assert.equal(sameBookmarkUrl("https://a.example/x", "https://a.example/x/"), false, "path slash is real");
+  assert.equal(sameBookmarkUrl("https://a.example/?q=1", "https://a.example/?q=2"), false, "query is real");
+  assert.equal(sameBookmarkUrl("https://www.a.example/", "https://a.example/"), false, "www is real");
+  assert.equal(sameBookmarkUrl("not a url", "not a url"), true);
+  assert.equal(sameBookmarkUrl("not a url", "other"), false);
+  console.log("  ✔ origin trailing slash is not drift; real differences still are");
+}
+
+console.log("== Raindrop GET cache busting ==");
+{
+  const { cacheBustPath } = await import("../src/lib/raindrop.js");
+  assert.equal(cacheBustPath("/collections", "a1"), "/collections?_cb=a1");
+  assert.equal(
+    cacheBustPath("/raindrops/5?page=0&perpage=50&nested=true", "b2"),
+    "/raindrops/5?page=0&perpage=50&nested=true&_cb=b2"
+  );
+  assert.notEqual(cacheBustPath("/x", 1), cacheBustPath("/x", 2), "nonce varies the URL");
+  console.log("  ✔ every GET gets a unique _cb parameter");
+}
+
 console.log("== export URL match + Match existing planner ==");
 {
   const { urlMatchKeys } = await import("../src/lib/url-match.js");

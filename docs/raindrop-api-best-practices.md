@@ -273,3 +273,20 @@ Avoid ad-hoc `fetch` to `api.raindrop.io` outside this client so rate headers, A
 ---
 
 *Last reviewed against developer.raindrop.io docs and this repo’s client (2026-09).*
+
+## Server-side response cache (observed 2026-09-28)
+
+Raindrop's REST API sits behind its own response cache (`x-api-cache: HIT` /
+`MISS` response header), keyed by the full URL. It is **not** Cloudflare
+(`cf-cache-status: BYPASS`) and it **ignores** `Cache-Control: no-cache` and
+`Pragma: no-cache` on the request. Several cache copies of different ages can
+answer the same URL: back-to-back identical requests returned 43 and 44 items,
+and a listing more than two hours stale was served repeatedly while a
+cache-busted request returned current data.
+
+Consequence for sync: a stale listing reports raindrops in collections they
+have already left, so reconcile moves the browser copy to the old place, then
+back when a fresh copy answers. `RaindropClient.request` therefore appends a
+unique `_cb` query parameter to every GET (`cacheBustPath`) and sets
+`cache: "no-store"` so Edge's HTTP cache cannot replay an old body either.
+Writes are unaffected.

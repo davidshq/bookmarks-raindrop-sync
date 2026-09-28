@@ -92,6 +92,26 @@ export function summarizeHttpErrorBody(text, status) {
   return oneLine.length > 160 ? `${oneLine.slice(0, 157)}…` : oneLine;
 }
 
+/**
+ * Raindrop runs a server-side response cache on the REST API (`x-api-cache:
+ * HIT|MISS`), keyed by URL. It ignores `Cache-Control: no-cache` / `Pragma`
+ * request headers, and different cache nodes can hold copies of different
+ * ages. On 2026-09-28 a copy of the sync-root listing more than two hours
+ * stale was served repeatedly, reporting ~110 raindrops in a collection they
+ * had left hours earlier; reconcile then moved their browser copies back and
+ * forth every cycle. Every GET therefore carries a unique `_cb` parameter so
+ * it always misses that cache.
+ * @param {string} path API path, with or without a query string
+ * @param {string|number} nonce unique per request
+ * @returns {string}
+ */
+export function cacheBustPath(path, nonce) {
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}_cb=${encodeURIComponent(String(nonce))}`;
+}
+
+let cacheBustSeq = 0;
+
 export class RaindropClient {
   constructor(token) {
     this.token = token;
@@ -149,8 +169,15 @@ export class RaindropClient {
   }
 
   async request(method, path, body) {
-    const res = await fetch(`${RAINDROP_API}${path}`, {
+    // Reads must never be answered from Raindrop's server cache or Edge's
+    // HTTP cache — both can return placement data hours out of date.
+    const isRead = method === "GET";
+    const url = isRead
+      ? cacheBustPath(path, `${Date.now().toString(36)}${(cacheBustSeq++).toString(36)}`)
+      : path;
+    const res = await fetch(`${RAINDROP_API}${url}`, {
       method,
+      ...(isRead ? { cache: "no-store" } : {}),
       headers: {
         Authorization: `Bearer ${this.token}`,
         ...(body ? { "Content-Type": "application/json" } : {}),
