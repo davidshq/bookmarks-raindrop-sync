@@ -345,3 +345,23 @@ test("persistent export failure: heartbeat lists again after capped presence-onl
     "new raindrop reaches the queue while exports fail"
   );
 });
+
+test("circuit breaker holds evidence-based Edge deletes past the limit", async () => {
+  const { eng, mock, root } = await setupEngine();
+  const { DELETE_BREAKER_MIN } = eng.constants;
+  const HELD = 5;
+  const paired = [];
+  for (let i = 0; i < DELETE_BREAKER_MIN + HELD; i++) {
+    paired.push(await pairedBookmark(eng, mock, root, "1", `https://e.example/breaker-${i}`));
+  }
+  for (const { item } of paired) mock._raindrops.delete(item._id); // gone from Raindrop
+  await eng.reconcile.reconcile({ force: true });
+  assert.equal((await jobsOfKind(eng, "delete-edge")).length, DELETE_BREAKER_MIN + HELD);
+
+  // Several wakes: the per-wake job cap must not be what stops the deletes.
+  for (let n = 0; n < 6; n++) await eng.sync.drain();
+  const removed = paired.filter(({ bm }) => !bookmarks.has(String(bm.id))).length;
+  assert.equal(removed, DELETE_BREAKER_MIN, "stops at the limit");
+  assert.equal((await jobsOfKind(eng, "delete-edge")).length, HELD, "the rest stay queued");
+  assert.equal((await eng.store.getDeleteBreaker()).tripped, true);
+});
