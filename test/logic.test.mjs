@@ -1,9 +1,9 @@
 // Offline unit checks for pure sync helpers (no Raindrop token / Edge / chrome).
 // Imports the real src/lib modules — do not reimplement algorithms here.
-// Run: npm test (node --test test/)
+// Run: npm test (vitest)
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1038,9 +1038,32 @@ test("move URL rebind picker", async () => {
     { _id: 2, link: "https://other.example/b" },
     { _id: 3, link: "https://example.com/a?utm=1" },
   ]);
+  // Exact primary key wins; the utm variant is not merged in alongside it.
   assert.deepEqual(
-    filtered.map((i) => i._id).sort((a, b) => a - b),
-    [1, 3]
+    filtered.map((i) => i._id),
+    [1]
+  );
+  // Lone loose hit (tracking params) is still accepted.
+  assert.deepEqual(
+    filterUrlMatchingItems("https://example.com/a/?utm=9", [
+      { _id: 3, link: "https://example.com/a?utm=1" },
+    ]).map((i) => i._id),
+    [3]
+  );
+  // Distinct query variants are not the same URL.
+  assert.deepEqual(
+    filterUrlMatchingItems("https://example.com/watch?v=A", [
+      { _id: 10, link: "https://example.com/watch?v=A" },
+      { _id: 11, link: "https://example.com/watch?v=B" },
+    ]).map((i) => i._id),
+    [10]
+  );
+  assert.deepEqual(
+    filterUrlMatchingItems("https://example.com/watch?v=B", [
+      { _id: 10, link: "https://example.com/watch?v=A" },
+      { _id: 11, link: "https://example.com/watch?v=B" },
+    ]).map((i) => i._id),
+    [11]
   );
 
   const emptyPairs = { byBookmark: {}, byRaindrop: {} };

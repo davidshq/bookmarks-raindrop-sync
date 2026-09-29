@@ -59,7 +59,7 @@ export default [
   },
 
   {
-    files: ["scripts/**/*.{js,mjs}", "test/**/*.mjs", "eslint.config.js"],
+    files: ["scripts/**/*.{js,mjs}", "test/**/*.mjs", "eslint.config.js", "vitest.config.mjs"],
     languageOptions: {
       ecmaVersion: 2024,
       sourceType: "module",

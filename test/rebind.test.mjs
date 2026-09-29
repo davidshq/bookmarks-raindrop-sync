@@ -2,9 +2,14 @@
 // (records, tree index, snapshot).
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { rebindPass, rebindStaleEdgeId, rebindLogLines } from "../src/lib/pair-rebind.js";
-import { treeIndexFromList, buildTreeIndex, makeScopePredicate } from "../src/lib/tree-index.js";
+import {
+  treeIndexFromList,
+  buildTreeIndex,
+  makeScopePredicate,
+  treeEntriesForUrl,
+} from "../src/lib/tree-index.js";
 import { buildSnapshot } from "../src/lib/presence.js";
 import { makePairRecord, pairsView } from "../src/lib/store.js";
 
@@ -108,6 +113,44 @@ test("copies outside the synced scope are never rebound to", () => {
   });
   assert.equal(withAllowlist.byId.get("61").inScope, true, "landing zone with allowlist");
   assert.equal(rebindPass({ records, treeIndex: withAllowlist }).records["7"].bookmarkId, "61");
+});
+
+test("query variants are not the same URL for Edge rebind", () => {
+  // Chromium renumbered both bookmarks; each pair must rebind to its own video,
+  // not cross via the shared query-stripped key.
+  const urlA = "https://example.com/watch?v=A";
+  const urlB = "https://example.com/watch?v=B";
+  const tree = treeIndexFromList([
+    { id: "900", url: urlA, path: ["Favorites bar"] },
+    { id: "901", url: urlB, path: ["Favorites bar"] },
+  ]);
+  const records = {
+    7: record("7", "12", urlA, { edgePathAtSync: ["Favorites bar"] }),
+    8: record("8", "13", urlB, { edgePathAtSync: ["Favorites bar"] }),
+  };
+  const pass = rebindPass({ records, treeIndex: tree });
+  assert.equal(pass.records["7"].bookmarkId, "900");
+  assert.equal(pass.records["8"].bookmarkId, "901");
+  assert.deepEqual(pass.staleEdge, []);
+});
+
+test("survival: different-query URL is ignored when both query variants exist", () => {
+  const urlA = "https://example.com/watch?v=A";
+  const urlB = "https://example.com/watch?v=B";
+  // When both are present, lookup for A must not list B (else a delete of A
+  // would treat B as a survivor and silently drop).
+  const both = treeIndexFromList([
+    { id: "1", url: urlA, inScope: true },
+    { id: "2", url: urlB, inScope: true },
+  ]);
+  assert.deepEqual(
+    treeEntriesForUrl(both, urlA).map((e) => e.id),
+    ["1"]
+  );
+  assert.deepEqual(
+    treeEntriesForUrl(both, urlB).map((e) => e.id),
+    ["2"]
+  );
 });
 
 test("invariant 4: stale Raindrop id rebinds to the oldest surviving copy", () => {

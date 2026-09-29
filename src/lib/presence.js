@@ -29,7 +29,7 @@ import {
   PRESENCE_SHRINK_MIN_ROWS,
 } from "./constants.js";
 import { indexExportByUrl } from "./export-csv.js";
-import { urlMatchKeys } from "./url-match.js";
+import { urlMatchKeys, resolveIndexedUrls } from "./url-match.js";
 import { _read as read, _write as write } from "./store.js";
 import { AuthError, RateLimitError } from "./raindrop.js";
 
@@ -190,20 +190,27 @@ export function isUsableForUrls(snap, now = Date.now()) {
 }
 
 /**
- * Live raindrop ids whose URL shares a match key with `url`.
+ * Live raindrop ids matching `url` (exact key first; loose only if unique).
  * @param {PresenceSnapshot|null} snap
  * @param {string|null|undefined} url
  * @returns {string[]}
  */
 export function idsForUrl(snap, url) {
-  if (!snap?.byUrlKey || !url) return [];
-  const out = [];
-  for (const key of urlMatchKeys(url)) {
-    for (const rid of snap.byUrlKey.get(key) || []) {
-      if (!out.includes(rid)) out.push(rid);
-    }
-  }
-  return out;
+  return resolveIdsForUrl(snap, url).ids;
+}
+
+/**
+ * Same as idsForUrl, plus whether the hit was exact or a single loose candidate.
+ * @param {PresenceSnapshot|null} snap
+ * @param {string|null|undefined} url
+ * @returns {{ ids: string[], match: 'exact'|'loose'|'none' }}
+ */
+export function resolveIdsForUrl(snap, url) {
+  if (!snap?.byUrlKey || !url) return { ids: [], match: "none" };
+  return resolveIndexedUrls(snap.byUrlKey, url, (id) => {
+    const u = snap.urlById?.get(id);
+    return u ? urlMatchKeys(u)[0] : null;
+  });
 }
 
 /**

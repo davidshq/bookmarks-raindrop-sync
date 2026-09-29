@@ -7,7 +7,7 @@
 // allowlist is active. A copy outside that scope does not keep a raindrop
 // alive and is never rebound to.
 
-import { urlMatchKeys } from "./url-match.js";
+import { urlMatchKeys, resolveIndexedUrls } from "./url-match.js";
 import { isExcluded } from "./policy.js";
 import { isOutsideRootLandingSegments } from "./collections.js";
 import { isAllowlistActive } from "./allowlist.js";
@@ -115,22 +115,21 @@ export function treeIndexFromList(list) {
 }
 
 /**
- * Tree entries whose URL shares a match key with `url`, in id order.
+ * Tree entries matching `url` (exact key first; loose only if unique), id order.
  * @param {TreeIndex} treeIndex
  * @param {string} url
  * @returns {TreeEntry[]}
  */
 export function treeEntriesForUrl(treeIndex, url) {
-  if (!url) return [];
-  const seen = new Set();
+  if (!url || !treeIndex) return [];
+  const { ids } = resolveIndexedUrls(treeIndex.byUrlKey, url, (id) => {
+    const entry = treeIndex.byId.get(id);
+    return entry?.url ? urlMatchKeys(entry.url)[0] : null;
+  });
   const out = [];
-  for (const key of urlMatchKeys(url)) {
-    for (const id of treeIndex.byUrlKey.get(key) || []) {
-      if (seen.has(id)) continue;
-      seen.add(id);
-      const entry = treeIndex.byId.get(id);
-      if (entry) out.push(entry);
-    }
+  for (const id of ids) {
+    const entry = treeIndex.byId.get(id);
+    if (entry) out.push(entry);
   }
   return out.sort(compareIds);
 }

@@ -2,25 +2,30 @@
 // Claim rules match Match-existing (`classifyPairClaim`); pair-rebind.js uses
 // the same pick for stale Raindrop ids.
 
-import { urlMatchKeys } from "./url-match.js";
+import { urlMatchKind } from "./url-match.js";
 import { classifyPairClaim } from "./match-existing.js";
 
 /**
- * Keep search hits whose link shares a stable URL match key with `edgeUrl`.
+ * Keep search hits that match `edgeUrl`: exact primary key first; a lone loose
+ * (tracking-param) hit only when no exact hit exists. Never merges distinct
+ * content-selecting query variants (?v=A vs ?v=B).
  * @param {string} edgeUrl
  * @param {{ _id?: number|string, link?: string }[]} items
  * @returns {{ _id: number|string, link?: string }[]}
  */
 export function filterUrlMatchingItems(edgeUrl, items) {
-  const want = new Set(urlMatchKeys(edgeUrl));
-  if (!want.size) return [];
-  const out = [];
+  /** @type {{ item: { _id: number|string, link?: string }, kind: 'exact'|'loose' }[]} */
+  const classified = [];
   for (const item of items || []) {
     if (!item || item._id == null) continue;
-    const keys = urlMatchKeys(item.link || "");
-    if (keys.some((k) => want.has(k))) out.push(item);
+    const kind = urlMatchKind(edgeUrl, item.link || "");
+    if (kind) classified.push({ item, kind });
   }
-  return out;
+  const exact = classified.filter((c) => c.kind === "exact").map((c) => c.item);
+  if (exact.length) return exact;
+  const loose = classified.filter((c) => c.kind === "loose").map((c) => c.item);
+  if (loose.length === 1) return loose;
+  return [];
 }
 
 /**

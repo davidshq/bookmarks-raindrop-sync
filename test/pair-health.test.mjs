@@ -1,7 +1,7 @@
 // Pair health (design D9): counts from records + tree + snapshot, no requests.
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import {
   computePairHealth,
   formatPairHealth,

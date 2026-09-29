@@ -88,9 +88,9 @@ import {
 import { canCreateRaindropOnlyPath } from "./allowlist.js";
 import { computePullUpdatePlan } from "./pull-update.js";
 import { filterUrlMatchingItems, pickMoveRebindCandidate } from "./move-rebind.js";
-import { urlMatchKeys } from "./url-match.js";
+import { urlMatchKeys, urlMatchKind } from "./url-match.js";
 import { PRESENCE_STALE_MS } from "./constants.js";
-import { ensurePresence, isUsableForUrls, idsForUrl } from "./presence.js";
+import { ensurePresence, isUsableForUrls, resolveIdsForUrl } from "./presence.js";
 import { loadTreeIndex, treeEntriesForUrl } from "./tree-index.js";
 import { rebindStaleEdgeId, rebindStaleRaindropId } from "./pair-rebind.js";
 
@@ -169,6 +169,7 @@ async function pickClaimable(bookmarkId, rids, liveRaindropIds) {
  * @param {{ id: string, createAttemptedAt?: number }} job
  * @param {string} url
  * @param {{ client: import("./raindrop.js").RaindropClient, budget?: import("./wake-budget.js").WakeBudget|null }} ctx
+ * @returns {Promise<{ kind: string, rid?: string, extras: number, linkMatch: 'exact'|'loose'|'none' }>}
  */
 async function tryReclaimRaindropByUrl(job, url, ctx) {
   const { client, budget } = ctx;
@@ -185,26 +186,35 @@ async function tryReclaimRaindropByUrl(job, url, ctx) {
     (job.createAttemptedAt == null || snapshot.at > job.createAttemptedAt);
   if (fresh) {
     // Raindrops this engine paired after the export began are live too; the
-    // snapshot just cannot see them yet.
+    // snapshot just cannot see them yet. Pair records carry the exact key only.
     const pairs = await getPairs();
-    const known = new Set(snapshot.ids);
-    const rids = idsForUrl(snapshot, url);
-    for (const key of urlMatchKeys(url)) {
-      for (const rid of pairs.byUrlKey[key] || []) {
-        const rec = pairs.records[rid];
-        if (rec?.lastSeenRaindropAt == null || rec.lastSeenRaindropAt < snapshot.at) continue;
-        known.add(rid);
-        if (!rids.includes(rid)) rids.push(rid);
-      }
-    }
-    return pickClaimable(job.id, rids, known);
+    const exactKey = urlMatchKeys(url)[0];
+    const recent = (pairs.byUrlKey[exactKey] || []).filter((rid) => {
+      const seen = pairs.records[rid]?.lastSeenRaindropAt;
+      return seen != null && seen >= snapshot.at;
+    });
+    const known = new Set([...snapshot.ids, ...recent]);
+    const resolved = resolveIdsForUrl(snapshot, url);
+    // An exact hit from either source outranks a loose snapshot hit.
+    const exact = resolved.match === "exact" || recent.length > 0;
+    const rids = exact
+      ? [...new Set([...(resolved.match === "exact" ? resolved.ids : []), ...recent])]
+      : resolved.ids;
+    const pick = await pickClaimable(job.id, rids, known);
+    return { ...pick, linkMatch: !pick.rid ? "none" : exact ? "exact" : resolved.match };
   }
   const { items } = await client.searchRaindrops(url);
   const matching = filterUrlMatchingItems(url, items);
-  return pickClaimable(
+  const pick = await pickClaimable(
     job.id,
     matching.map((item) => String(item._id))
   );
+  let linkMatch = "none";
+  if (pick.rid) {
+    const hit = matching.find((item) => String(item._id) === pick.rid);
+    linkMatch = urlMatchKind(url, hit?.link || "") || "none";
+  }
+  return { ...pick, linkMatch };
 }
 
 /**
@@ -225,6 +235,8 @@ function edgeMeta(node, segments, collectionId) {
 
 /**
  * Apply a URL reclaim: record pair, optionally log extras, update Edge-owned fields.
+ * Never rewrites `link` on a loose (tracking-param) match — that would attach
+ * tags/notes from an unrelated raindrop to a different URL.
  * @returns {Promise<string|null>} raindrop id, or null if update 404'd
  */
 async function applyReclaimedRaindrop(
@@ -235,7 +247,8 @@ async function applyReclaimedRaindrop(
   collectionId,
   pathLabel,
   client,
-  segments
+  segments,
+  linkMatch = "exact"
 ) {
   await recordSynced(job.id, rid, edgeMeta(node, segments, collectionId));
   if (extras > 0) {
@@ -245,11 +258,10 @@ async function applyReclaimedRaindrop(
     );
   }
   try {
-    await client.updateRaindrop(rid, {
-      link: node.url,
-      title: node.title,
-      collectionId,
-    });
+    /** @type {{ title: string, collectionId: *, link?: string }} */
+    const patch = { title: node.title, collectionId };
+    if (linkMatch !== "loose") patch.link = node.url;
+    await client.updateRaindrop(rid, patch);
     if (job.reason === "move") {
       await appendLog("info", `Moved: ${node.title || node.url} → ${pathLabel}`);
     } else {
@@ -363,7 +375,8 @@ async function processUpload(job, ctx) {
         collectionId,
         pathLabel,
         client,
-        segments
+        segments,
+        rebound.linkMatch || "exact"
       );
     }
   }
@@ -637,16 +650,22 @@ async function pulledMeta(node, job, collectionId) {
  * @returns {Promise<{ id: string, parentId?: string, url?: string, title?: string }|null>}
  */
 async function findUnpairedPullCreateOrphan(parentId, link, raindropId) {
-  const want = new Set(urlMatchKeys(link));
-  if (!want.size) return null;
   const children = await getChildren(parentId);
+  /** @type {{ id: string, parentId?: string, url?: string, title?: string }[]} */
+  const exact = [];
+  /** @type {{ id: string, parentId?: string, url?: string, title?: string }[]} */
+  const loose = [];
   for (const child of children) {
     if (!child?.url || !child.id) continue;
-    const keys = urlMatchKeys(child.url);
-    if (!keys.some((k) => want.has(k))) continue;
+    const kind = urlMatchKind(link, child.url);
+    if (!kind) continue;
     const existingRid = await getRaindropId(child.id);
-    if (existingRid == null || existingRid === String(raindropId)) return child;
+    if (existingRid != null && existingRid !== String(raindropId)) continue;
+    if (kind === "exact") exact.push(child);
+    else loose.push(child);
   }
+  if (exact.length) return exact[0];
+  if (loose.length === 1) return loose[0];
   return null;
 }
 

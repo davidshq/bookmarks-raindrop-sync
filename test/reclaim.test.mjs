@@ -2,7 +2,7 @@
 // binds to an existing raindrop with its URL instead of forking a copy.
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { setupEngine, edgeBookmark, edgeFolder } from "./helpers/engine.mjs";
 import { PRESENCE_STALE_MS } from "../src/lib/constants.js";
 
@@ -127,4 +127,82 @@ test("Import refreshes the snapshot once and every upload reclaims from it", asy
   assert.equal(mock._calls.searchRaindrops, searches, "no per-URL searches");
   const pairs = await eng.store.getPairs();
   assert.equal(Object.keys(pairs.records).length, urls.length);
+});
+
+test("distinct query variants do not cross-reclaim when both exist", async () => {
+  const { eng, mock, root, presence } = await setupEngine();
+  const a = mock._seedRich(root._id, {
+    link: "https://example.com/watch?v=A",
+    title: "A",
+    tags: ["a"],
+  });
+  const b = mock._seedRich(root._id, {
+    link: "https://example.com/watch?v=B",
+    title: "B",
+    tags: ["b"],
+  });
+  await presence.ensurePresence({
+    client: new eng.raindropMod.RaindropClient("mock"),
+    reason: "pull-now",
+  });
+
+  const bmA = await edgeBookmark("1", "A", "https://example.com/watch?v=A");
+  const bmB = await edgeBookmark("1", "B", "https://example.com/watch?v=B");
+  await eng.sync.handleBookmarkCreated(bmA.id, bmA);
+  await eng.sync.handleBookmarkCreated(bmB.id, bmB);
+
+  assert.equal(await eng.store.getRaindropId(bmA.id), String(a._id));
+  assert.equal(await eng.store.getRaindropId(bmB.id), String(b._id));
+  assert.deepEqual(mock._raindrops.get(a._id).tags, ["a"]);
+  assert.deepEqual(mock._raindrops.get(b._id).tags, ["b"]);
+});
+
+test("loose reclaim keeps the raindrop link (tracking-param tolerance)", async () => {
+  const { eng, mock, root, presence } = await setupEngine();
+  const existing = mock._seedRich(root._id, {
+    link: "https://track.example/page?utm=old",
+    title: "old",
+    tags: ["kept"],
+  });
+  await presence.ensurePresence({
+    client: new eng.raindropMod.RaindropClient("mock"),
+    reason: "pull-now",
+  });
+
+  const bm = await edgeBookmark("1", "new", "https://track.example/page?utm=new");
+  await eng.sync.handleBookmarkCreated(bm.id, bm);
+
+  assert.equal(await eng.store.getRaindropId(bm.id), String(existing._id));
+  const item = mock._raindrops.get(existing._id);
+  assert.equal(
+    item.link,
+    "https://track.example/page?utm=old",
+    "link not rewritten on loose match"
+  );
+  assert.equal(item.title, "new");
+  assert.deepEqual(item.tags, ["kept"]);
+});
+
+test("a lone raindrop with a different query is not reclaimed", async () => {
+  const { eng, mock, root, presence } = await setupEngine();
+  const other = mock._seedRich(root._id, {
+    link: "https://www.youtube.com/watch?v=AAA",
+    title: "AAA",
+    tags: ["aaa"],
+  });
+  await presence.ensurePresence({
+    client: new eng.raindropMod.RaindropClient("mock"),
+    reason: "pull-now",
+  });
+
+  const creates = mock._calls.createRaindrop;
+  const bm = await edgeBookmark("1", "BBB", "https://www.youtube.com/watch?v=BBB");
+  await eng.sync.handleBookmarkCreated(bm.id, bm);
+
+  assert.equal(mock._calls.createRaindrop, creates + 1, "created its own raindrop");
+  assert.notEqual(await eng.store.getRaindropId(bm.id), String(other._id));
+  const item = mock._raindrops.get(other._id);
+  assert.equal(item.link, "https://www.youtube.com/watch?v=AAA");
+  assert.equal(item.title, "AAA");
+  assert.deepEqual(item.tags, ["aaa"]);
 });

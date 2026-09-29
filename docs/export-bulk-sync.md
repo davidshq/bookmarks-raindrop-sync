@@ -69,14 +69,17 @@ Automated (no real Edge tree):
 npm test
 ```
 
-Options UI smoke (fresh Chrome profile + unpacked extension; does **not** touch your normal Edge/Chrome Favorites):
+Options UI smoke (Playwright's bundled Chromium, fresh profile + unpacked extension; does **not** touch your normal Edge/Chrome Favorites):
 
 ```bash
-# token via scripts/lib/test-harness loadToken (.tmp/raindrop_token or RAINDROP_TOKEN);
-# puppeteer-core under .tmp/smoke-npm
-xvfb-run -a node scripts/smoke-bulk-options.mjs
-# SMOKE_HEADED=1 for a visible window (still a throwaway profile)
+npx playwright install chromium   # once
+# token via scripts/lib/test-harness loadToken (.tmp/raindrop_token or RAINDROP_TOKEN)
+npm run test:smoke-bulk            # headless
+SMOKE_HEADED=1 npm run test:smoke-bulk   # visible window (still a throwaway profile)
 ```
+
+Branded Chrome and Edge removed the flags that side-load an unpacked
+extension, so the smoke runs Playwright's Chromium (`channel: "chromium"`).
 
 Covers: Status bulk banner show/hide, Continue drip snooze, Match from banner + Manual Sync Match (live `export.csv`, Apply cancelled), Import bulk-gate cancel (no queue growth). Apply of pairs is intentionally not confirmed so your live Raindrop library is not paired into an empty smoke profile.
 

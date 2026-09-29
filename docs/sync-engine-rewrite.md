@@ -164,7 +164,10 @@ should be one click.
   (`collections.js`, rename processors).
 - Folder policies, exclude/offload, allowlist (`policy.js`, `allowlist.js`).
 - Options UI structure. Status gains pair health and the breaker banner.
-- `urlMatchKeys` as the single URL normalization.
+- `urlMatchKeys` as the single URL normalization. Lookups prefer the exact
+  (primary) key; the loose key drops only tracking params (`utm_*`, `fbclid`,
+  `si`, …) and is used only when it alone yields one candidate. Reclaim never
+  rewrites `link` on a loose match.
 
 ## What goes
 
@@ -231,7 +234,7 @@ tests, in priority order:
    Repair pairs runs the same rebind pass and reports Edge-side and
    Raindrop-side rebinds separately from prunes).
 
-Tests run under `node --test` (`test/*.test.mjs`); invariants 1–4 and 6 have
+Tests run under Vitest (`npm test`, `test/*.test.mjs`); invariants 1–4 and 6 have
 dedicated files (`evidence`, `reclaim`, `rebind`, `pairs`), invariant 5 is
 checklist 7.8.
 

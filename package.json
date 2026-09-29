@@ -4,25 +4,28 @@
   "type": "module",
   "description": "Manifest V3 Chromium extension: sync browser bookmarks with Raindrop.io",
   "scripts": {
-    "test": "node --test test/*.test.mjs",
-    "test:live": "node test/checklist.test.mjs --live",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:live": "ERS_LIVE=1 vitest run test/checklist.test.mjs --testTimeout=600000",
     "test:integration": "node scripts/verify-integration.mjs",
     "test:smoke-bulk": "node scripts/smoke-bulk-options.mjs",
     "spike": "node scripts/spike-raindrop.mjs",
     "pack": "node scripts/pack-extension.mjs",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "format": "prettier --write \"src/**/*.{js,html,css,json}\" \"scripts/**/*.{js,mjs}\" \"test/**/*.mjs\" eslint.config.js",
-    "format:check": "prettier --check \"src/**/*.{js,html,css,json}\" \"scripts/**/*.{js,mjs}\" \"test/**/*.mjs\" eslint.config.js"
+    "format": "prettier --write \"src/**/*.{js,html,css,json}\" \"scripts/**/*.{js,mjs}\" \"test/**/*.mjs\" eslint.config.js vitest.config.mjs",
+    "format:check": "prettier --check \"src/**/*.{js,html,css,json}\" \"scripts/**/*.{js,mjs}\" \"test/**/*.mjs\" eslint.config.js vitest.config.mjs"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.12"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "eslint": "^10.10.0",
     "eslint-config-prettier": "^10.1.8",
     "globals": "^17.12.0",
-    "prettier": "^3.9.6"
+    "playwright": "^1.63.0",
+    "prettier": "^3.9.6",
+    "vitest": "^5.0.2"
   }
 }

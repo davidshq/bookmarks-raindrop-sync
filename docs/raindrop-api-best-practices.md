@@ -108,7 +108,7 @@ Warnings from the docs that affect us:
 
 **Search caveats:**
 
-- `searchRaindrops` / `GET /raindrops/0?search=…` is fuzzy. Callers **must** hard-filter with `urlMatchKeys` (move-rebind, reclaim).
+- `searchRaindrops` / `GET /raindrops/0?search=…` is fuzzy. Callers **must** hard-filter with `urlMatchKeys` (move-rebind, reclaim). Prefer the exact (primary) key. The loose key drops only tracking params (`utm_*`, `fbclid`, `si`, …), never content-selecting ones like `?v=` or `?id=`; use it only when it alone yields one candidate, and never rewrite `link` on a loose match.
 - `search=lastUpdate:>…` is useful for **creates/edits**, not deletes (gone IDs never appear). Do not use it as a delete oracle.
 
 **Presence alternatives (choose by lane):**

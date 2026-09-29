@@ -2,7 +2,7 @@
 // refresh cadence per reason.
 
 import assert from "node:assert/strict";
-import { test, beforeEach } from "node:test";
+import { test, beforeEach } from "vitest";
 import { storage } from "../scripts/lib/test-harness.mjs";
 import {
   buildSnapshot,
@@ -57,9 +57,16 @@ test("snapshot built from export: ids, url index, complete", () => {
   assert.equal(snap.urlIndexed, true);
   assert.deepEqual([...snap.ids].sort(), ["10", "11", "12"]);
   assert.equal(snap.at, 1000);
-  // www / trailing slash / query noise all match by urlMatchKeys.
+  // www / trailing slash match by exact key; query noise matches as a lone loose hit.
   assert.deepEqual(idsForUrl(snap, "https://b.example/x").sort(), ["11", "12"]);
   assert.deepEqual(idsForUrl(snap, "https://a.example/page"), ["10"]);
+  // Distinct query variants never merge.
+  const watch = buildSnapshot(
+    "id,url\n1,https://example.com/watch?v=A\n2,https://example.com/watch?v=B\n",
+    { at: 1000 }
+  );
+  assert.deepEqual(idsForUrl(watch, "https://example.com/watch?v=A"), ["1"]);
+  assert.deepEqual(idsForUrl(watch, "https://example.com/watch?v=B"), ["2"]);
   assert.equal(snap.urlById.get("11"), "https://www.b.example/x/");
 });
 

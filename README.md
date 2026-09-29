@@ -113,14 +113,15 @@ Chrome and Edge do not fork collections.
 ## Tests
 
 ```bash
-npm test
-# node --test test/*.test.mjs  (logic.test.mjs, checklist.test.mjs, engine invariants)
+npm test          # vitest run: test/*.test.mjs (logic, checklist, engine invariants)
+npm run test:watch
 ```
 
 ```bash
 RAINDROP_TOKEN=xxxxx npm run test:live
 RAINDROP_TOKEN=xxxxx npm run test:integration
-# Options bulk UI (throwaway Chrome profile; needs display or xvfb-run):
+# Options bulk UI (Playwright Chromium, throwaway profile, headless;
+# run `npx playwright install chromium` once):
 RAINDROP_TOKEN=xxxxx npm run test:smoke-bulk
 ```
 

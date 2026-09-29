@@ -14,12 +14,12 @@
  * - Scenarios only create/assert ERS-Verify-* collections and example.com/ers-* URLs.
  *
  * Usage:
- *   npm test                  (node --test test/, fully mocked)
- *   RAINDROP_TOKEN=… npm run test:live   (node test/checklist.test.mjs --live)
+ *   npm test                  (vitest, fully mocked)
+ *   RAINDROP_TOKEN=… npm run test:live   (ERS_LIVE=1 vitest run test/checklist.test.mjs)
  */
 
 import assert from "node:assert/strict";
-import { test, after } from "node:test";
+import { test, afterAll } from "vitest";
 import { RAINDROP_API } from "../src/lib/constants.js";
 import { runPullNow } from "../src/lib/pull-now.js";
 import {
@@ -35,7 +35,7 @@ import {
 } from "../scripts/lib/test-harness.mjs";
 import { makeMockRaindrop } from "./helpers/fake-raindrop.mjs";
 
-const LIVE = process.argv.includes("--live");
+const LIVE = process.env.ERS_LIVE === "1";
 const TOKEN = loadToken();
 const USE_LIVE = LIVE && !!TOKEN;
 
@@ -2613,7 +2613,9 @@ async function scenario73_coalesceActivityLog() {
 
 async function optionalLiveSmoke() {
   if (!USE_LIVE) {
-    console.log("\n== Live Raindrop smoke skipped (pass --live with token for API check) ==");
+    console.log(
+      "\n== Live Raindrop smoke skipped (npm run test:live with RAINDROP_TOKEN for API check) =="
+    );
     return;
   }
   console.log("\n== Live Raindrop smoke (ERS-Verify-* only) ==");
@@ -3422,7 +3424,7 @@ console.log(
   `Mode: ${USE_LIVE ? "mock Edge + live Raindrop (ERS-Verify-* only)" : "fully mocked (no real Edge/Raindrop writes)"}`
 );
 
-after(async () => {
+afterAll(async () => {
   if (USE_LIVE) await liveCleanup();
 });
 

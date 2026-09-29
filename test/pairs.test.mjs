@@ -2,7 +2,7 @@
 // one-shot v1 → v2 migration (memo invariant 6: migration drops ghosts).
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { setupEngine, edgeBookmark, edgeFolder, jobsOfKind, storage } from "./helpers/engine.mjs";
 
 test("record written on sync carries url, placement and timestamps", async () => {

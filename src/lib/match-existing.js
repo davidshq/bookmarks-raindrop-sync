@@ -3,7 +3,7 @@
 
 import { collectAllBookmarks } from "./bookmarks.js";
 import { indexExportByUrl } from "./export-csv.js";
-import { urlMatchKeys } from "./url-match.js";
+import { resolveIndexedUrls, urlMatchKeys } from "./url-match.js";
 import { RaindropClient, RateLimitError, AuthError } from "./raindrop.js";
 import { handleClientError } from "./client-errors.js";
 import { adoptExportCsv } from "./presence.js";
@@ -87,7 +87,7 @@ export function classifyPairClaim(bid, rid, pairs, liveIds, liveRaindropIds) {
  * @returns {Omit<MatchPlan, 'ok'|'error'|'reason'> & { ok: true }}
  */
 export function planMatchFromExport(csvText, edgeBookmarks, pairs) {
-  const { byKey, raindropIds, raindropCount } = indexExportByUrl(csvText);
+  const { byKey, raindropIds, raindropCount, urlById } = indexExportByUrl(csvText);
   /** Live Edge ids — stale pair map entries (Edge Sync rewrite) are not conflicts. */
   const liveIds = new Set(edgeBookmarks.map((b) => String(b.id)));
   /** Live raindrop ids — a forward link to an id outside the export is a ghost, not a conflict. */
@@ -100,21 +100,19 @@ export function planMatchFromExport(csvText, edgeBookmarks, pairs) {
 
   for (const bm of edgeBookmarks) {
     const bid = String(bm.id);
-    const rids = new Set();
-    for (const key of urlMatchKeys(bm.url)) {
-      const hits = byKey.get(key);
-      if (!hits) continue;
-      for (const rid of hits) rids.add(rid);
-    }
-    if (rids.size === 0) {
+    const { ids } = resolveIndexedUrls(byKey, bm.url, (rid) => {
+      const u = urlById.get(rid);
+      return u ? urlMatchKeys(u)[0] : null;
+    });
+    if (ids.length === 0) {
       edgeOnly++;
       continue;
     }
-    if (rids.size > 1) {
+    if (ids.length > 1) {
       ambiguous++;
       continue;
     }
-    candidates.set(bid, rids);
+    candidates.set(bid, new Set(ids));
   }
 
   // Collapse rid claimed by multiple Edge bookmarks → ambiguous.

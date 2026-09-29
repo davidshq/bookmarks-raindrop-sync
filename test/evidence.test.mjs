@@ -2,7 +2,7 @@
 // direction without a positive signal and a failed survival check.
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { setupEngine, edgeBookmark, edgeFolder, jobsOfKind, bookmarks } from "./helpers/engine.mjs";
 
 /** Pair a fresh Edge bookmark to a fresh raindrop with the same URL. */

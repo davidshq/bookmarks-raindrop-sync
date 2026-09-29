@@ -1,59 +1,30 @@
 #!/usr/bin/env node
 /**
- * Headed/headless Chrome smoke for Options bulk-lane UI (Status banner + Match).
+ * Playwright smoke for the Options bulk-lane UI (Status banner + Match).
  *
  * SAFETY:
  * - Fresh --user-data-dir (empty Favorites) — does not touch your normal profile.
  * - Raindrop: read-only export.csv for Match plan; Apply is cancelled via stubbed confirm.
  * - Queue phantoms are in extension storage only; Continue drip clears the pause.
  *
+ * Runs Playwright's bundled Chromium: branded Chrome and Edge removed the
+ * command-line flags that side-load an unpacked extension.
+ *
  * Usage:
- *   node scripts/smoke-bulk-options.mjs
- *   RAINDROP_TOKEN=… node scripts/smoke-bulk-options.mjs
- *   SMOKE_HEADED=1 node scripts/smoke-bulk-options.mjs   # visible window
+ *   npx playwright install chromium        # once
+ *   RAINDROP_TOKEN=… npm run test:smoke-bulk
+ *   SMOKE_HEADED=1 npm run test:smoke-bulk # visible window
  */
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createRequire } from "node:module";
+import { chromium } from "playwright";
 import { loadToken, scriptsRoot } from "./lib/test-harness.mjs";
 
 const EXT_PATH = path.join(scriptsRoot, "src");
 const HEADED = process.env.SMOKE_HEADED === "1" || process.env.SMOKE_HEADED === "true";
-
-async function loadPuppeteer() {
-  const require = createRequire(import.meta.url);
-  try {
-    return require("puppeteer-core");
-  } catch {
-    /* not in project deps */
-  }
-  const { execSync } = await import("node:child_process");
-  const npmPrefix = path.join(scriptsRoot, ".tmp", "smoke-npm");
-  if (!fs.existsSync(path.join(npmPrefix, "node_modules", "puppeteer-core"))) {
-    console.log("Installing puppeteer-core into .tmp/smoke-npm…");
-    // ≥25: Chrome 137+ removed --load-extension; use browser.installExtension.
-    execSync(`npm install --prefix "${npmPrefix}" puppeteer-core@25`, {
-      stdio: "inherit",
-    });
-  }
-  return createRequire(path.join(npmPrefix, "package.json"))("puppeteer-core");
-}
-
-function chromePath() {
-  for (const p of [
-    process.env.CHROME_PATH,
-    "/usr/bin/google-chrome",
-    "/usr/bin/microsoft-edge",
-    "/usr/bin/chromium-browser",
-    "/usr/bin/chromium",
-  ]) {
-    if (p && fs.existsSync(p)) return p;
-  }
-  throw new Error("No Chrome/Edge binary found");
-}
 
 async function main() {
   const token = loadToken();
@@ -62,19 +33,15 @@ async function main() {
     process.exit(1);
   }
 
-  const puppeteer = await loadPuppeteer();
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "ers-bulk-smoke-"));
   console.log(`Profile: ${userDataDir}`);
   console.log(`Extension: ${EXT_PATH}`);
-  // Extension install via BiDi needs a non-headless Chrome in practice.
-  console.log(HEADED ? "Mode: headed" : "Mode: headed (required for installExtension)");
+  console.log(HEADED ? "Mode: headed" : "Mode: headless");
 
-  const browser = await puppeteer.launch({
-    executablePath: chromePath(),
-    headless: false,
-    userDataDir,
-    enableExtensions: true,
-    args: ["--no-first-run", "--no-default-browser-check", "--disable-default-apps"],
+  const context = await chromium.launchPersistentContext(userDataDir, {
+    channel: "chromium",
+    headless: !HEADED,
+    args: [`--disable-extensions-except=${EXT_PATH}`, `--load-extension=${EXT_PATH}`],
   });
 
   const results = [];
@@ -88,18 +55,15 @@ async function main() {
   };
 
   try {
-    const extId = await browser.installExtension(EXT_PATH);
+    let [worker] = context.serviceWorkers();
+    worker ??= await context.waitForEvent("serviceworker", { timeout: 15000 });
+    const extId = new URL(worker.url()).host;
     console.log(`Extension id: ${extId}`);
-    // Wait for service worker
-    await browser.waitForTarget(
-      (t) => t.type() === "service_worker" && t.url().includes(extId),
-      { timeout: 15000 }
-    );
     const optionsUrl = `chrome-extension://${extId}/options/options.html`;
 
-    const page = await browser.newPage();
+    const page = await context.newPage();
     // Stub confirms so automation is not blocked; default Cancel Apply / cancel Import match.
-    await page.evaluateOnNewDocument(() => {
+    await page.addInitScript(() => {
       window.__confirmLog = [];
       window.confirm = (msg) => {
         window.__confirmLog.push(String(msg));
@@ -112,7 +76,7 @@ async function main() {
     });
 
     await page.goto(optionsUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await page.waitForSelector("#matchExisting", { timeout: 10000 });
+    await page.waitForSelector("#matchExisting", { state: "attached", timeout: 10000 });
 
     // --- Controls present ---
     try {
@@ -124,11 +88,11 @@ async function main() {
         backfill: !!document.getElementById("backfill"),
       }));
       assert.ok(ids.match && ids.banner && ids.bannerMatch && ids.bannerContinue && ids.backfill);
-      const repairish = await page.evaluate(() =>
-        [...document.querySelectorAll("button")].some((b) => /repair/i.test(b.id + b.textContent))
+      assert.ok(
+        await page.evaluate(() => !!document.getElementById("repairPairs")),
+        "Manual Sync Repair pairs button"
       );
-      assert.equal(repairish, false);
-      pass("Options shows Match + bulk banner controls; no repair");
+      pass("Options shows Match, Repair pairs and bulk banner controls");
     } catch (e) {
       fail("Options controls", e.message || e);
     }
@@ -177,7 +141,7 @@ async function main() {
     });
     // refreshStatus may not be global — click Status tab / wait for interval
     await page.reload({ waitUntil: "domcontentloaded" });
-    await page.waitForSelector("#bulkQueueBanner", { timeout: 10000 });
+    await page.waitForSelector("#bulkQueueBanner", { state: "attached", timeout: 10000 });
     await new Promise((r) => setTimeout(r, 1500));
 
     try {
@@ -244,10 +208,12 @@ async function main() {
         () => {
           const t = document.getElementById("bulkQueueStatus")?.textContent || "";
           return (
-            /Would pair|already paired|Match failed|rate limit|nothing|Drain resumed|pair/i.test(t) &&
-            !/Downloading Raindrop export/i.test(t)
+            /Would pair|already paired|Match failed|rate limit|nothing|Drain resumed|pair/i.test(
+              t
+            ) && !/Downloading Raindrop export/i.test(t)
           );
         },
+        undefined,
         { timeout: 120000 }
       );
       const matchStatus = await page.evaluate(
@@ -264,29 +230,17 @@ async function main() {
     }
 
     // Power-user Match on Manual Sync tab
-    try {
-      await page.click('a[href="#sync"], [data-tab="sync"], #tab-sync, button[data-tab="sync"]');
-    } catch {
-      /* try hash */
-      await page.goto(`chrome-extension://${extId}/options/options.html#sync`, {
-        waitUntil: "domcontentloaded",
-      });
-    }
-    await new Promise((r) => setTimeout(r, 500));
+    await page.click('[data-tab="sync"]', { timeout: 5000 });
 
     try {
       await page.waitForSelector("#matchExisting", { timeout: 5000 });
-      // Ensure visible
-      await page.evaluate(() => {
-        const btn = document.getElementById("matchExisting");
-        btn?.scrollIntoView();
-      });
       await page.click("#matchExisting");
       await page.waitForFunction(
         () => {
           const t = document.getElementById("matchExistingStatus")?.textContent || "";
           return t && !/Downloading/i.test(t);
         },
+        undefined,
         { timeout: 120000 }
       );
       const st = await page.evaluate(
@@ -323,6 +277,8 @@ async function main() {
         waitUntil: "domcontentloaded",
       });
       await new Promise((r) => setTimeout(r, 800));
+      // The hash does not select a tab; options.js switches on tab clicks.
+      await page.click('[data-tab="sync"]', { timeout: 5000 });
       await page.waitForSelector("#backfill", { timeout: 5000 });
       // Live onCreated may already have queued the seeded bookmarks — that is not Import.
       const pendingBefore = await page.evaluate(async () => {
@@ -340,6 +296,7 @@ async function main() {
           const confirms = window.__confirmLog || [];
           return /cancelled/i.test(t) || confirms.some((m) => /Import to Raindrop/i.test(m));
         },
+        undefined,
         { timeout: 60000 }
       );
       const importStatus = await page.evaluate(
@@ -347,7 +304,9 @@ async function main() {
       );
       const confirms = await page.evaluate(() => window.__confirmLog || []);
       assert.ok(
-        confirms.some((m) => /Import to Raindrop/i.test(m) || /Match from Raindrop export/i.test(m)),
+        confirms.some(
+          (m) => /Import to Raindrop/i.test(m) || /Match from Raindrop export/i.test(m)
+        ),
         `expected bulk gate confirm, got: ${JSON.stringify(confirms).slice(0, 300)}`
       );
       assert.ok(/cancelled/i.test(importStatus), `importStatus=${importStatus}`);
@@ -365,7 +324,7 @@ async function main() {
       fail("Import bulk gate cancel", e.message || e);
     }
   } finally {
-    await browser.close().catch(() => {});
+    await context.close().catch(() => {});
     // Leave profile for debugging if SMOKE_KEEP=1
     if (process.env.SMOKE_KEEP !== "1") {
       fs.rmSync(userDataDir, { recursive: true, force: true });
