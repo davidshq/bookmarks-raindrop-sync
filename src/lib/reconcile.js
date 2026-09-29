@@ -28,6 +28,7 @@ import {
   isListPageDone,
   JOB,
   reconcileIntervalMs,
+  PRESENCE_ONLY_MAX_TRIES,
 } from "./constants.js";
 import {
   getConfig,
@@ -127,7 +128,13 @@ async function reconcileOnce({ force, budget }) {
 
   const state = await getReconcileState();
   const inProgress = isReconcileInProgress(state);
-  const presenceOnly = !force && !inProgress && !!state.presencePending;
+  // A failing export must not stop listing for good: after a few
+  // presence-only wakes the heartbeat lists again (and retries the export).
+  const presenceOnly =
+    !force &&
+    !inProgress &&
+    !!state.presencePending &&
+    (state.presenceOnlyTries || 0) < PRESENCE_ONLY_MAX_TRIES;
   // Heartbeat only: after in-progress continues, honor quiet-time after a
   // completed finish. A pending presence refresh skips cooldown (the last
   // finish did not complete). Queue work is not a hard skip — tick

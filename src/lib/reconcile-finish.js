@@ -146,12 +146,16 @@ export async function finishReconcileCycle({
  */
 export async function finishPendingPresence({ client, budget, force = false, config }) {
   const presence = await finishPresenceAndDeletes({ client, budget, force, config });
-  await markFinish(presence);
+  const tries = (await getReconcileState()).presenceOnlyTries || 0;
+  await markFinish(presence, { presenceOnlyTries: tries + 1 });
   return { enqueued: 0, pages: 0, done: true, presenceOnly: true };
 }
 
-/** Persist cursor reset + completion; completed finishes also run hygiene. */
-async function markFinish(presence) {
+/**
+ * Persist cursor reset + completion; completed finishes also run hygiene.
+ * A listing finish resets presenceOnlyTries; a presence-only one passes its count.
+ */
+async function markFinish(presence, { presenceOnlyTries = 0 } = {}) {
   const now = Date.now();
   const completed = !presence.due || presence.refreshed;
   await setReconcileState({
@@ -161,6 +165,7 @@ async function markFinish(presence) {
     lastRunAt: now,
     lastError: null,
     presencePending: !completed,
+    presenceOnlyTries: completed ? 0 : presenceOnlyTries,
     ...(completed ? { lastSettledAt: now } : {}),
   });
   if (completed) await afterCompletedFinish(presence, now);

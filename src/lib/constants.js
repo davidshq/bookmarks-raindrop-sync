@@ -284,6 +284,12 @@ export const PRESENCE_SHRINK_MIN_ROWS = 50;
 export const EDGE_REMOVED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** Soft max Raindrop list pages (root + outside-root) per reconcile tick. */
 export const MAX_RECONCILE_PAGES_PER_TICK = 15;
+/**
+ * Heartbeat wakes in a row that only retry a due export (presencePending)
+ * before the next heartbeat lists again. Keeps new, moved and renamed
+ * raindrops flowing while exports keep failing.
+ */
+export const PRESENCE_ONLY_MAX_TRIES = 3;
 /** Raindrop system collection for soft-deleted raindrops. */
 export const RAINDROP_TRASH_COLLECTION_ID = -99;
 /**

@@ -921,6 +921,8 @@ export async function getReconcileState() {
      * The next wake refreshes presence and finishes without re-listing.
      */
     presencePending: false,
+    /** Presence-only wakes since the last listing (capped: PRESENCE_ONLY_MAX_TRIES). */
+    presenceOnlyTries: 0,
     lastError: null,
     /**
      * Trash hygiene snapshot (bidirectional discovery debt for safe-to-empty).

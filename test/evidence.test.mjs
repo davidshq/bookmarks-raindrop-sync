@@ -320,3 +320,28 @@ test("a tombstone newer than the snapshot is not pruned (offload after the expor
     "offloaded raindrop not pulled back into Edge"
   );
 });
+
+test("persistent export failure: heartbeat lists again after capped presence-only wakes", async () => {
+  const { eng, mock, root } = await setupEngine();
+  const { PRESENCE_ONLY_MAX_TRIES } = eng.constants;
+  mock.exportRaindropsCsv = async () => {
+    throw new Error("export down");
+  };
+  const heartbeat = async () => {
+    await eng.store.setReconcileState({ lastRunAt: 0 }); // interval elapsed
+    return eng.reconcile.reconcile({ force: false });
+  };
+  await heartbeat();
+  assert.equal((await eng.store.getReconcileState()).presencePending, true);
+
+  mock._seedRich(root._id, { link: "https://e.example/new-while-down", title: "new" });
+  const kinds = [];
+  for (let i = 0; i <= PRESENCE_ONLY_MAX_TRIES; i++) {
+    kinds.push((await heartbeat()).presenceOnly ? "presence" : "list");
+  }
+  assert.deepEqual(kinds, [...Array(PRESENCE_ONLY_MAX_TRIES).fill("presence"), "list"]);
+  assert.ok(
+    (await eng.queue.list()).some((j) => j.kind === "pull-create"),
+    "new raindrop reaches the queue while exports fail"
+  );
+});
