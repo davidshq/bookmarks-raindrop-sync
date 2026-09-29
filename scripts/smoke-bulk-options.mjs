@@ -21,7 +21,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { chromium } from "playwright";
-import { loadToken, REPO_ROOT } from "./lib/token.mjs";
+import { assertTestAccount, loadToken, REPO_ROOT } from "./lib/token.mjs";
 
 const EXT_PATH = path.join(REPO_ROOT, "src");
 const HEADED = process.env.SMOKE_HEADED === "1" || process.env.SMOKE_HEADED === "true";
@@ -45,6 +45,7 @@ async function main() {
     console.error("RAINDROP_TOKEN or .tmp/raindrop_token required for Match plan smoke.");
     process.exit(1);
   }
+  await assertTestAccount(token);
 
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "ers-bulk-smoke-"));
   console.log(`Profile: ${userDataDir}`);

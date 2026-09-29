@@ -44,6 +44,7 @@ import {
   pauseBetweenScenarios,
   waitUntilRaindropListed,
 } from "./lib/live-raindrop-scope.mjs";
+import { assertTestAccount } from "./lib/token.mjs";
 const TOKEN = loadToken();
 
 async function drainWithRetry(client, sync) {
@@ -66,6 +67,7 @@ if (!TOKEN) {
   );
   process.exit(1);
 }
+await assertTestAccount(TOKEN);
 
 async function liveConfig(store, constants) {
   const { POLICY, SYNC_MODE, RAINDROP_FOLDER_MODE } = constants;

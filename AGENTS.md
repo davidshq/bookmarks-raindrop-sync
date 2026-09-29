@@ -21,6 +21,15 @@ be recoverable from the URL (plus path) and must rebind by URL when an id is
 gone, instead of concluding that the user deleted the bookmark. A missing
 counterpart on either side is not evidence of intent to delete.
 
+## Live Raindrop tests use the test account only
+
+Every live API run (integration, smoke, spike, ad-hoc scripts) uses the test
+account token in `.tmp/raindrop_token`; its Raindrop user id is in
+`.tmp/raindrop_test_account_id` (never commit either). Never write to the main
+account; its token in `.tmp/raindrop_main_token` is only a read source for
+`scripts/seed-test-account.mjs`. New live scripts must call
+`assertTestAccount(token)` before their first write.
+
 ## Before any destructive sync change
 
 Take a Raindrop export and a copy of the Bookmarks file first. Incident backups

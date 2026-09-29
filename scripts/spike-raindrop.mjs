@@ -13,21 +13,24 @@
 //   2.3  PUT /raindrop/{id} with only title/link — rich fields preserved
 //
 // Usage:
-//   RAINDROP_TOKEN=xxxxx node scripts/spike-raindrop.mjs [--cleanup]
+//   node scripts/spike-raindrop.mjs [--cleanup]          (RAINDROP_TOKEN or .tmp/raindrop_token)
 //   node scripts/spike-raindrop.mjs <token> [--cleanup]
 //
 // --cleanup deletes everything the spike created when it finishes.
 
 import { RAINDROP_API } from "../src/lib/constants.js";
+import { assertTestAccount, loadToken } from "./lib/token.mjs";
 
 const API = RAINDROP_API;
 
 const args = process.argv.slice(2);
 const cleanup = args.includes("--cleanup");
-const token = process.env.RAINDROP_TOKEN || args.find((a) => !a.startsWith("--"));
+const token = args.find((a) => !a.startsWith("--")) || loadToken();
 
 if (!token) {
-  console.error("No token. Set RAINDROP_TOKEN or pass it as the first argument.");
+  console.error(
+    "No token. Set RAINDROP_TOKEN, add .tmp/raindrop_token, or pass it as the first argument."
+  );
   process.exit(1);
 }
 
@@ -75,6 +78,7 @@ async function main() {
   console.log("== 1.1 Token check (GET /user) ==");
   const { user } = await call("GET", "/user");
   console.log(`  OK: ${user.fullName || user.email || user._id}`);
+  await assertTestAccount(token);
 
   console.log("\n== 1.2 Nested collections to depth 3 ==");
   const root = await createCollection("ERS Spike Root");

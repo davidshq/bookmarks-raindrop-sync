@@ -128,6 +128,18 @@ Mocks never touch your real bookmark tree. Integration uses
 `Favorites bar / test-edge-raindrop-sync / …` in the mock and a live Raindrop
 root `test-edge-raindrop-sync`.
 
+Live scripts (integration, smoke, spike) run only against the dedicated test
+Raindrop account and abort on any other token. `.tmp/raindrop_token` holds the
+test token and `.tmp/raindrop_test_account_id` its Raindrop user id (or set
+`RAINDROP_TOKEN` / `RAINDROP_TEST_ACCOUNT_ID`); the main account token
+lives in `.tmp/raindrop_main_token` and is read only by the seeder. To reload
+the test account with a copy of the main library (test account must be empty):
+
+```bash
+node scripts/seed-test-account.mjs --dry-run   # counts only
+node scripts/seed-test-account.mjs
+```
+
 Bulk / export lane: pure helpers in the logic script; engine pause, Match apply,
 and Import-scope alignment in checklist scenarios **7.5–7.7**; Options banner /
 Match / Import-gate smoke via `test:smoke-bulk` (see
