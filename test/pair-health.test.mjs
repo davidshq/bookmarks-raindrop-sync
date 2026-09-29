@@ -74,3 +74,10 @@ test("without a URL index Raindrop-side URL counts are unknown, not zero", () =>
   assert.equal(none.staleRaindropId, null, "unknown without a snapshot");
   assert.match(formatPairHealth(none), /Snapshot age none/);
 });
+
+test("a pair id reused by another bookmark counts as a stale Edge id", () => {
+  const tree = treeIndexFromList([{ id: "b1", url: "https://unrelated.example/" }]);
+  const records = { 1: makePairRecord("1", { bookmarkId: "b1", url: "https://h.example/live" }) };
+  const h = computePairHealth({ records, treeIndex: tree, snapshot: null, now: 0 });
+  assert.equal(h.staleEdgeId, 1);
+});

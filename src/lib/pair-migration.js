@@ -6,9 +6,10 @@
 //
 //   1. read the Edge tree once and take a presence snapshot (outside the pair
 //      lock, since the lock also guards logging and must not wait on a fetch);
-//   2. under the lock, fill url/title/placement from live nodes, take the URL
-//      from the export for records whose bookmark id is gone, apply the stale
-//      Edge / Raindrop rebind rules, and drop records unresolved on both sides;
+//   2. under the lock, fill each record's URL from the export (else from the
+//      node at its bookmark id), apply the stale Edge / Raindrop rebind rules,
+//      and drop records unresolved on both sides. A bookmark id counts as live
+//      only while its URL matches the record (pair-rebind isPairBookmarkLive);
 //   3. log one summary line and clear `migrationPartial`.
 //
 // If the export cannot be fetched, records keep what the tree gave them,
@@ -19,7 +20,8 @@
 import { getStoredPairs, rewritePairRecords, appendLog } from "./store.js";
 import { ensurePresence, isUsableForUrls } from "./presence.js";
 import { loadTreeIndex } from "./tree-index.js";
-import { rebindPass } from "./pair-rebind.js";
+import { rebindPass, isPairBookmarkLive } from "./pair-rebind.js";
+import * as queue from "./queue.js";
 
 /**
  * Pure resolution step. Records the caller built from v1 (possibly already
@@ -28,19 +30,28 @@ import { rebindPass } from "./pair-rebind.js";
  * @param {import("./tree-index.js").TreeIndex} treeIndex
  * @param {import("./presence.js").PresenceSnapshot|null} snapshot
  * @param {number} [now]
+ * @param {Set<string>|null} [pendingBookmarkIds] ids with a queued upload
  * @returns {{
  *   records: Record<string, import("./store.js").PairRecord>,
  *   kept: number, reboundEdge: number, reboundRaindrop: number, dropped: number,
  * }}
  */
-export function resolveMigratedRecords(records, treeIndex, snapshot, now = Date.now()) {
-  // The pass fills URLs from live nodes and, for dead bookmark ids, from the export.
-  const pass = rebindPass({ records, treeIndex, snapshot, now });
+export function resolveMigratedRecords(
+  records,
+  treeIndex,
+  snapshot,
+  now = Date.now(),
+  pendingBookmarkIds = null
+) {
+  // The pass fills URLs from the export, else from nodes, and rebinds stale ids.
+  const pass = rebindPass({ records, treeIndex, snapshot, pendingBookmarkIds, now });
   const out = pass.records;
   let dropped = 0;
   if (snapshot) {
     for (const [rid, rec] of Object.entries(out)) {
-      const edgeLive = rec.bookmarkId != null && treeIndex.byId.has(String(rec.bookmarkId));
+      const edgeLive =
+        rec.bookmarkId != null &&
+        isPairBookmarkLive(rec, treeIndex.byId.get(String(rec.bookmarkId)), pendingBookmarkIds);
       const rdLive = snapshot.ids.has(rid);
       if (!edgeLive && !rdLive) {
         delete out[rid];
@@ -70,6 +81,7 @@ export async function completePairMigration({ client, budget } = {}) {
   if (!before.migrationPartial) return { pending: false };
 
   const treeIndex = await loadTreeIndex();
+  const pending = await queue.pendingUploadIds();
   let snapshot = null;
   try {
     const got = await ensurePresence({ client, budget, reason: "on-demand" });
@@ -82,7 +94,7 @@ export async function completePairMigration({ client, budget } = {}) {
     if (!stored.migrationPartial) {
       return { records: stored.records, result: null };
     }
-    const out = resolveMigratedRecords(stored.records, treeIndex, snapshot);
+    const out = resolveMigratedRecords(stored.records, treeIndex, snapshot, Date.now(), pending);
     return {
       records: out.records,
       migrationPartial: !snapshot,

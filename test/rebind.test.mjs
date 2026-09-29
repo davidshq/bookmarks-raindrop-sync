@@ -12,6 +12,7 @@ import {
 } from "../src/lib/tree-index.js";
 import { buildSnapshot } from "../src/lib/presence.js";
 import { makePairRecord, pairsView } from "../src/lib/store.js";
+import { resolveMigratedRecords } from "../src/lib/pair-migration.js";
 
 const URL_A = "https://a.example/doc";
 
@@ -284,4 +285,13 @@ test("rebind log lines cap at 20 plus a summary", () => {
   assert.equal(lines.length, 21);
   assert.equal(lines[0], "Rebound: t0 (Edge id changed)");
   assert.match(lines[20], /Rebound 5 more pair\(s\)/);
+});
+
+test("migration drops a pair whose id holds another bookmark and whose raindrop is gone", () => {
+  const tree = treeIndexFromList([{ id: "500", url: "https://unrelated.example/", path: [] }]);
+  const snapshot = buildSnapshot("id,url\n9,https://other.example/\n", { at: 1000 });
+  const records = { 7: record("7", "500", URL_A, { lastSeenRaindropAt: 1 }) };
+  const out = resolveMigratedRecords(records, tree, snapshot, 2000);
+  assert.equal(out.dropped, 1);
+  assert.equal(out.records["7"], undefined);
 });

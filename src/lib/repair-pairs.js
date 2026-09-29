@@ -55,7 +55,7 @@ import {
 } from "./match-existing.js";
 import { adoptExportCsv, buildSnapshot, loadPresence } from "./presence.js";
 import { loadTreeIndex, treeIndexFromList } from "./tree-index.js";
-import { rebindPass } from "./pair-rebind.js";
+import { rebindPass, isPairBookmarkLive } from "./pair-rebind.js";
 import { computePairHealth } from "./pair-health.js";
 
 /**
@@ -101,14 +101,25 @@ const CLEARABLE_TOMBSTONE_REASONS = new Set([
  * @param {{ records?: Record<string, object>, byBookmark?: Record<string, string>, byRaindrop?: Record<string, string> }} pairs
  *   pair view (records) or a legacy id map
  * @param {Record<string, { reason?: string }>} tombstones
+ * @param {{ pendingBookmarkIds?: Set<string>|null }} [opts] ids with a queued upload
  * @returns {Omit<RepairPlan, 'ok'|'error'|'reason'|'queuedDeletes'>}
  */
-export function planRepairFromInputs(csvText, edge, pairs, tombstones) {
+export function planRepairFromInputs(
+  csvText,
+  edge,
+  pairs,
+  tombstones,
+  { pendingBookmarkIds = null } = {}
+) {
   const treeIndex = Array.isArray(edge) ? treeIndexFromList(edge) : edge;
   const snapshot = buildSnapshot(csvText);
   const { raindropCount } = indexExportByUrl(csvText);
   const liveRids = snapshot.ids;
-  const liveBids = new Set(treeIndex.byId.keys());
+  // A bookmark id is alive for its record only while the URL still matches
+  // (a renumber can hand the id to another bookmark).
+  const edgeAliveFor = (rec) =>
+    rec?.bookmarkId != null &&
+    isPairBookmarkLive(rec, treeIndex.byId.get(String(rec.bookmarkId)), pendingBookmarkIds);
 
   const records = pairs.records ?? recordsFromLegacy(pairs);
   const pairsSnapshot = {};
@@ -117,7 +128,7 @@ export function planRepairFromInputs(csvText, edge, pairs, tombstones) {
   }
   let keptLive = 0;
   for (const [rid, rec] of Object.entries(records)) {
-    if (liveBids.has(String(rec.bookmarkId)) && liveRids.has(rid)) keptLive++;
+    if (edgeAliveFor(rec) && liveRids.has(rid)) keptLive++;
   }
   // Reverse-only legacy entries (byRaindrop without a byBookmark twin) are
   // dropped by rebuilding from byBookmark; count them as both-dead noise.
@@ -125,14 +136,14 @@ export function planRepairFromInputs(csvText, edge, pairs, tombstones) {
     ? 0
     : Object.keys(pairs.byRaindrop || {}).filter((rid) => !records[String(rid)]).length;
 
-  const pass = rebindPass({ records, treeIndex, snapshot });
+  const pass = rebindPass({ records, treeIndex, snapshot, pendingBookmarkIds });
   const kept = {};
   const keptRecords = {};
   let pruneBothDead = reverseOnly;
   let pruneEdgeDead = 0;
   let pruneRaindropDead = 0;
   for (const [rid, rec] of Object.entries(pass.records)) {
-    const edgeAlive = rec.bookmarkId != null && liveBids.has(String(rec.bookmarkId));
+    const edgeAlive = edgeAliveFor(rec);
     const rdAlive = liveRids.has(rid);
     if (edgeAlive && rdAlive) {
       kept[String(rec.bookmarkId)] = rid;
@@ -151,8 +162,9 @@ export function planRepairFromInputs(csvText, edge, pairs, tombstones) {
   const keptView = { byBookmark: { ...kept }, byRaindrop: {} };
   for (const [bid, rid] of Object.entries(kept)) keptView.byRaindrop[rid] = bid;
   const edgeBookmarks = inScopeBookmarks(treeIndex);
+  // Every kept pair's bookmark is alive, so a kept reverse link is a live holder.
   const match = planMatchFromExport(csvText, edgeBookmarks, keptView, {
-    liveBookmarkIds: treeIndex.byId.keys(),
+    liveBookmarkIds: Object.keys(kept),
   });
   const urlByBid = new Map(edgeBookmarks.map((b) => [b.id, b.url]));
 
@@ -193,7 +205,9 @@ export async function planRepairPairs() {
   const treeIndex = await loadTreeIndex();
   const pairs = await getPairs();
   const tombstones = await getTombstones();
-  const plan = planRepairFromInputs(csv, treeIndex, pairs, tombstones);
+  const plan = planRepairFromInputs(csv, treeIndex, pairs, tombstones, {
+    pendingBookmarkIds: await queue.pendingUploadIds(),
+  });
   if (plan.raindropCount === 0 && plan.pairsBefore > 0) {
     await appendLog("warn", "Repair pairs refused: Raindrop export returned no items.");
     return emptyRepairPlan({

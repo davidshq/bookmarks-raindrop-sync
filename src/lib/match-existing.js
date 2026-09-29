@@ -7,6 +7,8 @@ import { RaindropClient, RateLimitError, AuthError } from "./raindrop.js";
 import { handleClientError } from "./client-errors.js";
 import { adoptExportCsv } from "./presence.js";
 import { loadTreeIndex } from "./tree-index.js";
+import { isPairBookmarkLive, livePairBookmarkIds } from "./pair-rebind.js";
+import { pendingUploadIds } from "./queue.js";
 import {
   getConfig,
   getPairs,
@@ -234,8 +236,9 @@ export async function planMatchExisting() {
   await adoptExportCsv(fetched.csv, fetched.exportStartedAt);
   const treeIndex = await loadTreeIndex();
   const pairs = await getPairs();
+  // Paired ids whose bookmark still has the pair's URL, in scope or not.
   return planMatchFromExport(fetched.csv, inScopeBookmarks(treeIndex), pairs, {
-    liveBookmarkIds: treeIndex.byId.keys(),
+    liveBookmarkIds: livePairBookmarkIds(pairs.records, treeIndex, await pendingUploadIds()),
   });
 }
 
@@ -253,10 +256,11 @@ export async function applyMatchExisting(matched, { liveRaindropIds } = {}) {
     return { ok: false, paired: 0, error: "Invalid match list" };
   }
 
+  const treeIndex = await loadTreeIndex();
+  const pending = await pendingUploadIds();
   const nodes = new Map(
-    [...(await loadTreeIndex()).byId.values()].map((e) => [e.id, { node: e, segments: e.path }])
+    [...treeIndex.byId.values()].map((e) => [e.id, { node: e, segments: e.path }])
   );
-  const liveIds = new Set(nodes.keys());
   const liveRids = liveRaindropIds ? new Set([...liveRaindropIds].map(String)) : undefined;
 
   let paired = 0;
@@ -264,7 +268,7 @@ export async function applyMatchExisting(matched, { liveRaindropIds } = {}) {
     if (!row?.bookmarkId || !row?.raindropId) continue;
     const bid = String(row.bookmarkId);
     const rid = String(row.raindropId);
-    if (!liveIds.has(bid)) continue;
+    if (!nodes.has(bid)) continue;
     const pairs = await getPairs();
     // Changed since the plan (e.g. an upload paired it to a new raindrop that
     // is not in the export snapshot) → skip; the new pair wins.
@@ -273,7 +277,14 @@ export async function applyMatchExisting(matched, { liveRaindropIds } = {}) {
     if ((now != null ? String(now) : null) !== (planned != null ? String(planned) : null)) {
       continue;
     }
-    if (classifyPairClaim(bid, rid, pairs, liveIds, liveRids) !== "match") continue;
+    // Only the raindrop's current holder matters: live while its URL matches.
+    const holder = pairs.byRaindrop?.[rid];
+    const liveHolder =
+      holder != null &&
+      isPairBookmarkLive(pairs.records[rid], treeIndex.byId.get(String(holder)), pending)
+        ? new Set([String(holder)])
+        : new Set();
+    if (classifyPairClaim(bid, rid, pairs, liveHolder, liveRids) !== "match") continue;
     const { node, segments } = nodes.get(bid);
     await recordSynced(bid, rid, {
       url: node.url,

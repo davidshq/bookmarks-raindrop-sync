@@ -7,6 +7,7 @@
 // bookmarks in the synced scope.
 
 import { primaryUrlKey } from "./url-match.js";
+import { isPairBookmarkLive } from "./pair-rebind.js";
 
 /**
  * @typedef {{
@@ -43,7 +44,9 @@ export function computePairHealth({ records, treeIndex, snapshot = null, now = D
   let staleEdgeId = 0;
   let staleRaindropId = 0;
   for (const [rid, rec] of Object.entries(records || {})) {
-    const edgeLive = rec?.bookmarkId != null && treeIndex.byId.has(String(rec.bookmarkId));
+    const edgeLive =
+      rec?.bookmarkId != null &&
+      isPairBookmarkLive(rec, treeIndex.byId.get(String(rec.bookmarkId)));
     const rdLive = snapshot ? snapshot.ids.has(rid) : null;
     if (!edgeLive) staleEdgeId++;
     if (rdLive === false) staleRaindropId++;

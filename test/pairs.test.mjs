@@ -235,3 +235,35 @@ test("Match existing treats a pair held by an excluded-folder bookmark as a conf
   );
   assert.equal(plan.conflicts, 1);
 });
+
+test("Match existing claims a raindrop whose pair id now holds another bookmark", async () => {
+  const { eng, mock, root } = await setupEngine();
+  const url = "https://e.example/reused";
+  const item = mock._seedRich(root._id, { link: url, title: "reused" });
+  // Renumber: the pair's old id now belongs to an unrelated bookmark.
+  const reused = await edgeBookmark("1", "unrelated", "https://unrelated.example/");
+  await eng.store.recordSynced(reused.id, String(item._id), { url });
+  const bm = await edgeBookmark("1", "reused", url);
+
+  const plan = await eng.matchExisting.planMatchExisting();
+  assert.equal(plan.conflicts, 0, "reused id is not a live holder");
+  assert.equal(plan.matched.find((m) => m.bookmarkId === bm.id)?.raindropId, String(item._id));
+  await eng.matchExisting.applyMatchExisting(plan.matched);
+  assert.equal(await eng.store.getRaindropId(bm.id), String(item._id));
+});
+
+test("Repair prunes a pair whose id now holds another bookmark", async () => {
+  const { eng } = await setupEngine();
+  const plan = eng.repairPairs.planRepairFromInputs(
+    "id,url\n7,https://b.example/page\n",
+    [{ id: "12", url: "https://unrelated.example/" }],
+    {
+      records: {
+        7: eng.store.makePairRecord("7", { bookmarkId: "12", url: "https://b.example/page" }),
+      },
+    },
+    {}
+  );
+  assert.equal(plan.keptPairs["12"], undefined, "reused id is not kept");
+  assert.equal(plan.pruneEdgeDead, 1);
+});
