@@ -193,8 +193,10 @@ async function scenarioEdgeDelete(eng, client, rootId) {
   );
   await getRaindropInRoot(client, rootId, rid);
 
+  // onRemoved as Chromium fires it: the removed node rides along in removeInfo.
+  const [node] = await chrome.bookmarks.get(bm.id);
   await chrome.bookmarks.remove(bm.id);
-  await sync.handleBookmarkRemoved(bm.id, { parentId: folder.id });
+  await sync.handleBookmarkRemoved(bm.id, { parentId: folder.id, node });
   await drainWithRetry(client, sync);
 
   assert.equal(await raindropAlive(client, rid), false, "raindrop removed from library");
