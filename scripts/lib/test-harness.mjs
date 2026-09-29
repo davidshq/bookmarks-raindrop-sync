@@ -1,18 +1,19 @@
 /**
  * Shared in-memory Edge / chrome.storage mocks for verify scripts.
- * Used by test/*.test.mjs, verify-integration.mjs, and smoke-bulk-options.mjs
- * (token/ROOT only for smoke) — keep mocks here, not duplicated.
+ * Used by test/*.test.mjs and verify-integration.mjs — keep mocks here, not
+ * duplicated. Importing this module installs the chrome.* mocks; scripts that
+ * only need the token import ./token.mjs instead.
  * Never touches the real Edge bookmark tree.
  */
 
 import path from "node:path";
-import fs from "node:fs";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
+import { REPO_ROOT, loadToken } from "./token.mjs";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+export { loadToken };
 
 /** @deprecated use scriptsRoot — kept for importers that expect repoRoot */
-export const ROOT = path.resolve(__dirname, "../..");
+export const ROOT = REPO_ROOT;
 export const scriptsRoot = ROOT;
 
 /** In-memory extension storage and bookmark tree (disposable). */
@@ -37,22 +38,39 @@ export function bmNode(partial) {
   return node;
 }
 
-/** Seed Favorites bar + Other favorites only (Edge-shaped titles). */
-export function seedEdge() {
+/** Reset the tree to the invisible root "0" plus the two top-level folders. */
+function seedRoots(barTitle, otherTitle) {
   bookmarks.clear();
   bmSeq = 100;
   bmNode({ id: "0", title: "", parentId: undefined, children: undefined });
-  bmNode({ id: "1", title: "Favorites bar", parentId: "0" });
-  bmNode({ id: "2", title: "Other favorites", parentId: "0" });
+  bmNode({ id: "1", title: barTitle, parentId: "0" });
+  bmNode({ id: "2", title: otherTitle, parentId: "0" });
+}
+
+/** Seed Favorites bar + Other favorites only (Edge-shaped titles). */
+export function seedEdge() {
+  seedRoots("Favorites bar", "Other favorites");
 }
 
 /** Seed Bookmarks bar + Other bookmarks (Chrome-shaped titles). */
 export function seedChrome() {
-  bookmarks.clear();
-  bmSeq = 100;
-  bmNode({ id: "0", title: "", parentId: undefined, children: undefined });
-  bmNode({ id: "1", title: "Bookmarks bar", parentId: "0" });
-  bmNode({ id: "2", title: "Other bookmarks", parentId: "0" });
+  seedRoots("Bookmarks bar", "Other bookmarks");
+}
+
+/** Stored node or the same error chrome.bookmarks throws for a missing id. */
+function mustGet(id) {
+  const n = bookmarks.get(String(id));
+  if (!n) throw new Error("Bookmark not found");
+  return n;
+}
+
+/** Copy of a node; folders get their children attached recursively. */
+function withChildren(node) {
+  const copy = { ...node };
+  if (!copy.url) {
+    copy.children = [...bookmarks.values()].filter((c) => c.parentId === copy.id).map(withChildren);
+  }
+  return copy;
 }
 
 /**
@@ -99,9 +117,7 @@ export function installChromeMocks() {
     },
     bookmarks: {
       async get(id) {
-        const n = bookmarks.get(String(id));
-        if (!n) throw new Error("Bookmark not found");
-        return [{ ...n }];
+        return [{ ...mustGet(id) }];
       },
       async getChildren(id) {
         return [...bookmarks.values()]
@@ -109,41 +125,16 @@ export function installChromeMocks() {
           .map((n) => ({ ...n }));
       },
       async getTree() {
-        const root = { ...bookmarks.get("0"), children: [] };
-        const attach = (parent) => {
-          parent.children = [...bookmarks.values()]
-            .filter((n) => n.parentId === parent.id)
-            .map((n) => {
-              const copy = { ...n };
-              if (!copy.url) attach(copy);
-              return copy;
-            });
-        };
-        attach(root);
-        return [root];
+        return [withChildren(bookmarks.get("0"))];
       },
       async getSubTree(id) {
-        const n = bookmarks.get(String(id));
-        if (!n) throw new Error("Bookmark not found");
-        const copy = { ...n };
-        const attach = (parent) => {
-          parent.children = [...bookmarks.values()]
-            .filter((c) => c.parentId === parent.id)
-            .map((c) => {
-              const child = { ...c };
-              if (!child.url) attach(child);
-              return child;
-            });
-        };
-        if (!copy.url) attach(copy);
-        return [copy];
+        return [withChildren(mustGet(id))];
       },
       async create({ parentId, title, url }) {
         return bmNode({ parentId: String(parentId), title, url });
       },
       async remove(id) {
-        const n = bookmarks.get(String(id));
-        if (!n) throw new Error("Bookmark not found");
+        const n = mustGet(id);
         if (!n.url) {
           const kids = [...bookmarks.values()].filter((c) => c.parentId === String(id));
           if (kids.length) throw new Error("Folder not empty");
@@ -151,15 +142,13 @@ export function installChromeMocks() {
         bookmarks.delete(String(id));
       },
       async update(id, patch) {
-        const n = bookmarks.get(String(id));
-        if (!n) throw new Error("Bookmark not found");
+        const n = mustGet(id);
         if (patch.title !== undefined) n.title = patch.title;
         if (patch.url !== undefined) n.url = patch.url;
         return { ...n };
       },
       async move(id, destination) {
-        const n = bookmarks.get(String(id));
-        if (!n) throw new Error("Bookmark not found");
+        const n = mustGet(id);
         if (destination.parentId !== undefined) n.parentId = String(destination.parentId);
         if (destination.index !== undefined) n.index = destination.index;
         return { ...n };
@@ -172,13 +161,6 @@ export function installChromeMocks() {
       onMessage: { addListener() {} },
     },
   };
-}
-
-export function loadToken() {
-  if (process.env.RAINDROP_TOKEN) return process.env.RAINDROP_TOKEN.trim();
-  const p = path.join(ROOT, ".tmp", "raindrop_token");
-  if (fs.existsSync(p)) return fs.readFileSync(p, "utf8").trim();
-  return "";
 }
 
 export async function importEngine() {
@@ -197,7 +179,13 @@ export async function importEngine() {
   const reconcileFinish = await import(`${base}/reconcile-finish.js`);
   const repairPairs = await import(`${base}/repair-pairs.js`);
   const drainMod = await import(`${base}/drain.js`);
+  const presence = await import(`${base}/presence.js`);
+  const pairRebind = await import(`${base}/pair-rebind.js`);
+  const treeIndex = await import(`${base}/tree-index.js`);
   return {
+    presence,
+    pairRebind,
+    treeIndex,
     repairPairs,
     drainMod,
     constants,
@@ -260,6 +248,37 @@ export function edgeUrls() {
 
 export function findEdgeByUrl(url) {
   return [...bookmarks.values()].find((n) => n.url === url);
+}
+
+/** First folder (no url) with this title, anywhere in the mock tree. */
+export function findEdgeFolder(title) {
+  return [...bookmarks.values()].find((n) => !n.url && n.title === title);
+}
+
+/**
+ * runPullNow `send` stub that answers the popup/options messages from the
+ * engine in this process. `onReconcile` runs before each RECONCILE_NOW pass.
+ *
+ * @param {Awaited<ReturnType<typeof importEngine>>} eng
+ * @param {{ onReconcile?: () => void }} [opts]
+ */
+export function pullNowSend(eng, { onReconcile } = {}) {
+  const { MSG } = eng.constants;
+  return async (msg) => {
+    if (msg.type === MSG.GET_STATUS) {
+      return { ok: true, status: await eng.store.getStatus() };
+    }
+    if (msg.type === MSG.RECONCILE_NOW) {
+      onReconcile?.();
+      try {
+        const result = await eng.sync.reconcileNow();
+        return { ok: true, ...result };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    }
+    return { ok: false, error: `unexpected message ${msg.type}` };
+  };
 }
 
 /** Create a folder inside the integration container (Favorites bar / test-edge-raindrop-sync). */

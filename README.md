@@ -118,7 +118,6 @@ npm run test:watch
 ```
 
 ```bash
-RAINDROP_TOKEN=xxxxx npm run test:live
 RAINDROP_TOKEN=xxxxx npm run test:integration
 # Options bulk UI (Playwright Chromium, throwaway profile, headless;
 # run `npx playwright install chromium` once):

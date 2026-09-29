@@ -21,10 +21,23 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { chromium } from "playwright";
-import { loadToken, scriptsRoot } from "./lib/test-harness.mjs";
+import { loadToken, REPO_ROOT } from "./lib/token.mjs";
 
-const EXT_PATH = path.join(scriptsRoot, "src");
+const EXT_PATH = path.join(REPO_ROOT, "src");
 const HEADED = process.env.SMOKE_HEADED === "1" || process.env.SMOKE_HEADED === "true";
+
+/** Give the Options page time to refresh after a click or reload. */
+function settle(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Pending jobs in extension storage, read from the page. */
+function queueLength(page) {
+  return page.evaluate(async () => {
+    const { queue } = await chrome.storage.local.get("queue");
+    return (queue || []).length;
+  });
+}
 
 async function main() {
   const token = loadToken();
@@ -53,6 +66,14 @@ async function main() {
     results.push({ name, ok: false, err: String(err) });
     console.error(`  ✖ ${name}: ${err}`);
   };
+  /** Run one check; `fn` may return the pass label (defaults to `name`). */
+  const step = async (name, fn) => {
+    try {
+      pass((await fn()) ?? name);
+    } catch (e) {
+      fail(name, e.message || e);
+    }
+  };
 
   try {
     let [worker] = context.serviceWorkers();
@@ -79,7 +100,7 @@ async function main() {
     await page.waitForSelector("#matchExisting", { state: "attached", timeout: 10000 });
 
     // --- Controls present ---
-    try {
+    await step("Options controls", async () => {
       const ids = await page.evaluate(() => ({
         match: !!document.getElementById("matchExisting"),
         banner: !!document.getElementById("bulkQueueBanner"),
@@ -92,21 +113,17 @@ async function main() {
         await page.evaluate(() => !!document.getElementById("repairPairs")),
         "Manual Sync Repair pairs button"
       );
-      pass("Options shows Match, Repair pairs and bulk banner controls");
-    } catch (e) {
-      fail("Options controls", e.message || e);
-    }
+      return "Options shows Match, Repair pairs and bulk banner controls";
+    });
 
     // Banner hidden when idle
-    try {
+    await step("Banner hidden idle", async () => {
       const hidden = await page.evaluate(() =>
         document.getElementById("bulkQueueBanner").classList.contains("hidden")
       );
       assert.equal(hidden, true);
-      pass("Bulk banner hidden when idle");
-    } catch (e) {
-      fail("Banner hidden idle", e.message || e);
-    }
+      return "Bulk banner hidden when idle";
+    });
 
     // Seed config + deep queue so GET_STATUS keeps needs_choice
     await page.evaluate(
@@ -142,9 +159,9 @@ async function main() {
     // refreshStatus may not be global — click Status tab / wait for interval
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.waitForSelector("#bulkQueueBanner", { state: "attached", timeout: 10000 });
-    await new Promise((r) => setTimeout(r, 1500));
+    await settle(1500);
 
-    try {
+    await step("Banner visible", async () => {
       const banner = await page.evaluate(() => {
         const el = document.getElementById("bulkQueueBanner");
         const text = document.getElementById("bulkQueueBannerText")?.textContent || "";
@@ -155,15 +172,13 @@ async function main() {
       });
       assert.equal(banner.hidden, false, "banner should be visible");
       assert.ok(/Match/i.test(banner.text) || /queue/i.test(banner.text), banner.text);
-      pass("Bulk banner visible with deep queue / needs_choice");
-    } catch (e) {
-      fail("Banner visible", e.message || e);
-    }
+      return "Bulk banner visible with deep queue / needs_choice";
+    });
 
     // Continue drip
-    try {
+    await step("Continue drip", async () => {
       await page.click("#bulkQueueContinue");
-      await new Promise((r) => setTimeout(r, 1500));
+      await settle(1500);
       const after = await page.evaluate(async () => {
         const el = document.getElementById("bulkQueueBanner");
         const st = document.getElementById("bulkQueueStatus")?.textContent || "";
@@ -179,10 +194,8 @@ async function main() {
       assert.ok(after.bulkPrompt?.snoozedBelow != null, "snoozed after continue");
       // Banner should hide after refresh (pending still high but snoozed)
       assert.equal(after.hidden, true, "banner hidden after continue drip");
-      pass("Continue drip snoozes prompt and hides banner");
-    } catch (e) {
-      fail("Continue drip", e.message || e);
-    }
+      return "Continue drip snoozes prompt and hides banner";
+    });
 
     // Re-arm for Match-from-banner path: clear snooze, set needs_choice again
     await page.evaluate(async () => {
@@ -194,9 +207,9 @@ async function main() {
       });
     });
     await page.reload({ waitUntil: "domcontentloaded" });
-    await new Promise((r) => setTimeout(r, 1500));
+    await settle(1500);
 
-    try {
+    await step("Match from banner", async () => {
       const visible = await page.evaluate(
         () => !document.getElementById("bulkQueueBanner").classList.contains("hidden")
       );
@@ -224,15 +237,13 @@ async function main() {
         matchStatus
       );
       // Fresh profile: expect 0 pairs → nothing path may resume drain
-      pass(`Match from banner ran (status: ${matchStatus.slice(0, 120)}…)`);
-    } catch (e) {
-      fail("Match from banner", e.message || e);
-    }
+      return `Match from banner ran (status: ${matchStatus.slice(0, 120)}…)`;
+    });
 
     // Power-user Match on Manual Sync tab
     await page.click('[data-tab="sync"]', { timeout: 5000 });
 
-    try {
+    await step("Manual Match existing", async () => {
       await page.waitForSelector("#matchExisting", { timeout: 5000 });
       await page.click("#matchExisting");
       await page.waitForFunction(
@@ -247,13 +258,11 @@ async function main() {
         () => document.getElementById("matchExistingStatus")?.textContent || ""
       );
       assert.ok(/Would pair|already paired|failed|rate limit|pair/i.test(st), st);
-      pass(`Manual Sync Match existing ran (status: ${st.slice(0, 120)}…)`);
-    } catch (e) {
-      fail("Manual Match existing", e.message || e);
-    }
+      return `Manual Sync Match existing ran (status: ${st.slice(0, 120)}…)`;
+    });
 
     // Import cancel path: seed enough unpaired bookmarks to trigger bulk gate
-    try {
+    await step("Import bulk gate cancel", async () => {
       await page.evaluate(async () => {
         // Create 210 bookmarks under Favorites bar so unpaired ≥ 200
         const bar = (await chrome.bookmarks.getTree())[0].children.find(
@@ -276,15 +285,12 @@ async function main() {
       await page.goto(`chrome-extension://${extId}/options/options.html#sync`, {
         waitUntil: "domcontentloaded",
       });
-      await new Promise((r) => setTimeout(r, 800));
+      await settle(800);
       // The hash does not select a tab; options.js switches on tab clicks.
       await page.click('[data-tab="sync"]', { timeout: 5000 });
       await page.waitForSelector("#backfill", { timeout: 5000 });
       // Live onCreated may already have queued the seeded bookmarks — that is not Import.
-      const pendingBefore = await page.evaluate(async () => {
-        const { queue } = await chrome.storage.local.get("queue");
-        return (queue || []).length;
-      });
+      const pendingBefore = await queueLength(page);
       await page.evaluate(() => {
         window.__confirmLog = [];
       });
@@ -310,19 +316,14 @@ async function main() {
         `expected bulk gate confirm, got: ${JSON.stringify(confirms).slice(0, 300)}`
       );
       assert.ok(/cancelled/i.test(importStatus), `importStatus=${importStatus}`);
-      const pendingAfter = await page.evaluate(async () => {
-        const { queue } = await chrome.storage.local.get("queue");
-        return (queue || []).length;
-      });
+      const pendingAfter = await queueLength(page);
       assert.equal(
         pendingAfter,
         pendingBefore,
         `Import cancel must not grow the queue (${pendingBefore} → ${pendingAfter})`
       );
-      pass("Import bulk gate prompted and cancel did not enqueue mass Import");
-    } catch (e) {
-      fail("Import bulk gate cancel", e.message || e);
-    }
+      return "Import bulk gate prompted and cancel did not enqueue mass Import";
+    });
   } finally {
     await context.close().catch(() => {});
     // Leave profile for debugging if SMOKE_KEEP=1

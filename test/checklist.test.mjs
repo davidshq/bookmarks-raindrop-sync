@@ -8,83 +8,33 @@
  *
  * SAFETY:
  * - Edge bookmarks are 100% in-memory mocks — never touches the real Edge tree.
- * - Raindrop calls (if RAINDROP_TOKEN / .tmp/raindrop_token is set) only create and
- *   delete items under a disposable root collection named ERS-Verify-<timestamp>.
- * - Without a token, Raindrop is also mocked in-memory (still validates engine logic).
+ * - Raindrop is always the in-memory fake (test/helpers/fake-raindrop.mjs); live
+ *   API coverage lives in scripts/verify-integration.mjs.
  * - Scenarios only create/assert ERS-Verify-* collections and example.com/ers-* URLs.
  *
  * Usage:
  *   npm test                  (vitest, fully mocked)
- *   RAINDROP_TOKEN=… npm run test:live   (ERS_LIVE=1 vitest run test/checklist.test.mjs)
  */
 
 import assert from "node:assert/strict";
-import { test, afterAll } from "vitest";
-import { RAINDROP_API } from "../src/lib/constants.js";
+import { test } from "vitest";
+import { POLICY, SYNC_MODE, RAINDROP_FOLDER_MODE, JOB } from "../src/lib/constants.js";
 import { runPullNow } from "../src/lib/pull-now.js";
 import {
-  loadToken,
   importEngine,
   resetAll,
-  patchClient,
   edgeUrls,
   findEdgeByUrl,
-  bookmarks as harnessBookmarks,
+  findEdgeFolder,
+  pullNowSend,
   bookmarks,
   storage,
 } from "../scripts/lib/test-harness.mjs";
-import { makeMockRaindrop } from "./helpers/fake-raindrop.mjs";
+import { setupEngine, configureMock } from "./helpers/engine.mjs";
 
-const LIVE = process.env.ERS_LIVE === "1";
-const TOKEN = loadToken();
-const USE_LIVE = LIVE && !!TOKEN;
-
-/* -------------------------------------------------------------------------- */
-/* Optional live Raindrop client scoped to ERS-Verify-* only                  */
-/* -------------------------------------------------------------------------- */
-
-const API = RAINDROP_API;
-const createdLive = { collections: [], raindrops: [] };
-let verifyRootTitle = "";
-
-async function liveCall(method, pathName, body) {
-  const res = await fetch(`${API}${pathName}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${TOKEN}`,
-      ...(body ? { "Content-Type": "application/json" } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
-  let json;
-  try {
-    json = text ? JSON.parse(text) : {};
-  } catch {
-    json = { raw: text };
-  }
-  if (!res.ok) throw new Error(`${method} ${pathName} -> ${res.status}: ${text.slice(0, 200)}`);
-  return json;
-}
-
-async function liveCleanup() {
-  for (const id of [...createdLive.raindrops].reverse()) {
-    try {
-      await liveCall("DELETE", `/raindrop/${id}`);
-      await liveCall("DELETE", `/raindrop/${id}`); // permanent from trash
-    } catch {
-      /* ignore */
-    }
-  }
-  for (const id of [...createdLive.collections].reverse()) {
-    try {
-      await liveCall("DELETE", `/collection/${id}`);
-    } catch {
-      /* ignore */
-    }
-  }
-  createdLive.raindrops = [];
-  createdLive.collections = [];
+/** Fresh engine + empty fake Raindrop (no bystander); sync root only on request. */
+function setup(config, { seedRoot = false } = {}) {
+  return setupEngine({ config, seedRoot, bystander: false });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -93,19 +43,7 @@ async function liveCleanup() {
 
 async function scenario62_oneWay() {
   console.log("\n== 6.2 One-way mode unchanged ==");
-  const eng = await importEngine();
-  const { POLICY, SYNC_MODE, JOB } = eng.constants;
-  await resetAll(eng.store);
-
-  const mock = makeMockRaindrop();
-  patchClient(eng.raindropMod, mock);
-
-  await eng.store.setConfig({
-    token: "mock",
-    rootName: "ERS-Verify-OneWay",
-    syncMode: SYNC_MODE.ONE_WAY,
-    defaultPolicy: POLICY.SYNC_KEEP,
-  });
+  const { eng, mock } = await setup({ rootName: "ERS-Verify-OneWay", syncMode: SYNC_MODE.ONE_WAY });
 
   // Create disposable Edge bookmark under Favorites bar
   const folder = await chrome.bookmarks.create({
@@ -149,26 +87,11 @@ async function scenario62_oneWay() {
   // Reconcile should be a no-op
   const r = await eng.reconcile.reconcile();
   assert.equal(r.enqueued, 0);
-  console.log("  ✔ one-way upload works; no pull; no delete propagation");
 }
 
 async function scenario63_bidirectional() {
   console.log("\n== 6.3 Bidirectional pull + deletes + tombstone ==");
-  const eng = await importEngine();
-  const { POLICY, SYNC_MODE } = eng.constants;
-  await resetAll(eng.store);
-  const mock = makeMockRaindrop();
-  patchClient(eng.raindropMod, mock);
-
-  const rootName = "ERS-Verify-Bi";
-  await eng.store.setConfig({
-    token: "mock",
-    rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
-  });
-
-  const root = await mock.createCollection(rootName, null);
+  const { eng, mock, root } = await setup({ rootName: "ERS-Verify-Bi" }, { seedRoot: true });
   const bar = await mock.createCollection("Bookmarks bar", root._id);
   const folder = await mock.createCollection("ERS-Verify-Folder", bar._id);
 
@@ -215,7 +138,6 @@ async function scenario63_bidirectional() {
   );
 
   // Stale pull-create already on the queue must also honor the tombstone
-  const { JOB } = eng.constants;
   await eng.queue.enqueueJob({
     id: `pull-${remote._id}-stale`,
     kind: JOB.PULL_CREATE,
@@ -332,31 +254,19 @@ async function scenario63_bidirectional() {
   assert.equal(mock._raindrops.has(Number(ridB)), false, "child B raindrop deleted");
   assert.equal(await eng.store.hasTombstone(String(ridA)), true, "child A tombstoned");
   assert.equal(await eng.store.hasTombstone(String(ridB)), true, "child B tombstoned");
-
-  console.log("  ✔ pull, deletes, tombstone, stale/pending pull guards, folder delete");
 }
 
 async function scenario64_syncAndDelete() {
   console.log("\n== 6.4 sync-and-delete in bidirectional leaves Raindrop + tags ==");
-  const eng = await importEngine();
-  const { POLICY, SYNC_MODE } = eng.constants;
-  await resetAll(eng.store);
-  const mock = makeMockRaindrop();
-  patchClient(eng.raindropMod, mock);
-
   const rootName = "ERS-Verify-SAD";
   // Global default must stay keep-both in bidirectional; offload via folder override.
-  await eng.store.setConfig({
-    token: "mock",
-    rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_DELETE, // coerced to SYNC_KEEP on write
-  });
+  // seedRoot pre-creates the root so the upload path works.
+  const { eng, mock } = await setup(
+    { rootName, defaultPolicy: POLICY.SYNC_DELETE }, // coerced to SYNC_KEEP on write
+    { seedRoot: true }
+  );
   const cfg = await eng.store.getConfig();
   assert.equal(cfg.defaultPolicy, POLICY.SYNC_KEEP, "bidirectional coerces global keep-both");
-
-  // Pre-create root so upload path works
-  await mock.createCollection(rootName, null);
 
   const folder = await chrome.bookmarks.create({
     parentId: "1",
@@ -430,25 +340,12 @@ async function scenario64_syncAndDelete() {
   await eng.store.healStoredConfig();
   const healed = await chrome.storage.local.get("config");
   assert.equal(healed.config.defaultPolicy, POLICY.SYNC_KEEP, "startup heal persists keep-both");
-
-  console.log("  ✔ Edge gone via folder offload; Raindrop kept; pair cleared + tombstone");
 }
 
 async function scenario65_exclude() {
   console.log("\n== 6.5 exclude blocks upload, ingest, delete propagation ==");
-  const eng = await importEngine();
-  const { POLICY, SYNC_MODE } = eng.constants;
-  await resetAll(eng.store);
-  const mock = makeMockRaindrop();
-  patchClient(eng.raindropMod, mock);
-
   const rootName = "ERS-Verify-Ex";
-  await eng.store.setConfig({
-    token: "mock",
-    rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
-  });
+  const { eng, mock } = await setup({ rootName });
 
   const excl = await chrome.bookmarks.create({
     parentId: "1",
@@ -549,22 +446,16 @@ async function scenario65_exclude() {
     true,
     "tombstone recorded for absent raindrop"
   );
-
-  console.log(
-    "  ✔ exclude blocks upload + ingest; Edge↔Raindrop deletes do not propagate either way"
-  );
 }
 
 async function scenario66_raindropFolderModes() {
   console.log("\n== 6.6 Raindrop → Edge folder modes ==");
-  const eng = await importEngine();
-  const { POLICY, SYNC_MODE, RAINDROP_FOLDER_MODE, JOB } = eng.constants;
-  await resetAll(eng.store);
-  const mock = makeMockRaindrop();
-  patchClient(eng.raindropMod, mock);
-
   const rootName = "ERS-Verify-Folders";
-  const root = await mock.createCollection(rootName, null);
+  // --- existing-only: missing path → skip (no catch-all, no folders) ---
+  const { eng, mock, root } = await setup(
+    { rootName, raindropFolderMode: RAINDROP_FOLDER_MODE.EXISTING_ONLY },
+    { seedRoot: true }
+  );
   const research = await mock.createCollection("Research", root._id);
   const papers = await mock.createCollection("Papers", research._id);
   // Empty sibling collection — only mirror-all should create it in Edge.
@@ -575,14 +466,6 @@ async function scenario66_raindropFolderModes() {
     title: "ERS papers",
   });
 
-  // --- existing-only: missing path → skip (no catch-all, no folders) ---
-  await eng.store.setConfig({
-    token: "mock",
-    rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
-    raindropFolderMode: RAINDROP_FOLDER_MODE.EXISTING_ONLY,
-  });
   await eng.reconcile.reconcile();
   await eng.sync.drain();
   assert.equal(
@@ -590,16 +473,8 @@ async function scenario66_raindropFolderModes() {
     false,
     "existing-only skips missing path"
   );
-  assert.equal(
-    [...bookmarks.values()].some((n) => !n.url && n.title === "Research"),
-    false,
-    "existing-only creates no Research folder"
-  );
-  assert.equal(
-    [...bookmarks.values()].some((n) => !n.url && n.title === "_Unfiled"),
-    false,
-    "no catch-all / _Unfiled"
-  );
+  assert.equal(!!findEdgeFolder("Research"), false, "existing-only creates no Research folder");
+  assert.equal(!!findEdgeFolder("_Unfiled"), false, "no catch-all / _Unfiled");
 
   // Stale pull job still dropped at drain without creating folders
   await eng.queue.enqueueJob({
@@ -619,11 +494,8 @@ async function scenario66_raindropFolderModes() {
 
   // --- create-as-needed: folders + bookmark; empty Inbox still absent ---
   await resetAll(eng.store);
-  await eng.store.setConfig({
-    token: "mock",
+  await configureMock(eng, {
     rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
     raindropFolderMode: RAINDROP_FOLDER_MODE.CREATE_AS_NEEDED,
   });
   // Mock Raindrop tree from earlier in this scenario is reused.
@@ -631,50 +503,26 @@ async function scenario66_raindropFolderModes() {
   await eng.sync.drain();
   const pulled = findEdgeByUrl("https://example.com/ers-verify-papers");
   assert.ok(pulled, "create-as-needed pulled bookmark");
-  assert.ok(
-    [...bookmarks.values()].some((n) => !n.url && n.title === "Research"),
-    "create-as-needed created Research"
-  );
-  assert.ok(
-    [...bookmarks.values()].some((n) => !n.url && n.title === "Papers"),
-    "create-as-needed created Papers"
-  );
-  assert.equal(
-    [...bookmarks.values()].some((n) => !n.url && n.title === "Inbox"),
-    false,
-    "create-as-needed does not mirror empty Inbox"
-  );
+  assert.ok(findEdgeFolder("Research"), "create-as-needed created Research");
+  assert.ok(findEdgeFolder("Papers"), "create-as-needed created Papers");
+  assert.equal(!!findEdgeFolder("Inbox"), false, "create-as-needed does not mirror empty Inbox");
 
   // --- mirror-all: empty Inbox folder appears ---
   await resetAll(eng.store);
-  await eng.store.setConfig({
-    token: "mock",
+  await configureMock(eng, {
     rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
     raindropFolderMode: RAINDROP_FOLDER_MODE.MIRROR_ALL,
   });
   await eng.reconcile.reconcile();
   await eng.sync.drain();
   assert.ok(findEdgeByUrl("https://example.com/ers-verify-papers"), "mirror-all still pulls");
-  assert.ok(
-    [...bookmarks.values()].some((n) => !n.url && n.title === "Inbox"),
-    "mirror-all ensures empty Inbox folder"
-  );
-
-  console.log("  ✔ existing-only skip; create-as-needed; mirror-all empty folders");
+  assert.ok(findEdgeFolder("Inbox"), "mirror-all ensures empty Inbox folder");
 }
 
 async function scenario67_raindropFolderAllowlist() {
   console.log("\n== 6.7 Raindrop folder allowlist ==");
-  const eng = await importEngine();
-  const { POLICY, SYNC_MODE, RAINDROP_FOLDER_MODE } = eng.constants;
-  await resetAll(eng.store);
-  const mock = makeMockRaindrop();
-  patchClient(eng.raindropMod, mock);
-
   const rootName = "ERS-Verify-Allowlist";
-  const root = await mock.createCollection(rootName, null);
+  const { eng, mock, root } = await setup({ rootName }, { seedRoot: true });
   const research = await mock.createCollection("Research", root._id);
   const papers = await mock.createCollection("Papers", research._id);
   await mock.createCollection("Inbox", research._id);
@@ -690,11 +538,8 @@ async function scenario67_raindropFolderAllowlist() {
   });
 
   // Non-empty allowlist: only Research (covers Papers); Other skipped; Inbox ensured.
-  await eng.store.setConfig({
-    token: "mock",
+  await configureMock(eng, {
     rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
     raindropFolderMode: RAINDROP_FOLDER_MODE.CREATE_AS_NEEDED,
     raindropFolderAllowlist: {
       [String(research._id)]: { path: "Research" },
@@ -712,15 +557,8 @@ async function scenario67_raindropFolderAllowlist() {
     false,
     "unchecked Raindrop-only skipped"
   );
-  assert.ok(
-    [...bookmarks.values()].some((n) => !n.url && n.title === "Inbox"),
-    "allowlist ensures empty Inbox under Research"
-  );
-  assert.equal(
-    [...bookmarks.values()].some((n) => !n.url && n.title === "Other"),
-    false,
-    "unchecked empty Other not created"
-  );
+  assert.ok(findEdgeFolder("Inbox"), "allowlist ensures empty Inbox under Research");
+  assert.equal(!!findEdgeFolder("Other"), false, "unchecked empty Other not created");
 
   // Edge-existing bypass: put Other on Edge, keep allowlist without Other.
   await resetAll(eng.store);
@@ -733,11 +571,8 @@ async function scenario67_raindropFolderAllowlist() {
     title: "Other",
   });
 
-  await eng.store.setConfig({
-    token: "mock",
+  await configureMock(eng, {
     rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
     raindropFolderMode: RAINDROP_FOLDER_MODE.EXISTING_ONLY,
     raindropFolderAllowlist: {
       [String(research._id)]: { path: "Research" },
@@ -756,11 +591,8 @@ async function scenario67_raindropFolderAllowlist() {
 
   // Empty allowlist preserves create-as-needed (Other path missing → still creates).
   await resetAll(eng.store);
-  await eng.store.setConfig({
-    token: "mock",
+  await configureMock(eng, {
     rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
     raindropFolderMode: RAINDROP_FOLDER_MODE.CREATE_AS_NEEDED,
     raindropFolderAllowlist: {},
   });
@@ -784,11 +616,8 @@ async function scenario67_raindropFolderAllowlist() {
   });
   await chrome.bookmarks.create({ parentId: researchEdge.id, title: "Papers" });
   await chrome.bookmarks.create({ parentId: researchEdge.id, title: "Inbox" });
-  await eng.store.setConfig({
-    token: "mock",
+  await configureMock(eng, {
     rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
     raindropFolderMode: RAINDROP_FOLDER_MODE.CREATE_AS_NEEDED,
     raindropFolderAllowlist: {
       [String(research._id)]: { path: "Research" },
@@ -812,17 +641,13 @@ async function scenario67_raindropFolderAllowlist() {
 
   // Legacy pull job without collectionId still resolves under allowlist.
   await resetAll(eng.store);
-  await eng.store.setConfig({
-    token: "mock",
+  await configureMock(eng, {
     rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
     raindropFolderMode: RAINDROP_FOLDER_MODE.EXISTING_ONLY,
     raindropFolderAllowlist: {
       [String(research._id)]: { path: "Research" },
     },
   });
-  const { JOB } = eng.constants;
   await eng.queue.enqueueJob({
     id: "pull-legacy-no-col",
     kind: JOB.PULL_CREATE,
@@ -845,11 +670,8 @@ async function scenario67_raindropFolderAllowlist() {
     link: "https://example.com/ers-verify-indie-outside",
     title: "ERS indie outside",
   });
-  await eng.store.setConfig({
-    token: "mock",
+  await configureMock(eng, {
     rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
     raindropFolderMode: RAINDROP_FOLDER_MODE.EXISTING_ONLY,
     raindropFolderAllowlist: {
       [String(indie._id)]: { path: "IndieOutside" },
@@ -859,7 +681,7 @@ async function scenario67_raindropFolderAllowlist() {
   await eng.sync.drain();
   const pulledIndie = findEdgeByUrl("https://example.com/ers-verify-indie-outside");
   assert.ok(pulledIndie, "outside-root allowlisted pulls");
-  const indieFolder = [...bookmarks.values()].find((n) => !n.url && n.title === "IndieOutside");
+  const indieFolder = findEdgeFolder("IndieOutside");
   assert.ok(indieFolder, "outside-root IndieOutside folder created");
   const raindropContainer = bookmarks.get(String(indieFolder.parentId));
   assert.equal(
@@ -913,39 +735,22 @@ async function scenario67_raindropFolderAllowlist() {
   );
   assert.equal(
     (await eng.queue.list()).some(
-      (j) =>
-        j.kind === eng.constants.JOB.DELETE_EDGE && String(j.raindropId) === String(indieItem._id)
+      (j) => j.kind === JOB.DELETE_EDGE && String(j.raindropId) === String(indieItem._id)
     ),
     false,
     "cleared-allowlist outside-root alive is not a delete candidate"
-  );
-
-  console.log(
-    "  ✔ allowlist skip/allow/empty-folder/Edge-bypass/empty-preserves-mode/prune/legacy/outside-root/upload-roundtrip/clear/present"
   );
 }
 
 async function scenario68_rateLimitBudget() {
   console.log("\n== 6.8 Rate-limit gate + export presence (no per-id GETs) ==");
-  const eng = await importEngine();
-  const { POLICY, SYNC_MODE, JOB } = eng.constants;
-  await resetAll(eng.store);
-
-  const mock = makeMockRaindrop();
+  const { eng, mock } = await setup({ rootName: "ERS-Verify-Rate" });
   let getRaindropCalls = 0;
   const origGet = mock.getRaindrop.bind(mock);
   mock.getRaindrop = async (id) => {
     getRaindropCalls++;
     return origGet(id);
   };
-  patchClient(eng.raindropMod, mock);
-
-  await eng.store.setConfig({
-    token: "mock",
-    rootName: "ERS-Verify-Rate",
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
-  });
 
   // Global pause must skip reconcile/drain API work.
   await eng.store.noteRateLimitedUntil(Date.now() + 60_000);
@@ -1238,36 +1043,17 @@ async function scenario68_rateLimitBudget() {
     typeof manual.rateLimitedUntil === "number" && manual.rateLimitedUntil > Date.now(),
     "reconcileNow exposes rateLimitedUntil for UI wait-and-resume"
   );
-
-  console.log(
-    "  ✔ global gate, one-export presence, skip reasons, completed cooldown, " +
-      "presence-only finish, ordered share, empty-budget gate, reentrancy busy, " +
-      "tick prefer-drain+list, reconcileNow gate"
-  );
 }
 
 async function scenario68b_trashFastPath() {
   console.log("\n== 6.8b Trash listing soft-delete fast path ==");
-  const eng = await importEngine();
-  const { POLICY, SYNC_MODE, JOB } = eng.constants;
-  await resetAll(eng.store);
-
-  const mock = makeMockRaindrop();
+  const { eng, mock, root } = await setup({ rootName: "ERS-Verify-Trash" }, { seedRoot: true });
   let getRaindropCalls = 0;
   const origGet = mock.getRaindrop.bind(mock);
   mock.getRaindrop = async (id) => {
     getRaindropCalls++;
     return origGet(id);
   };
-  patchClient(eng.raindropMod, mock);
-
-  await eng.store.setConfig({
-    token: "mock",
-    rootName: "ERS-Verify-Trash",
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
-  });
-  const root = await mock.createCollection("ERS-Verify-Trash", null);
 
   // Unrelated live raindrop: the library never empties (an empty export while
   // pairs exist is incomplete by design).
@@ -1335,35 +1121,21 @@ async function scenario68b_trashFastPath() {
   assert.equal(hygiene.trashPairedPending, 0, "enrolled paired trash clears discovery debt");
   const { deriveTrashSafeState } = await import("../src/lib/trash-hygiene.js");
   assert.equal(deriveTrashSafeState(hygiene), "safe", "complete clear ⇒ safe to empty");
-
-  console.log("  ✔ paired trash → delete-edge; unpaired ignored; snapshot absence for hard delete");
 }
 
 async function scenario68e_trashSafeStatus() {
   console.log("\n== 6.8e Trash-safe Status snapshot + Check Trash ==");
-  const eng = await importEngine();
-  const { POLICY, SYNC_MODE, JOB } = eng.constants;
   const { deriveTrashSafeState } = await import("../src/lib/trash-hygiene.js");
-  await resetAll(eng.store);
-
-  const mock = makeMockRaindrop();
-  patchClient(eng.raindropMod, mock);
-
-  await eng.store.setConfig({
-    token: "mock",
+  const { eng, mock } = await setup({
     rootName: "ERS-Verify-TrashSafe",
     syncMode: SYNC_MODE.ONE_WAY,
-    defaultPolicy: POLICY.SYNC_KEEP,
   });
   const oneWay = await eng.sync.checkTrashNow();
   assert.equal(oneWay.ok, false, "Check Trash blocked in one-way");
   assert.equal(oneWay.reason, "one_way");
 
-  await eng.store.setConfig({
-    token: "mock",
+  await configureMock(eng, {
     rootName: "ERS-Verify-TrashSafe",
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
   });
   const root = await mock.createCollection("ERS-Verify-TrashSafe", null);
   mock._seedRich(root._id, { link: "https://example.com/ers-trash-safe-other", title: "other" });
@@ -1426,29 +1198,11 @@ async function scenario68e_trashSafeStatus() {
   assert.equal(preserved.trashHygieneAt, 42, "zero-budget peek keeps prior at");
   assert.equal(preserved.trashScanComplete, true, "zero-budget peek keeps complete");
   assert.equal(deriveTrashSafeState(preserved), "safe");
-
-  console.log(
-    "  ✔ unknown → Check Trash safe; partial/waiting; one-way blocked; no zero-budget stomp"
-  );
 }
 
 async function scenario68c_outOfScopeAlivesStayPresent() {
   console.log("\n== 6.8c Out-of-scope alive pairs are present in the export snapshot ==");
-  const eng = await importEngine();
-  const { POLICY, SYNC_MODE, JOB } = eng.constants;
-  await resetAll(eng.store);
-
-  const mock = makeMockRaindrop();
-  patchClient(eng.raindropMod, mock);
-
-  const rootName = "ERS-Verify-Park";
-  await eng.store.setConfig({
-    token: "mock",
-    rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
-  });
-  await mock.createCollection(rootName, null);
+  const { eng, mock } = await setup({ rootName: "ERS-Verify-Park" }, { seedRoot: true });
   const outside = await mock.createCollection("ParkOutside", null);
   const item = mock._seedRich(outside._id, {
     link: "https://example.com/ers-park-outside",
@@ -1483,8 +1237,6 @@ async function scenario68c_outOfScopeAlivesStayPresent() {
     "Trash signal enqueues delete-edge for an out-of-scope pair"
   );
   assert.equal(mock._calls.getRaindrop, 0, "still no per-id GETs");
-
-  console.log("  ✔ out-of-scope alive present; no GETs; Trash still deletes");
 }
 
 /**
@@ -1494,25 +1246,11 @@ async function scenario68c_outOfScopeAlivesStayPresent() {
  */
 async function scenario68d_pullNowWaitAndResume() {
   console.log("\n== 6.8d Pull now waits out rate limit and resumes ==");
-  const eng = await importEngine();
-  const { POLICY, SYNC_MODE, JOB, MSG } = eng.constants;
-  await resetAll(eng.store);
-
-  const mock = makeMockRaindrop();
-  patchClient(eng.raindropMod, mock);
-
   const rootName = "ERS-Verify-PullWait";
   const resumeUrl = "https://example.com/ers-pull-wait-resume";
   const doneUrl = "https://example.com/ers-pull-wait-done";
 
-  await eng.store.setConfig({
-    token: "mock",
-    rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
-  });
-
-  const root = await mock.createCollection(rootName, null);
+  const { eng, mock, root } = await setup({ rootName }, { seedRoot: true });
   const bar = await mock.createCollection("Bookmarks bar", root._id);
   const folder = await mock.createCollection("ERS-Verify-PullWait-Folder", bar._id);
   const remote = mock._seedRich(folder._id, {
@@ -1523,28 +1261,12 @@ async function scenario68d_pullNowWaitAndResume() {
   // First Pull now pass hits the global pause; sleepFn clears only our pause.
   await eng.store.noteRateLimitedUntil(Date.now() + 5_000);
   let slept = 0;
-  const pulled = await runPullNow(
-    async (msg) => {
-      if (msg.type === MSG.GET_STATUS) {
-        return { ok: true, status: await eng.store.getStatus() };
-      }
-      if (msg.type === MSG.RECONCILE_NOW) {
-        try {
-          const result = await eng.sync.reconcileNow();
-          return { ok: true, ...result };
-        } catch (err) {
-          return { ok: false, error: err.message };
-        }
-      }
-      return { ok: false, error: `unexpected message ${msg.type}` };
+  const pulled = await runPullNow(pullNowSend(eng), {
+    sleepFn: async () => {
+      slept++;
+      await eng.store.clearRateLimit();
     },
-    {
-      sleepFn: async () => {
-        slept++;
-        await eng.store.clearRateLimit();
-      },
-    }
-  );
+  });
 
   assert.equal(slept, 1, "Pull now waited out the rate-limit pause once");
   assert.match(pulled.text, /Pull finished/);
@@ -1570,16 +1292,7 @@ async function scenario68d_pullNowWaitAndResume() {
 
   // Done under pause: listing finishes while rateLimitedUntil is armed — must
   // keep done (not rewrite as skipped rate_limited) and skip drain.
-  await resetAll(eng.store);
-  const mockDone = makeMockRaindrop();
-  patchClient(eng.raindropMod, mockDone);
-  await eng.store.setConfig({
-    token: "mock",
-    rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
-  });
-  const rootDone = await mockDone.createCollection(rootName, null);
+  const { mock: mockDone, root: rootDone } = await setup({ rootName }, { seedRoot: true });
   const barDone = await mockDone.createCollection("Bookmarks bar", rootDone._id);
   const folderDone = await mockDone.createCollection("ERS-Verify-PullWait-Done", barDone._id);
   mockDone._seedRich(folderDone._id, {
@@ -1611,25 +1324,11 @@ async function scenario68d_pullNowWaitAndResume() {
     ),
     "pull-create for the test URL stayed queued when drain was skipped"
   );
-
-  console.log("  ✔ Pull now wait-and-resume + done-under-pause preserves finish");
 }
 
 async function scenario69_bookmarkMoves() {
   console.log("\n== 6.9 Edge bookmark moves update Raindrop placement ==");
-  const eng = await importEngine();
-  const { POLICY, SYNC_MODE, JOB } = eng.constants;
-  await resetAll(eng.store);
-  const mock = makeMockRaindrop();
-  patchClient(eng.raindropMod, mock);
-
-  const rootName = "ERS-Verify-Moves";
-  await eng.store.setConfig({
-    token: "mock",
-    rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
-  });
+  const { eng, mock } = await setup({ rootName: "ERS-Verify-Moves" });
 
   const srcFolder = await chrome.bookmarks.create({
     parentId: "1",
@@ -1923,28 +1622,11 @@ async function scenario69_bookmarkMoves() {
   assert.equal(mock._raindrops.size, sizeBeforeConflict, "conflict move does not fork");
   assert.equal(await eng.store.getRaindropId(conflictBm.id), null, "conflict mover stays unpaired");
   assert.equal(await eng.store.getRaindropId(ownerBm.id), String(ownerRid), "owner pair retained");
-
-  console.log(
-    "  ✔ move update, reorder no-op, folder fan-out, exclude, offload, 404 recreate, URL rebind"
-  );
 }
 
 async function scenario70_onChangedAndFolderRename() {
   console.log("\n== 7.0 onChanged title/URL + folder rename ==");
-  const eng = await importEngine();
-  const { POLICY, SYNC_MODE, JOB } = eng.constants;
-  await resetAll(eng.store);
-
-  const mock = makeMockRaindrop();
-  patchClient(eng.raindropMod, mock);
-  const rootName = "ERS-Verify-Change";
-
-  await eng.store.setConfig({
-    token: "mock",
-    rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
-  });
+  const { eng, mock } = await setup({ rootName: "ERS-Verify-Change" });
 
   const folder = await chrome.bookmarks.create({
     parentId: "1",
@@ -2259,29 +1941,11 @@ async function scenario70_onChangedAndFolderRename() {
     1,
     "single new-titled collection after retry"
   );
-
-  console.log(
-    "  ✔ title/URL update, exclude skip, folder rename, unmapped/exclude no-op, rename-before-upload, rename-defer abort"
-  );
 }
 
 async function scenario71_tombstonePruneAndPullUpdate() {
   console.log("\n== 6.11 Tombstone prune + Raindrop→Edge pull-update/folder rename ==");
-  const eng = await importEngine();
-  const { POLICY, SYNC_MODE, JOB } = eng.constants;
-  await resetAll(eng.store);
-  const mock = makeMockRaindrop();
-  patchClient(eng.raindropMod, mock);
-
-  const rootName = "ERS-Verify-PrunePull";
-  await eng.store.setConfig({
-    token: "mock",
-    rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
-  });
-
-  const root = await mock.createCollection(rootName, null);
+  const { eng, mock, root } = await setup({ rootName: "ERS-Verify-PrunePull" }, { seedRoot: true });
   const bar = await mock.createCollection("Bookmarks bar", root._id);
   const folder = await mock.createCollection("ERS-Prune-Folder", bar._id);
 
@@ -2355,7 +2019,6 @@ async function scenario71_tombstonePruneAndPullUpdate() {
   assert.equal(mock._raindrops.size, beforeSize, "suppressed change does not create duplicate");
 
   // --- existing-only: Raindrop move to missing path → title OK, no folder create ---
-  const { RAINDROP_FOLDER_MODE } = eng.constants;
   await eng.store.setConfig({
     ...(await eng.store.getConfig()),
     raindropFolderMode: RAINDROP_FOLDER_MODE.EXISTING_ONLY,
@@ -2375,7 +2038,7 @@ async function scenario71_tombstonePruneAndPullUpdate() {
     "parent unchanged when dest folders missing"
   );
   assert.equal(
-    [...bookmarks.values()].some((n) => !n.url && n.title === "ERS-Missing-Dest"),
+    !!findEdgeFolder("ERS-Missing-Dest"),
     false,
     "existing-only did not create missing dest folder on pull-update"
   );
@@ -2436,9 +2099,7 @@ async function scenario71_tombstonePruneAndPullUpdate() {
   });
   await eng.reconcile.reconcile({ force: true });
   await eng.sync.drain();
-  const pullOnlyEdge = [...bookmarks.values()].find(
-    (n) => !n.url && n.title === "ERS-PullOnly-Old"
-  );
+  const pullOnlyEdge = findEdgeFolder("ERS-PullOnly-Old");
   assert.ok(pullOnlyEdge, "pull-created Edge folder exists");
   assert.ok(
     (await eng.store.getFolderCollectionId(pullOnlyEdge.id)) != null,
@@ -2489,15 +2150,12 @@ async function scenario71_tombstonePruneAndPullUpdate() {
     1,
     "in-place rename — no duplicate Healed folder"
   );
-
-  console.log("  ✔ tombstone prune; Raindrop→Edge title/URL/move/folder rename; change suppress");
 }
 
 async function scenario72_deadLetterAndStorage() {
   console.log("\n== 7.2 Dead-letter + storage usage ==");
-  const eng = await importEngine();
+  const { eng, mock } = await setup({ token: "t", rootName: "Edge" });
   const { MAX_JOB_ATTEMPTS } = eng.constants;
-  await resetAll(eng.store);
 
   // Storage usage reports via getBytesInUse mock.
   const usage = await eng.store.getStorageUsage();
@@ -2506,21 +2164,13 @@ async function scenario72_deadLetterAndStorage() {
 
   // Exhaust retries on a poison upload (bookmark missing → process removes; use
   // a job that throws: delete-raindrop with a client that always fails).
-  const mock = makeMockRaindrop();
   mock.deleteRaindrop = async () => {
     throw new Error("poison-delete");
   };
-  patchClient(eng.raindropMod, mock);
-  await eng.store.setConfig({
-    token: "t",
-    syncMode: eng.constants.SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: eng.constants.POLICY.SYNC_KEEP,
-    rootName: "Edge",
-  });
 
   await eng.queue.enqueueJob({
     id: "dr-999",
-    kind: eng.constants.JOB.DELETE_RAINDROP,
+    kind: JOB.DELETE_RAINDROP,
     raindropId: "999",
     url: "https://example.com/ers-poison-999", // onRemoved payload evidence
   });
@@ -2547,7 +2197,7 @@ async function scenario72_deadLetterAndStorage() {
   await eng.queue.clear();
   await eng.queue.enqueueJob({
     id: "dr-998",
-    kind: eng.constants.JOB.DELETE_RAINDROP,
+    kind: JOB.DELETE_RAINDROP,
     raindropId: "998",
     url: "https://example.com/ers-poison-998", // onRemoved payload evidence
   });
@@ -2559,8 +2209,6 @@ async function scenario72_deadLetterAndStorage() {
   await eng.queue.clearDeadLetter();
   assert.equal(await eng.queue.deadLetterSize(), 0);
   assert.equal(await eng.queue.size(), 0, "clear does not re-enqueue");
-
-  console.log("  ✔ dead-letter after max attempts; retry/clear; storage usage");
 }
 
 async function scenario73_coalesceActivityLog() {
@@ -2607,73 +2255,14 @@ async function scenario73_coalesceActivityLog() {
   assert.equal(log[0].at, repeats - 1);
   assert.equal(log[0].ats[0], repeats - LOG_ATS_LIMIT);
   assert.equal(log[0].ats[LOG_ATS_LIMIT - 1], repeats - 1);
-
-  console.log("  ✔ consecutive identical lines coalesce; cap drops oldest times");
-}
-
-async function optionalLiveSmoke() {
-  if (!USE_LIVE) {
-    console.log(
-      "\n== Live Raindrop smoke skipped (npm run test:live with RAINDROP_TOKEN for API check) =="
-    );
-    return;
-  }
-  console.log("\n== Live Raindrop smoke (ERS-Verify-* only) ==");
-  verifyRootTitle = `ERS-Verify-${Date.now()}`;
-  try {
-    const root = await liveCall("POST", "/collection", { title: verifyRootTitle });
-    createdLive.collections.push(root.item._id);
-    const child = await liveCall("POST", "/collection", {
-      title: "ERS-Verify-Child",
-      parent: { $id: root.item._id },
-    });
-    createdLive.collections.push(child.item._id);
-
-    const created = await liveCall("POST", "/raindrop", {
-      link: "https://example.com/ers-verify-live",
-      title: "ERS-Verify-Live",
-      collection: { $id: child.item._id },
-      tags: ["ers-verify"],
-      note: "dispose-me",
-    });
-    createdLive.raindrops.push(created.item._id);
-
-    const listed = await liveCall(
-      "GET",
-      `/raindrops/${root.item._id}?nested=true&perpage=50&page=0`
-    );
-    assert.ok(
-      (listed.items || []).some((i) => i._id === created.item._id),
-      "nested list"
-    );
-
-    await liveCall("PUT", `/raindrop/${created.item._id}`, { title: "ERS-Verify-Live-Renamed" });
-    const after = await liveCall("GET", `/raindrop/${created.item._id}`);
-    assert.ok(after.item.tags?.includes("ers-verify"), "tags preserved on partial PUT");
-    assert.equal(after.item.note, "dispose-me", "note preserved");
-
-    await liveCall("DELETE", `/raindrop/${created.item._id}`);
-    createdLive.raindrops = createdLive.raindrops.filter((id) => id !== created.item._id);
-    console.log("  ✔ live create/list/partial-update/delete on disposable collection only");
-  } finally {
-    await liveCleanup();
-    console.log("  ✔ live cleanup complete");
-  }
 }
 
 async function scenario74_offloadResumeAndCreateSuppress() {
   console.log("\n== 7.4 offload resume + create suppression by bookmark id ==");
   const eng = await importEngine();
-  const { POLICY, SYNC_MODE } = eng.constants;
   const live = await import("../src/lib/live-handlers.js");
   await resetAll(eng.store);
-
-  await eng.store.setConfig({
-    token: "mock",
-    rootName: "Edge",
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
-  });
+  await configureMock(eng, { rootName: "Edge" });
 
   const bm = await chrome.bookmarks.create({
     parentId: "1",
@@ -2725,26 +2314,14 @@ async function scenario74_offloadResumeAndCreateSuppress() {
     title: second.title,
   });
   assert.equal(await eng.queue.size(), 0, "durable suppress is by bookmark id");
-
-  console.log("  ✔ offload resume tombstone; same-URL create still queues");
 }
 
 async function scenario74b_crashSafeCreates() {
   console.log("\n== 7.4b crash-safe upload + pull-create reclaim ==");
-  const eng = await importEngine();
-  const { POLICY, SYNC_MODE, JOB } = eng.constants;
-  await resetAll(eng.store);
-  const mock = makeMockRaindrop();
-  patchClient(eng.raindropMod, mock);
-
-  const rootName = "ERS-Verify-CrashCreate";
-  await eng.store.setConfig({
-    token: "mock",
-    rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
-  });
-  const root = await mock.createCollection(rootName, null);
+  const { eng, mock, root } = await setup(
+    { rootName: "ERS-Verify-CrashCreate" },
+    { seedRoot: true }
+  );
   const bar = await mock.createCollection("Bookmarks bar", root._id);
 
   // Upload: Raindrop create succeeded, pair never written, intent left on job.
@@ -2778,7 +2355,7 @@ async function scenario74b_crashSafeCreates() {
     title: "crash pull",
     url: pullUrl,
   });
-  const edgeCountBefore = [...bookmarks.values()].filter((n) => n.url).length;
+  const edgeCountBefore = edgeUrls().length;
   await eng.queue.enqueueJob({
     id: `pull-${pullRid}`,
     kind: JOB.PULL_CREATE,
@@ -2791,7 +2368,7 @@ async function scenario74b_crashSafeCreates() {
     pullCreateAttemptedAt: Date.now(),
   });
   await eng.sync.drain();
-  const edgeCountAfter = [...bookmarks.values()].filter((n) => n.url).length;
+  const edgeCountAfter = edgeUrls().length;
   assert.equal(edgeCountAfter, edgeCountBefore, "pull reclaim creates no Edge bookmark");
   assert.equal(
     await eng.store.getBookmarkIdForRaindrop(pullRid),
@@ -2812,27 +2389,14 @@ async function scenario74b_crashSafeCreates() {
   await eng.sync.drain();
   assert.equal(mock._calls.createRaindrop, createsBeforeFresh + 1, "first create still POSTs");
   assert.ok(await eng.store.getRaindropId(fresh.id), "fresh create pairs");
-
-  console.log("  ✔ createAttemptedAt / pullCreateAttemptedAt reclaim; fresh create still works");
 }
 
 async function scenario75_bulkDrainPauseAndResume() {
   console.log("\n== 7.5 Queue bulk prompt pauses drain + tick reconcile ==");
-  const eng = await importEngine();
-  const { POLICY, SYNC_MODE, QUEUE_BULK_PENDING_THRESHOLD, BULK_DRAIN_PAUSED_LOG } = eng.constants;
+  const { eng, mock } = await setup({ rootName: "ERS-Verify-BulkPause" }, { seedRoot: true });
+  const { QUEUE_BULK_PENDING_THRESHOLD, BULK_DRAIN_PAUSED_LOG } = eng.constants;
   const { getBulkPrompt, snoozeBulkPrompt, BULK_PROMPT_NEEDS_CHOICE, BULK_PROMPT_IDLE } =
     eng.queueBulkPrompt;
-  await resetAll(eng.store);
-  const mock = makeMockRaindrop();
-  patchClient(eng.raindropMod, mock);
-
-  await eng.store.setConfig({
-    token: "mock",
-    rootName: "ERS-Verify-BulkPause",
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
-  });
-  await mock.createCollection("ERS-Verify-BulkPause", null);
 
   const bm = await chrome.bookmarks.create({
     parentId: "1",
@@ -2916,27 +2480,15 @@ async function scenario75_bulkDrainPauseAndResume() {
   await eng.sync.drain();
   assert.equal(mock._raindrops.size, 1, "after continue drip, upload proceeds");
   assert.ok(await eng.store.hasSynced(bm.id), "real bookmark paired after resume");
-
-  console.log("  ✔ arm / pause drain+tick / coalesce log / continue drip resumes");
 }
 
 async function scenario76_applyMatchExistingAndImportSkip() {
   console.log("\n== 7.6 Match apply records pairs; Import skips matched ==");
-  const eng = await importEngine();
-  const { POLICY, SYNC_MODE, KEY } = eng.constants;
+  const { eng, mock } = await setup({ rootName: "ERS-Verify-MatchApply" });
+  const { KEY } = eng.constants;
   const { applyMatchExisting } = eng.matchExisting;
   const { resolveBulkPromptAfterMatch, BULK_PROMPT_NEEDS_CHOICE, BULK_PROMPT_IDLE, getBulkPrompt } =
     eng.queueBulkPrompt;
-  await resetAll(eng.store);
-  const mock = makeMockRaindrop();
-  patchClient(eng.raindropMod, mock);
-
-  await eng.store.setConfig({
-    token: "mock",
-    rootName: "ERS-Verify-MatchApply",
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
-  });
 
   const matchedBm = await chrome.bookmarks.create({
     parentId: "1",
@@ -3026,24 +2578,12 @@ async function scenario76_applyMatchExistingAndImportSkip() {
     "Match resume clears stale bulk_pause skip"
   );
   assert.ok(afterMatch.snoozedBelow != null);
-
-  console.log("  ✔ apply pairs only; Import skip; resolveBulkPromptAfterMatch snoozes");
 }
 
 async function scenario78_deleteCircuitBreaker() {
   console.log("\n== 7.8 Delete circuit breaker holds deletes past the rolling limit ==");
-  const eng = await importEngine();
-  const { POLICY, SYNC_MODE, JOB, MSG, DELETE_BREAKER_MIN } = eng.constants;
-  void MSG;
-  await resetAll(eng.store);
-  const mock = makeMockRaindrop();
-  patchClient(eng.raindropMod, mock);
-  await eng.store.setConfig({
-    token: "mock",
-    rootName: "ERS-Verify-Breaker",
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
-  });
+  const { eng, mock } = await setup({ rootName: "ERS-Verify-Breaker" });
+  const { DELETE_BREAKER_MIN } = eng.constants;
 
   // A live bystander keeps the export non-empty (an empty export while pairs
   // exist is incomplete and holds deletes on its own).
@@ -3142,35 +2682,24 @@ async function scenario78_deleteCircuitBreaker() {
   assert.equal(dropped, 1);
   await eng.store.resetDeleteBreaker();
   assert.equal(await eng.store.getRaindropId(victim.id), "910000", "discard keeps the pair");
-  console.log("  ✔ breaker trips at limit, holds deletes, Allow releases, Discard drops jobs");
 }
 
 function chromeBookmarkExists(id) {
-  return harnessBookmarks.has(String(id));
+  return bookmarks.has(String(id));
 }
 
 async function scenario79_repairPairs() {
   console.log(
     "\n== 7.9 Repair pairs rebinds stale ids, prunes the rest, clears alive tombstones =="
   );
-  const eng = await importEngine();
-  const { POLICY, SYNC_MODE, JOB } = eng.constants;
+  const { eng, mock } = await setup({ rootName: "ERS-Verify-Repair" });
   const { planRepairFromInputs, planRepairPairs, applyRepairPairs } = eng.repairPairs;
-  await resetAll(eng.store);
-  const mock = makeMockRaindrop();
   mock.exportRaindropsCsv = async () =>
     "id,title,url\n" +
     "100,keep,https://example.com/ers-repair-keep\n" +
     "200,ghost-orig,https://example.com/ers-repair-ghost\n" +
     "300,dead-edge,https://example.com/ers-repair-deadedge\n" +
     "400,tomb-alive,https://example.com/ers-repair-tomb\n";
-  patchClient(eng.raindropMod, mock);
-  await eng.store.setConfig({
-    token: "mock",
-    rootName: "ERS-Verify-Repair",
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
-  });
 
   const keep = await chrome.bookmarks.create({
     parentId: "2",
@@ -3343,23 +2872,13 @@ async function scenario79_repairPairs() {
   assert.deepEqual(await eng.store.getPairs(), before, "pairs untouched");
   const refusedApply = await applyRepairPairs({ ...plan, raindropCount: 0 });
   assert.equal(refusedApply.ok, false, "apply refuses a plan from an empty export");
-  console.log(
-    "  ✔ repair rebinds ghost + renumbered ids, prunes dead, keeps offload / post-plan pairs, refuses empty export"
-  );
 }
 
 async function scenario77_scanImportScopeAndPullBulkGate() {
   console.log("\n== 7.7 scanImportScope exclude/pair rules + Pull one-way gate ==");
   const eng = await importEngine();
-  const { POLICY, SYNC_MODE } = eng.constants;
   await resetAll(eng.store);
-
-  await eng.store.setConfig({
-    token: "mock",
-    rootName: "ERS-Verify-Scope",
-    syncMode: SYNC_MODE.ONE_WAY,
-    defaultPolicy: POLICY.SYNC_KEEP,
-  });
+  await configureMock(eng, { rootName: "ERS-Verify-Scope", syncMode: SYNC_MODE.ONE_WAY });
 
   const excl = await chrome.bookmarks.create({
     parentId: "1",
@@ -3394,9 +2913,7 @@ async function scenario77_scanImportScopeAndPullBulkGate() {
     false,
     "already paired excluded from unpairedIds"
   );
-  const excludedBm = [...bookmarks.values()].find(
-    (n) => n.url === "https://example.com/ers-scope-excluded"
-  );
+  const excludedBm = findEdgeByUrl("https://example.com/ers-scope-excluded");
   assert.ok(excludedBm);
   assert.equal(scope.unpairedIds.includes(excludedBm.id), false, "exclude not in unpaired");
   assert.equal(scope.paired, 1);
@@ -3406,27 +2923,14 @@ async function scenario77_scanImportScopeAndPullBulkGate() {
   assert.equal(pullOneWay.suggest, false, "Pull bulk gate off in one-way");
   assert.equal(pullOneWay.edgeScanned, 0);
 
-  await eng.store.setConfig({
-    token: "mock",
+  await configureMock(eng, {
     rootName: "ERS-Verify-Scope",
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
   });
   // Small library: should not suggest on Pull either
   const pullSmall = await eng.bulkCandidate.assessPullBulkCandidate();
   assert.equal(pullSmall.suggest, false, "small bidirectional library skips Pull bulk prompt");
   assert.ok(pullSmall.edgeScanned >= 3);
-
-  console.log("  ✔ scanImportScope matches Import rules; Pull one-way never suggests");
 }
-
-console.log(
-  `Mode: ${USE_LIVE ? "mock Edge + live Raindrop (ERS-Verify-* only)" : "fully mocked (no real Edge/Raindrop writes)"}`
-);
-
-afterAll(async () => {
-  if (USE_LIVE) await liveCleanup();
-});
 
 test("scenario62_oneWay", scenario62_oneWay);
 test("scenario63_bidirectional", scenario63_bidirectional);
@@ -3451,4 +2955,3 @@ test("scenario76_applyMatchExistingAndImportSkip", scenario76_applyMatchExisting
 test("scenario77_scanImportScopeAndPullBulkGate", scenario77_scanImportScopeAndPullBulkGate);
 test("scenario78_deleteCircuitBreaker", scenario78_deleteCircuitBreaker);
 test("scenario79_repairPairs", scenario79_repairPairs);
-test("optionalLiveSmoke", optionalLiveSmoke);

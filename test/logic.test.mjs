@@ -44,6 +44,7 @@ import {
   reconcileIntervalMs,
 } from "../src/lib/constants.js";
 import { normalizeConfig, clampReconcileIntervalMinutes } from "../src/lib/store.js";
+import { sameBookmarkUrl } from "../src/lib/url-match.js";
 import { MAX_PULL_RATE_WAITS, runPullNow } from "../src/lib/pull-now.js";
 import {
   isAllowlistActive,
@@ -77,21 +78,42 @@ test("canonical bookmark roots", async () => {
     "Work",
   ]);
   assert.equal(DEFAULT_CONFIG.rootName, DEFAULT_ROOT_NAME);
-  console.log("  ✔ roles, aliases, upload canonicalize, default root");
 });
 
-test("roots migration (mock client)", async () => {
-  const { migrateLegacyRaindropRoots } = await import("../src/lib/migrate-roots.js");
+/** Minimal Raindrop client over a Map of collections (roots have no parent). */
+function collectionsClient(cols) {
+  return {
+    async getRootCollections() {
+      return [...cols.values()].filter((c) => !c.parent);
+    },
+    async getChildCollections() {
+      return [...cols.values()].filter((c) => c.parent);
+    },
+    async updateCollection(id, { title }) {
+      const c = cols.get(Number(id));
+      c.title = title;
+      return c;
+    },
+  };
+}
+
+/** Fresh storage + Edge tree with a legacy "Edge" root and no rootsMigratedAt. */
+async function resetUnmigratedConfig() {
   const harness = await import("../scripts/lib/test-harness.mjs");
   harness.storage.clear();
   harness.seedEdge();
-  harness.installChromeMocks();
-  const { setConfig, getConfig, getCollectionCache } = await import("../src/lib/store.js");
+  const { setConfig } = await import("../src/lib/store.js");
   await setConfig({ token: "mock", rootName: "Edge" });
   // Ensure migration flag is absent for this run.
   const stored = await chrome.storage.local.get("config");
   delete stored.config.rootsMigratedAt;
   await chrome.storage.local.set({ config: stored.config });
+}
+
+test("roots migration (mock client)", async () => {
+  const { migrateLegacyRaindropRoots } = await import("../src/lib/migrate-roots.js");
+  const { getConfig, getCollectionCache } = await import("../src/lib/store.js");
+  await resetUnmigratedConfig();
   await chrome.storage.local.set({
     collectionCache: {
       Edge: 1,
@@ -105,19 +127,7 @@ test("roots migration (mock client)", async () => {
     [2, { _id: 2, title: "Favorites bar", parent: { $id: 1 } }],
     [3, { _id: 3, title: "Work", parent: { $id: 2 } }],
   ]);
-  const client = {
-    async getRootCollections() {
-      return [...cols.values()].filter((c) => !c.parent);
-    },
-    async getChildCollections() {
-      return [...cols.values()].filter((c) => c.parent);
-    },
-    async updateCollection(id, { title }) {
-      const c = cols.get(Number(id));
-      c.title = title;
-      return c;
-    },
-  };
+  const client = collectionsClient(cols);
 
   const first = await migrateLegacyRaindropRoots(client);
   assert.equal(first.ran, true);
@@ -133,80 +143,42 @@ test("roots migration (mock client)", async () => {
 
   const second = await migrateLegacyRaindropRoots(client);
   assert.equal(second.ran, false, "second pass is no-op");
-  console.log("  ✔ rename Edge/Favorites → Bookmarks/Bookmarks bar + cache rewrite");
 
   // Conflict: both Edge and Bookmarks exist — must not set rootsMigratedAt.
-  harness.storage.clear();
-  harness.seedEdge();
-  await setConfig({ token: "mock", rootName: "Edge" });
-  const stored2 = await chrome.storage.local.get("config");
-  delete stored2.config.rootsMigratedAt;
-  await chrome.storage.local.set({ config: stored2.config });
+  await resetUnmigratedConfig();
   const conflictCols = new Map([
     [1, { _id: 1, title: "Edge", parent: null }],
     [10, { _id: 10, title: "Bookmarks", parent: null }],
     [2, { _id: 2, title: "Favorites bar", parent: { $id: 1 } }],
   ]);
-  const conflictClient = {
-    async getRootCollections() {
-      return [...conflictCols.values()].filter((c) => !c.parent);
-    },
-    async getChildCollections() {
-      return [...conflictCols.values()].filter((c) => c.parent);
-    },
-    async updateCollection(id, { title }) {
-      const c = conflictCols.get(Number(id));
-      c.title = title;
-      return c;
-    },
-  };
+  const conflictClient = collectionsClient(conflictCols);
   const blocked = await migrateLegacyRaindropRoots(conflictClient);
   assert.equal(blocked.blocked, true);
   assert.equal(conflictCols.get(1).title, "Edge", "root not renamed on conflict");
   const cfgBlocked = await getConfig();
   assert.equal(cfgBlocked.rootName, "Edge");
   assert.equal(cfgBlocked.rootsMigratedAt, undefined);
-  console.log("  ✔ conflict leaves flag unset for retry");
 
   // Partial: root renamed, child conflict — bump rootName, leave flag unset.
-  harness.storage.clear();
-  harness.seedEdge();
-  await setConfig({ token: "mock", rootName: "Edge" });
-  const stored3 = await chrome.storage.local.get("config");
-  delete stored3.config.rootsMigratedAt;
-  await chrome.storage.local.set({ config: stored3.config });
+  await resetUnmigratedConfig();
   const partialCols = new Map([
     [1, { _id: 1, title: "Edge", parent: null }],
     [2, { _id: 2, title: "Favorites bar", parent: { $id: 1 } }],
     [3, { _id: 3, title: "Bookmarks bar", parent: { $id: 1 } }],
   ]);
-  const partialClient = {
-    async getRootCollections() {
-      return [...partialCols.values()].filter((c) => !c.parent);
-    },
-    async getChildCollections() {
-      return [...partialCols.values()].filter((c) => c.parent);
-    },
-    async updateCollection(id, { title }) {
-      const c = partialCols.get(Number(id));
-      c.title = title;
-      return c;
-    },
-  };
+  const partialClient = collectionsClient(partialCols);
   const partial = await migrateLegacyRaindropRoots(partialClient);
   assert.equal(partial.blocked, true);
   assert.equal(partialCols.get(1).title, "Bookmarks");
   const cfgPartial = await getConfig();
   assert.equal(cfgPartial.rootName, "Bookmarks");
   assert.ok(!cfgPartial.rootsMigratedAt);
-  console.log("  ✔ partial root rename persists rootName for retry");
 });
 
 test("mirror placement aliases", async () => {
   const harness = await import("../scripts/lib/test-harness.mjs");
   harness.storage.clear();
   harness.seedEdge();
-  harness.installChromeMocks();
   const { resolveMirrorPlacement } = await import("../src/lib/bookmarks.js");
   const tops = await chrome.bookmarks.getChildren("0");
   const edgePlan = await resolveMirrorPlacement(["Bookmarks bar", "Work"], "Bookmarks", tops);
@@ -221,7 +193,6 @@ test("mirror placement aliases", async () => {
   );
   assert.equal(chromePlan.startId, "1");
   assert.deepEqual(chromePlan.titles, ["Work"]);
-  console.log("  ✔ Bookmarks bar lands on Edge Favorites bar and Chrome Bookmarks bar");
 });
 
 test("policy resolution", async () => {
@@ -234,7 +205,6 @@ test("policy resolution", async () => {
   assert.equal(resolvePolicy(["misc"], overrides, POLICY.SYNC_DELETE), POLICY.SYNC_DELETE);
   assert.equal(isExcluded(["secrets", "work"], overrides, POLICY.SYNC_DELETE), true);
   assert.equal(isExcluded(["archive", "work"], overrides, POLICY.SYNC_DELETE), false);
-  console.log("  ✔ nearest-ancestor + exclude");
 });
 
 test("raindropFolderMode default", async () => {
@@ -243,7 +213,6 @@ test("raindropFolderMode default", async () => {
     RAINDROP_FOLDER_MODE.CREATE_AS_NEEDED,
     "default preserves create-as-needed"
   );
-  console.log("  ✔ default create-as-needed");
 });
 
 test("bidirectional coerces global keep-both", async () => {
@@ -257,7 +226,6 @@ test("bidirectional coerces global keep-both", async () => {
     defaultPolicy: POLICY.SYNC_DELETE,
   });
   assert.equal(oneWay.defaultPolicy, POLICY.SYNC_DELETE, "one-way offload unchanged");
-  console.log("  ✔ stale bidirectional offload → keep-both");
 });
 
 test("pull now loop", async () => {
@@ -345,8 +313,6 @@ test("pull now loop", async () => {
   );
   assert.equal(doneCalls, 1, "done under pause finishes in one pass");
   assert.match(doneUnderPause.text, /Pull finished: queued 1/);
-
-  console.log("  ✔ popup and options share the pass loop / wait-and-resume rate limit");
 });
 
 test("collection path under root", async () => {
@@ -370,7 +336,6 @@ test("collection path under root", async () => {
     under.some((u) => u.relativeSegments.length === 0),
     "includes root with empty relative"
   );
-  console.log("  ✔ path under root / outside root / collectionsUnderRoot");
 });
 
 test("collection cache vs live index", async () => {
@@ -407,7 +372,6 @@ test("collection cache vs live index", async () => {
   assert.deepEqual(uncached, ["Edge"]);
   assert.equal(created.length, 0, "must not create a duplicate root");
   assert.equal(cache.Edge, 1);
-  console.log("  ✔ stale cache dropped; title match reused");
 });
 
 test("job kind defaults", async () => {
@@ -422,17 +386,21 @@ test("job kind defaults", async () => {
     "pull-rename-folder drains before pull-update"
   );
   assert.equal(drainJobPriority(JOB.UPLOAD), drainJobPriority(JOB.PULL_CREATE));
-  console.log("  ✔ legacy jobs are upload; rename before upload");
+});
+
+test.each([
+  [JOB.UPLOAD, "edgeToRaindrop"],
+  [JOB.DELETE_RAINDROP, "edgeToRaindrop"],
+  [JOB.RENAME_COLLECTION, "edgeToRaindrop"],
+  [JOB.PULL_CREATE, "raindropToEdge"],
+  [JOB.PULL_UPDATE, "raindropToEdge"],
+  [JOB.PULL_RENAME_FOLDER, "raindropToEdge"],
+  [JOB.DELETE_EDGE, "raindropToEdge"],
+])("jobDirection(%s) is %s", (kind, direction) => {
+  assert.equal(jobDirection(kind), direction);
 });
 
 test("pending direction breakdown", async () => {
-  assert.equal(jobDirection(JOB.UPLOAD), "edgeToRaindrop");
-  assert.equal(jobDirection(JOB.DELETE_RAINDROP), "edgeToRaindrop");
-  assert.equal(jobDirection(JOB.RENAME_COLLECTION), "edgeToRaindrop");
-  assert.equal(jobDirection(JOB.PULL_CREATE), "raindropToEdge");
-  assert.equal(jobDirection(JOB.PULL_UPDATE), "raindropToEdge");
-  assert.equal(jobDirection(JOB.PULL_RENAME_FOLDER), "raindropToEdge");
-  assert.equal(jobDirection(JOB.DELETE_EDGE), "raindropToEdge");
   // Legacy jobs without kind follow upload → Edge→Raindrop.
   assert.equal(jobDirection(jobKind({ id: "legacy" })), "edgeToRaindrop");
 
@@ -453,7 +421,6 @@ test("pending direction breakdown", async () => {
   );
   const popupHtml = fs.readFileSync(path.join(REPO_ROOT, "src/popup/popup.html"), "utf8");
   assert.ok(popupHtml.includes('id="pendingByDirection"'), "popup exposes pendingByDirection");
-  console.log("  ✔ Edge→Raindrop vs Raindrop→Edge counts + Status markup");
 });
 
 test("raindrop folder allowlist", async () => {
@@ -651,7 +618,6 @@ test("raindrop folder allowlist", async () => {
 
   const normalized = normalizeConfig({ token: "x" });
   assert.deepEqual(normalized.raindropFolderAllowlist, {});
-  console.log("  ✔ active/parent/empty-mode/Edge-bypass/prune/path-resolve/outside-root");
 });
 
 test("outside-root forest list ids", async () => {
@@ -681,7 +647,23 @@ test("outside-root forest list ids", async () => {
     ["10", "20"],
     "skips sync-root member and child when parent allowlisted"
   );
-  console.log("  ✔ forest roots only");
+});
+
+test("outside-root forest list ids terminate on a cyclic parent chain", async () => {
+  const { outsideRootListIds } = await import("../src/lib/reconcile.js");
+  const byId = new Map();
+  const cols = [
+    { _id: 1, title: "Edge", parent: null },
+    { _id: 30, title: "Listed", parent: { $id: 31 } },
+    { _id: 31, title: "LoopA", parent: { $id: 32 } },
+    { _id: 32, title: "LoopB", parent: { $id: 31 } },
+  ];
+  for (const c of cols) {
+    byId.set(c._id, c);
+    byId.set(String(c._id), c);
+  }
+  const ids = outsideRootListIds({ 30: { path: "Listed" } }, { byId }, 1);
+  assert.deepEqual(ids, ["30"]);
 });
 
 test("reconcile interval config", async () => {
@@ -695,7 +677,6 @@ test("reconcile interval config", async () => {
   assert.equal(normalizeConfig({ reconcileIntervalMinutes: 15 }).reconcileIntervalMinutes, 15);
   assert.equal(normalizeConfig({ reconcileIntervalMinutes: 1 }).reconcileIntervalMinutes, 1);
   assert.equal(reconcileIntervalMs({ reconcileIntervalMinutes: 2 }), 2 * 60_000);
-  console.log("  ✔ default / clamp / reconcileIntervalMs");
 });
 
 test("rate-limit constants", async () => {
@@ -732,7 +713,6 @@ test("rate-limit constants", async () => {
   assert.equal(raindropCollectionId({ collection: { id: 7 } }), 7);
   assert.equal(raindropCollectionId({ collection: { $id: 1, id: 2 } }), 1);
   assert.equal(raindropCollectionId(null), undefined);
-  console.log("  ✔ reserve / wake budget constants / short drain caps / proactive RateLimitError");
 });
 
 test("wake budget spendable / self-cap", async () => {
@@ -829,10 +809,6 @@ test("wake budget spendable / self-cap", async () => {
     "full wakeCap exceeds short wakeCap under same headers"
   );
   assert.equal(shortFromStore.wakeCapReqs, SHORT_WAKE_REQS);
-
-  console.log(
-    "  ✔ bootstrap / short vs full / spendable / wake_cap / persist window / Status copy"
-  );
 });
 
 test("bulk candidate heuristics", async () => {
@@ -868,32 +844,21 @@ test("bulk candidate heuristics", async () => {
   const pullCopy = formatBulkCandidatePrompt(lowCoverage, "pull");
   assert.ok(pullCopy.includes("before Pull"));
   assert.ok(!pullCopy.includes("re-uploaded"));
-  console.log("  ✔ assessFromScope / assessPullFromScope / prompt copy");
 });
 
-test("browser-normalized URL compare (pull-update drift)", async () => {
-  const { sameBookmarkUrl } = await import("../src/lib/url-match.js");
-  assert.equal(sameBookmarkUrl("https://webawesome.com/", "https://webawesome.com"), true);
-  assert.equal(sameBookmarkUrl("HTTPS://Example.com", "https://example.com/"), true);
-  assert.equal(sameBookmarkUrl("edge://history/all", "edge://history/all"), true);
-  assert.equal(
-    sameBookmarkUrl("https://a.example/x", "https://a.example/x/"),
-    false,
-    "path slash is real"
-  );
-  assert.equal(
-    sameBookmarkUrl("https://a.example/?q=1", "https://a.example/?q=2"),
-    false,
-    "query is real"
-  );
-  assert.equal(
-    sameBookmarkUrl("https://www.a.example/", "https://a.example/"),
-    false,
-    "www is real"
-  );
-  assert.equal(sameBookmarkUrl("not a url", "not a url"), true);
-  assert.equal(sameBookmarkUrl("not a url", "other"), false);
-  console.log("  ✔ origin trailing slash is not drift; real differences still are");
+// Browser-normalized URL compare (pull-update drift): an origin trailing
+// slash is not drift; path slash, query and www differences still are.
+test.each([
+  ["https://webawesome.com/", "https://webawesome.com", true],
+  ["HTTPS://Example.com", "https://example.com/", true],
+  ["edge://history/all", "edge://history/all", true],
+  ["https://a.example/x", "https://a.example/x/", false, "path slash is real"],
+  ["https://a.example/?q=1", "https://a.example/?q=2", false, "query is real"],
+  ["https://www.a.example/", "https://a.example/", false, "www is real"],
+  ["not a url", "not a url", true],
+  ["not a url", "other", false],
+])("sameBookmarkUrl(%s, %s) is %s", (a, b, expected, message) => {
+  assert.equal(sameBookmarkUrl(a, b), expected, message);
 });
 
 test("Raindrop GET cache busting", async () => {
@@ -904,7 +869,6 @@ test("Raindrop GET cache busting", async () => {
     "/raindrops/5?page=0&perpage=50&nested=true&_cb=b2"
   );
   assert.notEqual(cacheBustPath("/x", 1), cacheBustPath("/x", 2), "nonce varies the URL");
-  console.log("  ✔ every GET gets a unique _cb parameter");
 });
 
 test("export URL match + Match existing planner", async () => {
@@ -1025,8 +989,6 @@ test("export URL match + Match existing planner", async () => {
   );
   assert.equal(liveReverseConflict.matched.length, 0);
   assert.equal(liveReverseConflict.conflicts, 1);
-
-  console.log("  ✔ urlMatchKeys / export CSV / planMatchFromExport");
 });
 
 test("move URL rebind picker", async () => {
@@ -1108,7 +1070,6 @@ test("move URL rebind picker", async () => {
   assert.equal(staleOk.rid, "8");
 
   assert.equal(pickMoveRebindCandidate("bm1", [], emptyPairs, live).kind, "none");
-  console.log("  ✔ filterUrlMatchingItems / pickMoveRebindCandidate");
 });
 
 test("reconcile skip Status copy", async () => {
@@ -1125,7 +1086,6 @@ test("reconcile skip Status copy", async () => {
   assert.ok(coolNotice.includes("cooldown"));
   assert.ok(coolNotice.includes("settled"), "cooldown copy mentions settled check");
   assert.ok(formatReconcileSkipNotice({ reconcileSkipReason: "bulk_pause" }).includes("Continue"));
-  console.log("  ✔ busy / cooldown / bulk_pause notices");
 });
 
 test("trash-safe Status derive", async () => {
@@ -1164,7 +1124,6 @@ test("trash-safe Status derive", async () => {
   assert.equal(trashSafeButtonLabel("safe"), "Check Trash");
   assert.equal(buildTrashSafePayload(null).state, "unknown");
   assert.equal(buildTrashSafePayload(null).buttonLabel, "Check Trash");
-  console.log("  ✔ unknown / partial / waiting / safe + short copy");
 });
 
 test("confirm-GET presence machinery is gone", async () => {
@@ -1206,7 +1165,6 @@ test("confirm-GET presence machinery is gone", async () => {
   assert.ok(!store.includes("parkAliveIds"), "park helpers removed");
   const finish = await src("reconcile-finish.js");
   assert.ok(!finish.includes("getRaindrop("), "finish never GETs a raindrop by id");
-  console.log("  ✔ no confirm-GET / catch-up / parking symbols left");
 });
 
 test("pulled-path folderCollections zip", async () => {
@@ -1236,7 +1194,6 @@ test("pulled-path folderCollections zip", async () => {
     ["edge-leaf", 3],
     ["edge-bar", 2],
   ]);
-  console.log("  ✔ under-root pull path maps leaf+ancestors");
 });
 
 test("queue-depth bulk prompt", async () => {
@@ -1311,8 +1268,6 @@ test("queue-depth bulk prompt", async () => {
   );
   assert.ok(formatBulkQueueNotice(200).includes("200"));
   assert.ok(formatBulkQueueNotice(200).includes("Match"));
-
-  console.log("  ✔ arm / snooze / clear watermarks / ETA / drain-pause predicate");
 });
 
 test("Options HTML bulk lane controls", async () => {
@@ -1339,7 +1294,4 @@ test("Options HTML bulk lane controls", async () => {
     "interval help says queued jobs do not hard-block listing"
   );
   assert.ok(!/busy queue defers listing/i.test(html), "stale queue-busy deferral copy removed");
-  console.log(
-    "  ✔ bulk banner + Match existing; leftover-budget interval help; no Other-favorites repair"
-  );
 });

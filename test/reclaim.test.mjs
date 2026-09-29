@@ -3,20 +3,17 @@
 
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { setupEngine, edgeBookmark, edgeFolder } from "./helpers/engine.mjs";
+import { setupEngine, edgeBookmark, edgeFolder, warmPresence } from "./helpers/engine.mjs";
 import { PRESENCE_STALE_MS } from "../src/lib/constants.js";
 
 test("invariant 2: plain create with an existing URL binds instead of forking", async () => {
-  const { eng, mock, root, presence } = await setupEngine();
+  const { eng, mock, root } = await setupEngine();
   const existing = mock._seedRich(root._id, {
     link: "https://r.example/page",
     title: "old title",
     tags: ["keep"],
   });
-  await presence.ensurePresence({
-    client: new eng.raindropMod.RaindropClient("mock"),
-    reason: "pull-now",
-  });
+  await warmPresence(eng);
 
   const folder = await edgeFolder("1", "Reading");
   const bm = await edgeBookmark(folder.id, "new title", "https://r.example/page/");
@@ -34,11 +31,8 @@ test("invariant 2: plain create with an existing URL binds instead of forking", 
 });
 
 test("a raindrop this engine paired after the snapshot still reclaims (Import twice)", async () => {
-  const { eng, mock, presence } = await setupEngine();
-  await presence.ensurePresence({
-    client: new eng.raindropMod.RaindropClient("mock"),
-    reason: "pull-now",
-  });
+  const { eng, mock } = await setupEngine();
+  await warmPresence(eng);
   const a = await edgeBookmark("1", "a", "https://twice.example/");
   await eng.queue.enqueue(a.id);
   await eng.sync.drain();
@@ -69,11 +63,8 @@ test("plain create in conflict creates: two bookmarks, two raindrops", async () 
 });
 
 test("crash retry after createAttemptedAt still reclaims (search, since the snapshot predates it)", async () => {
-  const { eng, mock, root, presence } = await setupEngine();
-  await presence.ensurePresence({
-    client: new eng.raindropMod.RaindropClient("mock"),
-    reason: "pull-now",
-  });
+  const { eng, mock, root } = await setupEngine();
+  await warmPresence(eng);
   const bm = await edgeBookmark("1", "crash", "https://crash.example/");
   await eng.queue.enqueue(bm.id);
   // Previous drain POSTed, then the worker died before recordSynced.
@@ -90,10 +81,7 @@ test("crash retry after createAttemptedAt still reclaims (search, since the snap
 test("stale snapshot that cannot be refreshed falls back to exactly one search", async () => {
   const { eng, mock, root, presence } = await setupEngine();
   const existing = mock._seedRich(root._id, { link: "https://stale.example/", title: "s" });
-  await presence.ensurePresence({
-    client: new eng.raindropMod.RaindropClient("mock"),
-    reason: "pull-now",
-  });
+  await warmPresence(eng);
   // Age the snapshot past PRESENCE_STALE_MS, then make the export unavailable.
   const snap = await presence.loadPresence();
   snap.at = Date.now() - PRESENCE_STALE_MS - 1000;
@@ -130,7 +118,7 @@ test("Import refreshes the snapshot once and every upload reclaims from it", asy
 });
 
 test("distinct query variants do not cross-reclaim when both exist", async () => {
-  const { eng, mock, root, presence } = await setupEngine();
+  const { eng, mock, root } = await setupEngine();
   const a = mock._seedRich(root._id, {
     link: "https://example.com/watch?v=A",
     title: "A",
@@ -141,10 +129,7 @@ test("distinct query variants do not cross-reclaim when both exist", async () =>
     title: "B",
     tags: ["b"],
   });
-  await presence.ensurePresence({
-    client: new eng.raindropMod.RaindropClient("mock"),
-    reason: "pull-now",
-  });
+  await warmPresence(eng);
 
   const bmA = await edgeBookmark("1", "A", "https://example.com/watch?v=A");
   const bmB = await edgeBookmark("1", "B", "https://example.com/watch?v=B");
@@ -158,16 +143,13 @@ test("distinct query variants do not cross-reclaim when both exist", async () =>
 });
 
 test("loose reclaim keeps the raindrop link (tracking-param tolerance)", async () => {
-  const { eng, mock, root, presence } = await setupEngine();
+  const { eng, mock, root } = await setupEngine();
   const existing = mock._seedRich(root._id, {
     link: "https://track.example/page?utm=old",
     title: "old",
     tags: ["kept"],
   });
-  await presence.ensurePresence({
-    client: new eng.raindropMod.RaindropClient("mock"),
-    reason: "pull-now",
-  });
+  await warmPresence(eng);
 
   const bm = await edgeBookmark("1", "new", "https://track.example/page?utm=new");
   await eng.sync.handleBookmarkCreated(bm.id, bm);
@@ -184,16 +166,13 @@ test("loose reclaim keeps the raindrop link (tracking-param tolerance)", async (
 });
 
 test("a lone raindrop with a different query is not reclaimed", async () => {
-  const { eng, mock, root, presence } = await setupEngine();
+  const { eng, mock, root } = await setupEngine();
   const other = mock._seedRich(root._id, {
     link: "https://www.youtube.com/watch?v=AAA",
     title: "AAA",
     tags: ["aaa"],
   });
-  await presence.ensurePresence({
-    client: new eng.raindropMod.RaindropClient("mock"),
-    reason: "pull-now",
-  });
+  await warmPresence(eng);
 
   const creates = mock._calls.createRaindrop;
   const bm = await edgeBookmark("1", "BBB", "https://www.youtube.com/watch?v=BBB");

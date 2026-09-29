@@ -6,7 +6,7 @@
  * back off on 429, avoid redundant GETs (especially during cleanup).
  */
 
-import { RATE_LIMIT_RESERVE } from "../../src/lib/constants.js";
+import { RATE_LIMIT_RESERVE, RAINDROP_LIST_PER_PAGE } from "../../src/lib/constants.js";
 import { isNotFoundError, RateLimitError } from "../../src/lib/raindrop.js";
 
 /** Fixed Raindrop root collection for integration tests (reused across runs). */
@@ -17,6 +17,8 @@ export const INTER_SCENARIO_PAUSE_MS = 6000;
 export const LIST_SETTLE_MS = 2000;
 export const INTER_DELETE_PAUSE_MS = 350;
 export const MAX_RATE_RETRIES = 3;
+/** Safety stop for listAllUnderRoot (the test root should hold a handful of items). */
+const MAX_LIST_PAGES = 100;
 
 /**
  * Poll list until a raindrop id appears (Raindrop list can lag behind create).
@@ -39,33 +41,6 @@ export async function waitUntilRaindropListed(client, collectionId, raindropId, 
   }
   throw new Error(
     `raindrop ${raindropId} not visible in collection ${collectionId} within ${maxWaitMs}ms`
-  );
-}
-
-/**
- * Poll nested listing under the sync root (what heartbeat / Pull now reconcile uses).
- * Prefer {@link waitUntilRaindropListed} on the leaf when you only need create visibility;
- * use this before exercising live reconcileNow against a freshly created item.
- *
- * @param {import("../../src/lib/raindrop.js").RaindropClient} client
- * @param {number|string} rootId
- * @param {number|string} raindropId
- * @param {number} [maxWaitMs]
- */
-export async function waitUntilNestedUnderRoot(client, rootId, raindropId, maxWaitMs = 20000) {
-  const want = String(raindropId);
-  const start = Date.now();
-  while (Date.now() - start < maxWaitMs) {
-    const { items } = await gateClient(
-      client,
-      () => client.listRaindrops(rootId, { nested: true, page: 0, perPage: 50 }),
-      { label: "waitUntilNestedUnderRoot" }
-    );
-    if (items.some((i) => String(i._id) === want)) return;
-    await sleep(LIST_SETTLE_MS);
-  }
-  throw new Error(
-    `raindrop ${raindropId} not visible in nested list under root ${rootId} within ${maxWaitMs}ms`
   );
 }
 
@@ -180,15 +155,13 @@ export async function permanentDeleteRaindrop(client, id) {
   await gateClient(
     client,
     async () => {
-      try {
-        await client.deleteRaindrop(id);
-      } catch (err) {
-        if (!isNotFoundError(err)) throw err;
-      }
-      try {
-        await client.deleteRaindrop(id);
-      } catch (err) {
-        if (!isNotFoundError(err)) throw err;
+      // First DELETE moves it to Trash; the second removes it from Trash.
+      for (let pass = 0; pass < 2; pass++) {
+        try {
+          await client.deleteRaindrop(id);
+        } catch (err) {
+          if (!isNotFoundError(err)) throw err;
+        }
       }
     },
     { label: `delete raindrop ${id}` }
@@ -196,18 +169,36 @@ export async function permanentDeleteRaindrop(client, id) {
 }
 
 /**
+ * Every raindrop in the nested listing under the test root, paging until a
+ * short page (a single page only covers the first RAINDROP_LIST_PER_PAGE items).
+ *
+ * @param {import("../../src/lib/raindrop.js").RaindropClient} client
+ * @param {number|string} rootId
+ * @param {string} label
+ */
+export async function listAllUnderRoot(client, rootId, label) {
+  const all = [];
+  for (let page = 0; page < MAX_LIST_PAGES; page++) {
+    const { items } = await gateClient(
+      client,
+      () => client.listRaindrops(rootId, { nested: true, page, perPage: RAINDROP_LIST_PER_PAGE }),
+      { label: `${label} page ${page}` }
+    );
+    all.push(...items);
+    if (items.length < RAINDROP_LIST_PER_PAGE) return all;
+  }
+  throw new Error(`${label}: more than ${MAX_LIST_PAGES} pages under test root ${rootId}`);
+}
+
+/**
  * Remove raindrops and nested collections under the test root (keeps the root).
- * One list + targeted deletes — no GET-per-row confirmation loop.
+ * One full listing + targeted deletes — no GET-per-row confirmation loop.
  *
  * @param {import("../../src/lib/raindrop.js").RaindropClient} client
  * @param {number|string} rootId
  */
 export async function cleanupTestRoot(client, rootId) {
-  const { items } = await gateClient(
-    client,
-    () => client.listRaindrops(rootId, { nested: true, page: 0, perPage: 50 }),
-    { label: "cleanup listRaindrops" }
-  );
+  const items = await listAllUnderRoot(client, rootId, "cleanup listRaindrops");
 
   for (const item of items) {
     if (!listItemInLibrary(item)) continue;
@@ -269,11 +260,7 @@ export async function ensureTestRoot(client) {
  * @param {number|string} rootId
  */
 export async function verifyTestRootEmpty(client, rootId) {
-  const { items } = await gateClient(
-    client,
-    () => client.listRaindrops(rootId, { nested: true, page: 0, perPage: 50 }),
-    { label: "verify listRaindrops" }
-  );
+  const items = await listAllUnderRoot(client, rootId, "verify listRaindrops");
   // List can include stale ids; confirm with GET (once at end — not in cleanup loops).
   let liveCount = 0;
   for (const item of items) {

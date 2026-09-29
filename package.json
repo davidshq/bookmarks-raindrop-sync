@@ -6,7 +6,6 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:live": "ERS_LIVE=1 vitest run test/checklist.test.mjs --testTimeout=600000",
     "test:integration": "node scripts/verify-integration.mjs",
     "test:smoke-bulk": "node scripts/smoke-bulk-options.mjs",
     "spike": "node scripts/spike-raindrop.mjs",

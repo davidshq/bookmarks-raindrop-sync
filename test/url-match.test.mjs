@@ -23,10 +23,13 @@ test("loose key drops tracking params only, verbatim", () => {
   ]);
 });
 
-test("urlMatchKind: tracking variant is loose, content variant is no match", () => {
-  assert.equal(urlMatchKind("https://ex.com/a?utm_source=1", "https://ex.com/a"), "loose");
-  assert.equal(urlMatchKind("https://ex.com/watch?v=A", "https://ex.com/watch?v=B"), null);
-  assert.equal(urlMatchKind("https://ex.com/item", "https://ex.com/item?id=5"), null);
+// Tracking variant is loose; a content-selecting variant is no match.
+test.each([
+  ["https://ex.com/a?utm_source=1", "https://ex.com/a", "loose"],
+  ["https://ex.com/watch?v=A", "https://ex.com/watch?v=B", null],
+  ["https://ex.com/item", "https://ex.com/item?id=5", null],
+])("urlMatchKind(%s, %s) is %s", (a, b, kind) => {
+  assert.equal(urlMatchKind(a, b), kind);
 });
 
 test("a lone different-query candidate is not a match (snapshot, search, tree)", () => {

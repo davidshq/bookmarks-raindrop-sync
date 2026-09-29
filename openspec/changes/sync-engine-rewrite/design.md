@@ -86,7 +86,7 @@ From `store.js` reconcile state: `seenAcc`, `unsettledConfirmCatchUp`, `aliveCon
 
 ### D10. Tests under `node:test`
 
-`scripts/verify-*.mjs` become `test/*.test.mjs`, run by Vitest (originally `node --test`; switched 2026-09-28 for watch mode, diffs and module mocking — the files stay plain ESM with `node:assert`). The store, presence, rebind, evidence, and reclaim modules take their I/O as injected functions (tree reader, snapshot, client) so each memo invariant is a unit test with fixtures. The existing live checklist keeps a live entry point for manual runs (`npm run test:live`, gated on `ERS_LIVE=1`).
+`scripts/verify-*.mjs` become `test/*.test.mjs`, run by Vitest (originally `node --test`; switched 2026-09-28 for watch mode, diffs and module mocking — the files stay plain ESM with `node:assert`). The store, presence, rebind, evidence, and reclaim modules take their I/O as injected functions (tree reader, snapshot, client) so each memo invariant is a unit test with fixtures. Live Raindrop coverage lives in `npm run test:integration` (mock Edge + live Raindrop test root); the checklist's separate `test:live` smoke entry was removed on 2026-09-28 as a duplicate of its scenarios.
 
 ## Risks / Trade-offs
 

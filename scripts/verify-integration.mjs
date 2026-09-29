@@ -20,12 +20,14 @@
 
 import assert from "node:assert/strict";
 import { runPullNow } from "../src/lib/pull-now.js";
+import { JOB } from "../src/lib/constants.js";
 import {
   loadToken,
   importEngine,
   resetAll,
   findEdgeByUrl,
   createIntegrationFolder,
+  pullNowSend,
   TEST_EDGE_CONTAINER_ID,
   bookmarks,
 } from "./lib/test-harness.mjs";
@@ -76,24 +78,67 @@ async function liveConfig(store, constants) {
   });
 }
 
-async function scenarioCreateUpload(eng, client, rootId) {
-  console.log("\n== integration: Edge create → Raindrop upload ==");
-  const { constants, store, queue, sync } = eng;
-  await resetAll(store, { integration: true });
-  await liveConfig(store, constants);
+/** Print the scenario header, reset mock Edge + storage, write the live config. */
+async function beginScenario(eng, title) {
+  console.log(`\n== integration: ${title} ==`);
+  await resetAll(eng.store, { integration: true });
+  await liveConfig(eng.store, eng.constants);
+}
 
-  const folder = await createIntegrationFolder("Create-Upload");
-  const bm = await chrome.bookmarks.create({
-    parentId: folder.id,
-    title: "Integration create",
-    url: "https://example.com/ers-integration-create",
-  });
-
-  await queue.enqueue(bm.id);
-  await drainWithRetry(client, sync);
-
-  const rid = await store.getRaindropId(bm.id);
+/**
+ * Create an Edge bookmark in a fresh integration folder, upload it through the
+ * engine and return its pair.
+ * @returns {Promise<{ folder: object, bm: object, rid: string }>}
+ */
+async function uploadedBookmark(eng, client, folderTitle, title, url) {
+  const folder = await createIntegrationFolder(folderTitle);
+  const bm = await chrome.bookmarks.create({ parentId: folder.id, title, url });
+  await eng.queue.enqueue(bm.id);
+  await drainWithRetry(client, eng.sync);
+  const rid = await eng.store.getRaindropId(bm.id);
   assert.ok(rid, "paired after upload");
+  return { folder, bm, rid };
+}
+
+/**
+ * Create a live raindrop in the collection path `segments` under the test root
+ * and wait until the leaf listing shows it.
+ * @returns {Promise<{ leaf: object, created: object, segments: string[] }>}
+ */
+async function seedLiveRaindrop(client, rootId, segments, { link, title }, label) {
+  const leaf = await ensureCollectionPathUnderRoot(client, rootId, segments);
+  const created = await gateClient(
+    client,
+    () => client.createRaindrop({ link, title, collectionId: leaf._id }),
+    { label }
+  );
+  await assertCollectionUnderTestRoot(client, rootId, created.collection?.$id);
+  await waitUntilRaindropListed(client, leaf._id, created._id);
+  return { leaf, created, segments };
+}
+
+/** Explicit PULL_CREATE for a raindrop from seedLiveRaindrop. */
+function pullCreateJob({ leaf, created, segments }) {
+  return {
+    id: `pull-${created._id}`,
+    kind: JOB.PULL_CREATE,
+    raindropId: String(created._id),
+    link: created.link,
+    title: created.title,
+    relativeSegments: segments,
+    collectionId: String(leaf._id),
+  };
+}
+
+async function scenarioCreateUpload(eng, client, rootId) {
+  await beginScenario(eng, "Edge create → Raindrop upload");
+  const { rid } = await uploadedBookmark(
+    eng,
+    client,
+    "Create-Upload",
+    "Integration create",
+    "https://example.com/ers-integration-create"
+  );
   assert.ok(await raindropAlive(client, rid), "live raindrop exists");
 
   const live = await getRaindropInRoot(client, rootId, rid);
@@ -103,21 +148,15 @@ async function scenarioCreateUpload(eng, client, rootId) {
 }
 
 async function scenarioUpdateTitleUrl(eng, client, rootId) {
-  console.log("\n== integration: Edge title/URL change → Raindrop update ==");
-  const { constants, store, queue, sync } = eng;
-  await resetAll(store, { integration: true });
-  await liveConfig(store, constants);
-
-  const folder = await createIntegrationFolder("Update");
-  const bm = await chrome.bookmarks.create({
-    parentId: folder.id,
-    title: "Before update",
-    url: "https://example.com/ers-integration-update",
-  });
-  await queue.enqueue(bm.id);
-  await drainWithRetry(client, sync);
-  const rid = await store.getRaindropId(bm.id);
-  assert.ok(rid);
+  await beginScenario(eng, "Edge title/URL change → Raindrop update");
+  const { sync } = eng;
+  const { bm, rid } = await uploadedBookmark(
+    eng,
+    client,
+    "Update",
+    "Before update",
+    "https://example.com/ers-integration-update"
+  );
 
   await putRaindropRichFields(client, rid, {
     tags: ["integration-keep"],
@@ -141,21 +180,15 @@ async function scenarioUpdateTitleUrl(eng, client, rootId) {
 }
 
 async function scenarioEdgeDelete(eng, client, rootId) {
-  console.log("\n== integration: Edge delete → Raindrop delete ==");
-  const { constants, store, queue, sync } = eng;
-  await resetAll(store, { integration: true });
-  await liveConfig(store, constants);
-
-  const folder = await createIntegrationFolder("Edge-Delete");
-  const bm = await chrome.bookmarks.create({
-    parentId: folder.id,
-    title: "Delete me",
-    url: "https://example.com/ers-integration-edge-delete",
-  });
-  await queue.enqueue(bm.id);
-  await drainWithRetry(client, sync);
-  const rid = await store.getRaindropId(bm.id);
-  assert.ok(rid);
+  await beginScenario(eng, "Edge delete → Raindrop delete");
+  const { store, sync } = eng;
+  const { folder, bm, rid } = await uploadedBookmark(
+    eng,
+    client,
+    "Edge-Delete",
+    "Delete me",
+    "https://example.com/ers-integration-edge-delete"
+  );
   await getRaindropInRoot(client, rootId, rid);
 
   await chrome.bookmarks.remove(bm.id);
@@ -168,41 +201,21 @@ async function scenarioEdgeDelete(eng, client, rootId) {
 }
 
 async function scenarioPullCreate(eng, client, rootId) {
-  console.log("\n== integration: Raindrop create → Edge pull ==");
-  const { constants, store, sync, queue } = eng;
-  await resetAll(store, { integration: true });
-  await liveConfig(store, constants);
-
-  const leaf = await ensureCollectionPathUnderRoot(client, rootId, [
-    "Favorites bar",
-    "Integration-Pull",
-  ]);
-  const created = await gateClient(
+  await beginScenario(eng, "Raindrop create → Edge pull");
+  const { store, sync, queue } = eng;
+  const seeded = await seedLiveRaindrop(
     client,
-    () =>
-      client.createRaindrop({
-        link: "https://example.com/ers-integration-pull",
-        title: "Pulled from Raindrop",
-        collectionId: leaf._id,
-      }),
-    { label: "seed pull raindrop" }
+    rootId,
+    ["Favorites bar", "Integration-Pull"],
+    { link: "https://example.com/ers-integration-pull", title: "Pulled from Raindrop" },
+    "seed pull raindrop"
   );
-  await assertCollectionUnderTestRoot(client, rootId, created.collection?.$id);
-  await waitUntilRaindropListed(client, leaf._id, created._id);
+  const { created } = seeded;
   await getRaindropInRoot(client, rootId, created._id);
 
   // Reconcile listing can lag behind collection-scoped lists; enqueue pull explicitly
   // once the live item exists (still exercises real Raindrop data + engine drain).
-  const { JOB } = constants;
-  await queue.enqueueJob({
-    id: `pull-${created._id}`,
-    kind: JOB.PULL_CREATE,
-    raindropId: String(created._id),
-    link: created.link,
-    title: created.title,
-    relativeSegments: ["Favorites bar", "Integration-Pull"],
-    collectionId: String(leaf._id),
-  });
+  await queue.enqueueJob(pullCreateJob(seeded));
   await drainWithRetry(client, sync);
 
   const edge = findEdgeByUrl("https://example.com/ers-integration-pull");
@@ -216,38 +229,18 @@ async function scenarioPullCreate(eng, client, rootId) {
 }
 
 async function scenarioRaindropDelete(eng, client, rootId) {
-  console.log("\n== integration: Raindrop delete → Edge delete ==");
-  const { constants, store, sync, queue } = eng;
-  const { JOB } = constants;
-  await resetAll(store, { integration: true });
-  await liveConfig(store, constants);
-
-  const leaf = await ensureCollectionPathUnderRoot(client, rootId, [
-    "Favorites bar",
-    "Integration-Remote-Del",
-  ]);
-  const created = await gateClient(
+  await beginScenario(eng, "Raindrop delete → Edge delete");
+  const { store, sync, queue } = eng;
+  const seeded = await seedLiveRaindrop(
     client,
-    () =>
-      client.createRaindrop({
-        link: "https://example.com/ers-integration-remote-delete",
-        title: "Remote delete",
-        collectionId: leaf._id,
-      }),
-    { label: "seed remote-delete raindrop" }
+    rootId,
+    ["Favorites bar", "Integration-Remote-Del"],
+    { link: "https://example.com/ers-integration-remote-delete", title: "Remote delete" },
+    "seed remote-delete raindrop"
   );
-  await assertCollectionUnderTestRoot(client, rootId, created.collection?.$id);
-  await waitUntilRaindropListed(client, leaf._id, created._id);
+  const { created } = seeded;
 
-  await queue.enqueueJob({
-    id: `pull-${created._id}`,
-    kind: JOB.PULL_CREATE,
-    raindropId: String(created._id),
-    link: created.link,
-    title: created.title,
-    relativeSegments: ["Favorites bar", "Integration-Remote-Del"],
-    collectionId: String(leaf._id),
-  });
+  await queue.enqueueJob(pullCreateJob(seeded));
   await drainWithRetry(client, sync);
   const edge = findEdgeByUrl("https://example.com/ers-integration-remote-delete");
   assert.ok(edge, "paired before remote delete");
@@ -275,22 +268,20 @@ async function scenarioRaindropDelete(eng, client, rootId) {
 }
 
 async function scenarioMove(eng, client, rootId) {
-  console.log("\n== integration: Edge move → Raindrop collection update ==");
-  const { constants, store, queue, sync } = eng;
-  await resetAll(store, { integration: true });
-  await liveConfig(store, constants);
-
-  const src = await createIntegrationFolder("Move-Src");
+  await beginScenario(eng, "Edge move → Raindrop collection update");
+  const { sync } = eng;
+  const {
+    folder: src,
+    bm,
+    rid,
+  } = await uploadedBookmark(
+    eng,
+    client,
+    "Move-Src",
+    "Move me",
+    "https://example.com/ers-integration-move"
+  );
   const dest = await createIntegrationFolder("Move-Dest");
-  const bm = await chrome.bookmarks.create({
-    parentId: src.id,
-    title: "Move me",
-    url: "https://example.com/ers-integration-move",
-  });
-  await queue.enqueue(bm.id);
-  await drainWithRetry(client, sync);
-  const rid = await store.getRaindropId(bm.id);
-  assert.ok(rid);
   const beforeCol = (await getRaindropInRoot(client, rootId, rid)).collection?.$id;
   await putRaindropRichFields(client, rid, { tags: ["move-keep"], note: "move-note" });
 
@@ -306,19 +297,15 @@ async function scenarioMove(eng, client, rootId) {
 }
 
 async function scenarioEdgeFolderRename(eng, client, rootId) {
-  console.log("\n== integration: Edge folder rename → Raindrop collection rename ==");
-  const { constants, store, queue, sync } = eng;
-  await resetAll(store, { integration: true });
-  await liveConfig(store, constants);
-
-  const folder = await createIntegrationFolder("Rename-Old");
-  const bm = await chrome.bookmarks.create({
-    parentId: folder.id,
-    title: "In renamed folder",
-    url: "https://example.com/ers-integration-folder-rename",
-  });
-  await queue.enqueue(bm.id);
-  await drainWithRetry(client, sync);
+  await beginScenario(eng, "Edge folder rename → Raindrop collection rename");
+  const { store, sync } = eng;
+  const { folder, bm, rid } = await uploadedBookmark(
+    eng,
+    client,
+    "Rename-Old",
+    "In renamed folder",
+    "https://example.com/ers-integration-folder-rename"
+  );
   const colId = await store.getFolderCollectionId(folder.id);
   assert.ok(colId != null, "folder mapped to collection");
 
@@ -332,7 +319,7 @@ async function scenarioEdgeFolderRename(eng, client, rootId) {
   assert.equal(col.item?.title, "Rename-New", "live collection renamed");
   await assertCollectionUnderTestRoot(client, rootId, colId);
 
-  const rid = await store.getRaindropId(bm.id);
+  assert.equal(await store.getRaindropId(bm.id), rid, "pair survives folder rename");
   const item = await getRaindropInRoot(client, rootId, rid);
   assert.equal(
     Number(item.collection?.$id),
@@ -343,22 +330,15 @@ async function scenarioEdgeFolderRename(eng, client, rootId) {
 }
 
 async function scenarioRaindropPullUpdate(eng, client, rootId) {
-  console.log("\n== integration: Raindrop edit → Edge pull-update ==");
-  const { constants, store, sync, queue } = eng;
-  const { JOB } = constants;
-  await resetAll(store, { integration: true });
-  await liveConfig(store, constants);
-
-  const folder = await createIntegrationFolder("Pull-Update");
-  const bm = await chrome.bookmarks.create({
-    parentId: folder.id,
-    title: "Original pull title",
-    url: "https://example.com/ers-integration-pull-update",
-  });
-  await queue.enqueue(bm.id);
-  await drainWithRetry(client, sync);
-  const rid = await store.getRaindropId(bm.id);
-  assert.ok(rid);
+  await beginScenario(eng, "Raindrop edit → Edge pull-update");
+  const { sync, queue } = eng;
+  const { bm, rid } = await uploadedBookmark(
+    eng,
+    client,
+    "Pull-Update",
+    "Original pull title",
+    "https://example.com/ers-integration-pull-update"
+  );
   await getRaindropInRoot(client, rootId, rid);
 
   const otherLeaf = await ensureCollectionPathUnderRoot(client, rootId, [
@@ -400,20 +380,15 @@ async function scenarioRaindropPullUpdate(eng, client, rootId) {
 }
 
 async function scenarioRaindropFolderRename(eng, client, rootId) {
-  console.log("\n== integration: Raindrop folder rename → Edge folder rename ==");
-  const { constants, store, queue, sync } = eng;
-  const { JOB } = constants;
-  await resetAll(store, { integration: true });
-  await liveConfig(store, constants);
-
-  const folder = await createIntegrationFolder("Rain-Rename-Old");
-  const bm = await chrome.bookmarks.create({
-    parentId: folder.id,
-    title: "Folder rename probe",
-    url: "https://example.com/ers-integration-rain-folder-rename",
-  });
-  await queue.enqueue(bm.id);
-  await drainWithRetry(client, sync);
+  await beginScenario(eng, "Raindrop folder rename → Edge folder rename");
+  const { store, queue, sync } = eng;
+  const { folder } = await uploadedBookmark(
+    eng,
+    client,
+    "Rain-Rename-Old",
+    "Folder rename probe",
+    "https://example.com/ers-integration-rain-folder-rename"
+  );
   const colId = await store.getFolderCollectionId(folder.id);
   assert.ok(colId);
   await assertCollectionUnderTestRoot(client, rootId, colId);
@@ -446,29 +421,17 @@ async function scenarioRaindropFolderRename(eng, client, rootId) {
  * outside the test root.
  */
 async function scenarioPullNowWaitAndResume(eng, client, rootId) {
-  console.log("\n== integration: Pull now waits out rate limit and resumes ==");
-  const { constants, store, sync, queue } = eng;
-  const { MSG, JOB } = constants;
-  await resetAll(store, { integration: true });
-  await liveConfig(store, constants);
-
-  const leaf = await ensureCollectionPathUnderRoot(client, rootId, [
-    "Favorites bar",
-    "Integration-PullNow-Wait",
-  ]);
+  await beginScenario(eng, "Pull now waits out rate limit and resumes");
+  const { store, sync, queue } = eng;
   const link = "https://example.com/ers-integration-pull-now-wait";
-  const created = await gateClient(
+  const seeded = await seedLiveRaindrop(
     client,
-    () =>
-      client.createRaindrop({
-        link,
-        title: "Pull now wait resume",
-        collectionId: leaf._id,
-      }),
-    { label: "seed pull-now-wait raindrop" }
+    rootId,
+    ["Favorites bar", "Integration-PullNow-Wait"],
+    { link, title: "Pull now wait resume" },
+    "seed pull-now-wait raindrop"
   );
-  await assertCollectionUnderTestRoot(client, rootId, created.collection?.$id);
-  await waitUntilRaindropListed(client, leaf._id, created._id);
+  const { created } = seeded;
   await getRaindropInRoot(client, rootId, created._id);
 
   // Synthetic pause = same store gate as HTTP 429 / proactive budget stop
@@ -477,29 +440,13 @@ async function scenarioPullNowWaitAndResume(eng, client, rootId) {
 
   let slept = 0;
   let reconcilePasses = 0;
-  const { text } = await runPullNow(
-    async (msg) => {
-      if (msg.type === MSG.GET_STATUS) {
-        return { ok: true, status: await store.getStatus() };
-      }
-      if (msg.type === MSG.RECONCILE_NOW) {
-        reconcilePasses++;
-        try {
-          const result = await sync.reconcileNow();
-          return { ok: true, ...result };
-        } catch (err) {
-          return { ok: false, error: err.message };
-        }
-      }
-      return { ok: false, error: `unexpected message ${msg.type}` };
+  const send = pullNowSend(eng, { onReconcile: () => reconcilePasses++ });
+  const { text } = await runPullNow(send, {
+    sleepFn: async () => {
+      slept++;
+      await store.clearRateLimit();
     },
-    {
-      sleepFn: async () => {
-        slept++;
-        await store.clearRateLimit();
-      },
-    }
-  );
+  });
 
   assert.equal(slept, 1, "Pull now waited out the rate-limit pause once");
   assert.ok(reconcilePasses >= 2, "skipped once under pause, then resumed reconcileNow");
@@ -508,15 +455,7 @@ async function scenarioPullNowWaitAndResume(eng, client, rootId) {
 
   // Live nested root list can be stale; pull the seeded item explicitly (same
   // pattern as scenarioPullCreate) after wait-and-resume already ran.
-  await queue.enqueueJob({
-    id: `pull-${created._id}`,
-    kind: JOB.PULL_CREATE,
-    raindropId: String(created._id),
-    link: created.link,
-    title: created.title,
-    relativeSegments: ["Favorites bar", "Integration-PullNow-Wait"],
-    collectionId: String(leaf._id),
-  });
+  await queue.enqueueJob(pullCreateJob(seeded));
   await drainWithRetry(client, sync);
 
   const edge = findEdgeByUrl(link);
@@ -535,6 +474,15 @@ async function scenarioPullNowWaitAndResume(eng, client, rootId) {
   console.log("  ✔ Pull now waited/resumed; seeded live raindrop pulled under test root");
 }
 
+/** Run each scenario, cleaning the test root after each and pausing between them. */
+async function runScenarios(eng, client, rootId, scenarios) {
+  for (const [i, scenario] of scenarios.entries()) {
+    await scenario(eng, client, rootId);
+    await gateClient(client, () => cleanupTestRoot(client, rootId), { label: "cleanupTestRoot" });
+    if (i < scenarios.length - 1) await pauseBetweenScenarios();
+  }
+}
+
 async function main() {
   console.log("Integration mode: mock Edge + live Raindrop");
   console.log(`Edge container: Favorites bar / ${TEST_ROOT_NAME} (id ${TEST_EDGE_CONTAINER_ID})`);
@@ -550,44 +498,18 @@ async function main() {
     }));
     console.log(`Using Raindrop test root _id=${rootId}`);
 
-    await scenarioCreateUpload(eng, client, rootId);
-    await gateClient(client, () => cleanupTestRoot(client, rootId), { label: "cleanupTestRoot" });
-    await pauseBetweenScenarios();
-
-    await scenarioUpdateTitleUrl(eng, client, rootId);
-    await gateClient(client, () => cleanupTestRoot(client, rootId), { label: "cleanupTestRoot" });
-    await pauseBetweenScenarios();
-
-    await scenarioEdgeDelete(eng, client, rootId);
-    await gateClient(client, () => cleanupTestRoot(client, rootId), { label: "cleanupTestRoot" });
-    await pauseBetweenScenarios();
-
-    await scenarioPullCreate(eng, client, rootId);
-    await gateClient(client, () => cleanupTestRoot(client, rootId), { label: "cleanupTestRoot" });
-    await pauseBetweenScenarios();
-
-    await scenarioRaindropDelete(eng, client, rootId);
-    await gateClient(client, () => cleanupTestRoot(client, rootId), { label: "cleanupTestRoot" });
-    await pauseBetweenScenarios();
-
-    await scenarioMove(eng, client, rootId);
-    await gateClient(client, () => cleanupTestRoot(client, rootId), { label: "cleanupTestRoot" });
-    await pauseBetweenScenarios();
-
-    await scenarioEdgeFolderRename(eng, client, rootId);
-    await gateClient(client, () => cleanupTestRoot(client, rootId), { label: "cleanupTestRoot" });
-    await pauseBetweenScenarios();
-
-    await scenarioRaindropPullUpdate(eng, client, rootId);
-    await gateClient(client, () => cleanupTestRoot(client, rootId), { label: "cleanupTestRoot" });
-    await pauseBetweenScenarios();
-
-    await scenarioRaindropFolderRename(eng, client, rootId);
-    await gateClient(client, () => cleanupTestRoot(client, rootId), { label: "cleanupTestRoot" });
-    await pauseBetweenScenarios();
-
-    await scenarioPullNowWaitAndResume(eng, client, rootId);
-    await gateClient(client, () => cleanupTestRoot(client, rootId), { label: "cleanupTestRoot" });
+    await runScenarios(eng, client, rootId, [
+      scenarioCreateUpload,
+      scenarioUpdateTitleUrl,
+      scenarioEdgeDelete,
+      scenarioPullCreate,
+      scenarioRaindropDelete,
+      scenarioMove,
+      scenarioEdgeFolderRename,
+      scenarioRaindropPullUpdate,
+      scenarioRaindropFolderRename,
+      scenarioPullNowWaitAndResume,
+    ]);
   } finally {
     if (rootId != null) {
       await gateClient(client, () => cleanupTestRoot(client, rootId), { label: "final cleanup" });

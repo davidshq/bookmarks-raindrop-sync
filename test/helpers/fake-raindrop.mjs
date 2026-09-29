@@ -11,6 +11,12 @@ function csvField(v) {
   return /[",\n\r]/.test(t) ? `"${t.replaceAll('"', '""')}"` : t;
 }
 
+/** One listRaindrops page of `all` plus the total count. */
+function pageOf(all, page, perPage) {
+  const start = page * perPage;
+  return { items: all.slice(start, start + perPage), count: all.length };
+}
+
 export function makeMockRaindrop() {
   let seq = 1;
   const collections = new Map(); // id -> { _id, title, parent }
@@ -25,6 +31,21 @@ export function makeMockRaindrop() {
     getRaindrop: 0,
     updateRaindrop: 0,
     searchRaindrops: 0,
+  };
+
+  /** Store a new live raindrop with a fresh id. */
+  const addRaindrop = (collectionId, { link, title, tags, note }) => {
+    const _id = seq++;
+    const item = {
+      _id,
+      link,
+      title,
+      collection: { $id: collectionId },
+      tags: tags || [],
+      note: note || "",
+    };
+    raindrops.set(_id, item);
+    return item;
   };
 
   return {
@@ -49,17 +70,7 @@ export function makeMockRaindrop() {
     },
     async createRaindrop({ link, title, collectionId }) {
       calls.createRaindrop++;
-      const _id = seq++;
-      const item = {
-        _id,
-        link,
-        title: title || link,
-        collection: { $id: collectionId },
-        tags: [],
-        note: "",
-      };
-      raindrops.set(_id, item);
-      return item;
+      return addRaindrop(collectionId, { link, title: title || link });
     },
     async listRaindrops(
       collectionId,
@@ -68,10 +79,7 @@ export function makeMockRaindrop() {
       calls.listRaindrops++;
       // Trash is a system collection — items live in `_trash`, not under a real parent.
       if (Number(collectionId) === -99) {
-        const all = [...trash.values()];
-        const start = page * perPage;
-        const items = all.slice(start, start + perPage);
-        return { items, count: all.length };
+        return pageOf([...trash.values()], page, perPage);
       }
       if (search != null && String(search).trim() !== "") {
         const q = String(search).toLowerCase();
@@ -84,8 +92,7 @@ export function makeMockRaindrop() {
               .toLowerCase()
               .includes(q)
         );
-        const start = page * perPage;
-        return { items: all.slice(start, start + perPage), count: all.length };
+        return pageOf(all, page, perPage);
       }
       const under = new Set();
       const walk = (id) => {
@@ -97,9 +104,7 @@ export function makeMockRaindrop() {
       if (nested) walk(collectionId);
       else under.add(Number(collectionId));
       const all = [...raindrops.values()].filter((r) => under.has(Number(r.collection?.$id)));
-      const start = page * perPage;
-      const items = all.slice(start, start + perPage);
-      return { items, count: all.length };
+      return pageOf(all, page, perPage);
     },
     async searchRaindrops(query, { perPage = 50 } = {}) {
       calls.searchRaindrops++;
@@ -151,19 +156,8 @@ export function makeMockRaindrop() {
     _totalCalls() {
       return Object.values(calls).reduce((a, b) => a + b, 0);
     },
-    _seedRich(collectionId, { link, title, tags, note }) {
-      const _id = seq++;
-      const item = {
-        _id,
-        link,
-        title,
-        collection: { $id: collectionId },
-        tags: tags || [],
-        note: note || "",
-      };
-      raindrops.set(_id, item);
-      return item;
+    _seedRich(collectionId, fields) {
+      return addRaindrop(collectionId, fields);
     },
   };
 }
-
