@@ -368,11 +368,18 @@ async function applyDeleteEvidence({ snapshot, trash, treeIndex, config, source 
 
 /**
  * Tombstones for ids absent from a complete snapshot are stale (the raindrop
- * is gone for good). Tombstones for present ids (offload) are kept.
+ * is gone for good). Tombstones for present ids (offload) are kept, and so is
+ * any tombstone written after the export began: the snapshot cannot speak for
+ * it (an offload that created its raindrop after the export would otherwise
+ * be pulled back into Edge).
  */
 async function pruneTombstonesFromSnapshot(snapshot) {
   if (!isUsableForAbsence(snapshot)) return;
-  const absent = Object.keys(await getTombstones()).filter((rid) => !snapshot.ids.has(rid));
+  const stones = await getTombstones();
+  const absent = Object.keys(stones).filter((rid) => {
+    const at = stones[rid]?.at;
+    return !snapshot.ids.has(rid) && !(typeof at === "number" && at > snapshot.at);
+  });
   if (!absent.length) return;
   await pruneTombstones(absent);
   await appendLog("info", `Pruned ${absent.length} stale tombstone(s).`);

@@ -299,3 +299,24 @@ test("completed reconcile stores pair health; Status exposes it", async () => {
   assert.equal(health.staleEdgeId, 1);
   assert.equal(health.complete, true);
 });
+
+test("a tombstone newer than the snapshot is not pruned (offload after the export)", async () => {
+  // Heartbeat reuses the snapshot until the interval passes.
+  const { eng, mock, root } = await setupEngine({ config: { reconcileIntervalMinutes: 60 } });
+  await warmPresence(eng);
+  await new Promise((r) => setTimeout(r, 5));
+  // Offloaded after the export began: absent from that snapshot, alive in Raindrop.
+  const url = "https://e.example/offloaded";
+  const item = mock._seedRich(root._id, { link: url, title: "offloaded" });
+  await eng.store.addTombstone(String(item._id), "edge-offload");
+
+  await eng.reconcile.reconcile({ force: false }); // heartbeat
+  assert.equal((await eng.presence.loadPresence()).seq, 1, "heartbeat reused the snapshot");
+  assert.equal(await eng.store.hasTombstone(String(item._id)), true, "tombstone kept");
+  await eng.sync.drain();
+  assert.equal(
+    [...bookmarks.values()].some((b) => b.url === url),
+    false,
+    "offloaded raindrop not pulled back into Edge"
+  );
+});
