@@ -295,3 +295,21 @@ test("migration drops a pair whose id holds another bookmark and whose raindrop 
   assert.equal(out.dropped, 1);
   assert.equal(out.records["7"], undefined);
 });
+
+test("record left on the raindrop's old URL heals when the bookmark has its new URL", () => {
+  // Raindrop 7 changed its link to URL_B and a pull-update moved bookmark 500
+  // to URL_B, but the record still carries URL_A.
+  const URL_B = "https://b.example/new";
+  const tree = treeIndexFromList([{ id: "500", url: URL_B, path: [] }]);
+  const snapshot = buildSnapshot(`id,url\n7,${URL_B}\n`, { at: 1000 });
+  const records = { 7: record("7", "500", URL_A, { lastSeenRaindropAt: 1 }) };
+  const pass = rebindPass({ records, treeIndex: tree, snapshot });
+  assert.equal(pass.records["7"].bookmarkId, "500", "kept on its bookmark");
+  assert.equal(pass.records["7"].url, URL_B, "URL refreshed");
+  assert.deepEqual(pass.staleEdge, []);
+  assert.deepEqual(pass.edgeRebinds, []);
+  assert.deepEqual(
+    pass.changes.map((c) => c.type),
+    ["fill"]
+  );
+});

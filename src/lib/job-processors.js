@@ -733,6 +733,18 @@ async function processPullUpdate(job, ctx) {
     await queue.remove(job.id);
     return;
   }
+  // After a renumber the id can hold an unrelated bookmark: never rewrite it.
+  // Reconcile rebinds the pair by URL; the next listing re-enqueues the update.
+  const pending = await queue.pendingUploadIds();
+  if (!isPairBookmarkLive(await getPairRecord(rid), node, pending)) {
+    await appendLog(
+      "warn",
+      `Skipped Raindrop→Edge update for ${job.title || job.link}: bookmark ${bookmarkId} ` +
+        "now holds a different URL (ids renumbered?)."
+    );
+    await queue.remove(job.id);
+    return;
+  }
 
   const relative = job.relativeSegments || [];
   const index = await getIndex();
@@ -819,6 +831,13 @@ async function processPullUpdate(job, ctx) {
       rootName: config.rootName,
       edgeLeafFolderId: mapLeaf,
     });
+  }
+
+  // Keep the pair's URL and placement in step with what was just written:
+  // a bookmark counts as the pair's only while its URL matches the record.
+  const applied = await getNodeOrNull(bookmarkId);
+  if (applied?.url) {
+    await recordSynced(bookmarkId, rid, await pulledMeta(applied, job, job.collectionId));
   }
 
   await queue.remove(job.id);

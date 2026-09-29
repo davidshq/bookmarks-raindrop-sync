@@ -217,13 +217,28 @@ export function rebindPass({
   }
 
   // Edge side: bookmark id gone from the tree, or reused by another bookmark.
-  const edgeLive = (rec) =>
+  const entryOf = (rec) =>
+    rec?.bookmarkId != null ? treeIndex.byId.get(String(rec.bookmarkId)) : undefined;
+  // Pull-updates before the record kept pace left records on the raindrop's
+  // old URL while the bookmark took the new one. The raindrop's current link
+  // matching the bookmark is the pair: heal the record instead of rebinding.
+  const driftedUrl = (rid, rec) => {
+    const current = snapshot?.urlById?.get(rid);
+    const entry = entryOf(rec);
+    return current && entry && !isPairBookmarkLive(rec, entry, pendingBookmarkIds)
+      ? isPairBookmarkLive({ url: current }, entry)
+        ? current
+        : null
+      : null;
+  };
+  const edgeLive = (rid, rec) =>
+    !!rec &&
     rec.bookmarkId != null &&
-    isPairBookmarkLive(rec, treeIndex.byId.get(String(rec.bookmarkId)), pendingBookmarkIds);
+    (isPairBookmarkLive(rec, entryOf(rec), pendingBookmarkIds) || driftedUrl(rid, rec) != null);
   // A reused id is free for the pair whose bookmark it now is (renumbers can
   // swap or chain ids between pairs).
   for (const [bid, rid] of Object.entries(byBookmark)) {
-    if (treeIndex.byId.has(bid) && !edgeLive(records[rid])) {
+    if (treeIndex.byId.has(bid) && !edgeLive(rid, records[rid])) {
       delete byBookmark[bid];
       delete byRaindrop[rid];
     }
@@ -232,7 +247,20 @@ export function rebindPass({
     const rec = records[rid];
     if (!rec) continue;
     const bid = rec.bookmarkId != null ? String(rec.bookmarkId) : null;
-    if (edgeLive(rec)) continue;
+    if (edgeLive(rid, rec)) {
+      const healed = driftedUrl(rid, rec);
+      if (healed) {
+        const next = makePairRecord(rid, {
+          ...rec,
+          url: healed,
+          urlKey: primaryUrlKey(healed),
+          lastSeenEdgeAt: now,
+        });
+        changes.push({ type: "fill", raindropId: rid, bookmarkId: rec.bookmarkId, record: next });
+        records[rid] = next;
+      }
+      continue;
+    }
     const hit = rebindStaleEdgeId(rec, treeIndex, view);
     if (!hit) {
       staleEdge.push(rid);

@@ -365,3 +365,26 @@ test("circuit breaker holds evidence-based Edge deletes past the limit", async (
   assert.equal((await jobsOfKind(eng, "delete-edge")).length, HELD, "the rest stay queued");
   assert.equal((await eng.store.getDeleteBreaker()).tripped, true);
 });
+
+test("pull-update never rewrites an unrelated bookmark that now holds the pair's id", async () => {
+  const { eng, mock, root } = await setupEngine();
+  const { item, bm, rid } = await pairedBookmark(eng, mock, root, "1", "https://e.example/pu");
+  // Renumber: the pair's id now belongs to a different bookmark.
+  const node = bookmarks.get(String(bm.id));
+  node.url = "https://unrelated.example/";
+  node.title = "unrelated";
+  await eng.queue.enqueueJob({
+    id: `pu-${rid}`,
+    kind: "pull-update",
+    raindropId: rid,
+    bookmarkId: String(bm.id),
+    link: "https://e.example/pu-edited",
+    title: "edited in Raindrop",
+    relativeSegments: [],
+    collectionId: String(item.collection?.$id ?? root._id),
+  });
+  await eng.sync.drain();
+  assert.equal(bookmarks.get(String(bm.id)).url, "https://unrelated.example/", "URL untouched");
+  assert.equal(bookmarks.get(String(bm.id)).title, "unrelated", "title untouched");
+  assert.equal((await jobsOfKind(eng, "pull-update")).length, 0, "job dropped");
+});
