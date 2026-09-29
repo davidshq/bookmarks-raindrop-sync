@@ -1,11 +1,10 @@
-#!/usr/bin/env node
 /**
  * Isolated checklist verification for bidirectional sync, folder policies,
  * rate-limit / shared wake spendable / dead-letter paths, and export/queue
  * bulk-lane engine wiring (scenarios 6.2–7.7). Scenario 6.8 covers ordered
  * prefer-drain + leftover listing (including tick) and reentrancy `busy`.
  * Scenario 6.8d covers Pull now wait-and-resume through real reconcileNow.
- * Pure bulk heuristics / Match planner live in verify-bidirectional-logic.mjs.
+ * Pure bulk heuristics / Match planner live in test/logic.test.mjs.
  *
  * SAFETY:
  * - Edge bookmarks are 100% in-memory mocks — never touches the real Edge tree.
@@ -15,11 +14,12 @@
  * - Scenarios only create/assert ERS-Verify-* collections and example.com/ers-* URLs.
  *
  * Usage:
- *   node scripts/verify-checklist.mjs
- *   RAINDROP_TOKEN=… node scripts/verify-checklist.mjs --live
+ *   npm test                  (node --test test/, fully mocked)
+ *   RAINDROP_TOKEN=… npm run test:live   (node test/checklist.test.mjs --live)
  */
 
 import assert from "node:assert/strict";
+import { test, after } from "node:test";
 import { RAINDROP_API } from "../src/lib/constants.js";
 import { runPullNow } from "../src/lib/pull-now.js";
 import {
@@ -32,7 +32,8 @@ import {
   bookmarks as harnessBookmarks,
   bookmarks,
   storage,
-} from "./lib/test-harness.mjs";
+} from "../scripts/lib/test-harness.mjs";
+import { makeMockRaindrop } from "./helpers/fake-raindrop.mjs";
 
 const LIVE = process.argv.includes("--live");
 const TOKEN = loadToken();
@@ -84,159 +85,6 @@ async function liveCleanup() {
   }
   createdLive.raindrops = [];
   createdLive.collections = [];
-}
-
-/* -------------------------------------------------------------------------- */
-/* In-memory Raindrop mock (used when not --live)                             */
-/* -------------------------------------------------------------------------- */
-
-function makeMockRaindrop() {
-  let seq = 1;
-  const collections = new Map(); // id -> { _id, title, parent }
-  const raindrops = new Map(); // id -> item
-  const trash = new Map();
-  /** @type {{ listRaindrops: number, createRaindrop: number, deleteRaindrop: number, exportRaindropsCsv: number, getRaindrop: number, updateRaindrop: number, searchRaindrops: number }} */
-  const calls = {
-    listRaindrops: 0,
-    createRaindrop: 0,
-    deleteRaindrop: 0,
-    exportRaindropsCsv: 0,
-    getRaindrop: 0,
-    updateRaindrop: 0,
-    searchRaindrops: 0,
-  };
-
-  return {
-    async getUser() {
-      return { _id: 1, fullName: "mock" };
-    },
-    async getRootCollections() {
-      return [...collections.values()].filter((c) => !c.parent?.$id);
-    },
-    async getChildCollections() {
-      return [...collections.values()].filter((c) => c.parent?.$id);
-    },
-    async createCollection(title, parentId) {
-      const _id = seq++;
-      const item = {
-        _id,
-        title,
-        parent: parentId != null ? { $id: parentId } : null,
-      };
-      collections.set(_id, item);
-      return item;
-    },
-    async createRaindrop({ link, title, collectionId }) {
-      calls.createRaindrop++;
-      const _id = seq++;
-      const item = {
-        _id,
-        link,
-        title: title || link,
-        collection: { $id: collectionId },
-        tags: [],
-        note: "",
-      };
-      raindrops.set(_id, item);
-      return item;
-    },
-    async listRaindrops(
-      collectionId,
-      { nested = false, page = 0, perPage = 50, search = undefined } = {}
-    ) {
-      calls.listRaindrops++;
-      // Trash is a system collection — items live in `_trash`, not under a real parent.
-      if (Number(collectionId) === -99) {
-        const all = [...trash.values()];
-        const start = page * perPage;
-        const items = all.slice(start, start + perPage);
-        return { items, count: all.length };
-      }
-      if (search != null && String(search).trim() !== "") {
-        const q = String(search).toLowerCase();
-        const all = [...raindrops.values()].filter(
-          (r) =>
-            String(r.link || "")
-              .toLowerCase()
-              .includes(q) ||
-            String(r.title || "")
-              .toLowerCase()
-              .includes(q)
-        );
-        const start = page * perPage;
-        return { items: all.slice(start, start + perPage), count: all.length };
-      }
-      const under = new Set();
-      const walk = (id) => {
-        under.add(Number(id));
-        for (const c of collections.values()) {
-          if (c.parent?.$id === Number(id) || String(c.parent?.$id) === String(id)) walk(c._id);
-        }
-      };
-      if (nested) walk(collectionId);
-      else under.add(Number(collectionId));
-      const all = [...raindrops.values()].filter((r) => under.has(Number(r.collection?.$id)));
-      const start = page * perPage;
-      const items = all.slice(start, start + perPage);
-      return { items, count: all.length };
-    },
-    async searchRaindrops(query, { perPage = 50 } = {}) {
-      calls.searchRaindrops++;
-      return this.listRaindrops(0, { page: 0, perPage, search: query });
-    },
-    async getRaindrop(id) {
-      calls.getRaindrop++;
-      // Live items only — trashed ids are "gone" for delete-detection confirms.
-      return raindrops.get(Number(id)) || null;
-    },
-    async updateRaindrop(id, patch) {
-      calls.updateRaindrop++;
-      const item = raindrops.get(Number(id));
-      if (!item) throw new Error(`Raindrop PUT /raindrop/${id} failed: 404`);
-      if (patch.link != null) item.link = patch.link;
-      if (patch.title != null) item.title = patch.title;
-      if (patch.collectionId != null) item.collection = { $id: patch.collectionId };
-      // intentionally never clear tags/note unless provided — engine won't send them
-      return item;
-    },
-    async updateCollection(id, { title } = {}) {
-      const item = collections.get(Number(id));
-      if (!item) throw new Error(`Raindrop PUT /collection/${id} failed: 404`);
-      if (title != null) item.title = title;
-      return item;
-    },
-    async deleteRaindrop(id) {
-      calls.deleteRaindrop++;
-      const item = raindrops.get(Number(id));
-      if (item) {
-        raindrops.delete(Number(id));
-        trash.set(Number(id), { ...item, collection: { $id: -99 } });
-      }
-    },
-    async exportRaindropsCsv(collectionId = 0) {
-      calls.exportRaindropsCsv++;
-      void collectionId;
-      return "id,url\n";
-    },
-    // test helpers
-    _collections: collections,
-    _raindrops: raindrops,
-    _trash: trash,
-    _calls: calls,
-    _seedRich(collectionId, { link, title, tags, note }) {
-      const _id = seq++;
-      const item = {
-        _id,
-        link,
-        title,
-        collection: { $id: collectionId },
-        tags: tags || [],
-        note: note || "",
-      };
-      raindrops.set(_id, item);
-      return item;
-    },
-  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -338,9 +186,18 @@ async function scenario63_bidirectional() {
   assert.ok(pulled, "pulled into Edge");
   assert.equal(await eng.store.getBookmarkIdForRaindrop(String(remote._id)), pulled.id);
 
-  // Edge user delete → Raindrop delete + tombstone
-  await chrome.bookmarks.remove(pulled.id);
+  // Removal without Chromium's node payload is not evidence: no delete, pair kept.
   await eng.sync.handleBookmarkRemoved(pulled.id, { parentId: pulled.parentId });
+  await eng.sync.drain();
+  assert.equal(mock._raindrops.has(remote._id), true, "no payload → no Raindrop delete");
+  assert.equal(await eng.store.getBookmarkIdForRaindrop(String(remote._id)), pulled.id);
+
+  // Edge user delete (with node payload) → Raindrop delete + tombstone
+  await chrome.bookmarks.remove(pulled.id);
+  await eng.sync.handleBookmarkRemoved(pulled.id, {
+    parentId: pulled.parentId,
+    node: { id: pulled.id, title: pulled.title, url: pulled.url, parentId: pulled.parentId },
+  });
   await eng.sync.drain();
   assert.equal(mock._raindrops.has(remote._id), false, "raindrop deleted");
   assert.equal(mock._trash.has(remote._id), true, "moved to trash mock");
@@ -389,6 +246,7 @@ async function scenario63_bidirectional() {
     kind: JOB.DELETE_RAINDROP,
     raindropId: pendingRid,
     bookmarkId: "gone",
+    url: "https://example.com/ers-verify-pending-del",
   });
   await eng.sync.drain();
   assert.equal(
@@ -1038,7 +896,8 @@ async function scenario67_raindropFolderAllowlist() {
     "drop lands in original outside-root collection (not Edge/Other favorites/Raindrop/…)"
   );
 
-  // Clear allowlist: outside-root pair must still survive; confirm parks it.
+  // Clear allowlist: outside-root pair must still survive. It is in the export
+  // snapshot, so it is present — never a delete candidate, no per-id GET.
   await eng.store.setConfig({
     raindropFolderAllowlist: {},
   });
@@ -1052,21 +911,24 @@ async function scenario67_raindropFolderAllowlist() {
     (await eng.store.getPairs()).byRaindrop[String(indieItem._id)],
     "pair still mapped after clearing allowlist"
   );
-  const parkedAfterClear = await eng.store.getParkedAliveIds();
-  assert.ok(
-    parkedAfterClear.has(String(indieItem._id)),
-    "cleared-allowlist outside-root alive is parked"
+  assert.equal(
+    (await eng.queue.list()).some(
+      (j) =>
+        j.kind === eng.constants.JOB.DELETE_EDGE && String(j.raindropId) === String(indieItem._id)
+    ),
+    false,
+    "cleared-allowlist outside-root alive is not a delete candidate"
   );
 
   console.log(
-    "  ✔ allowlist skip/allow/empty-folder/Edge-bypass/empty-preserves-mode/prune/legacy/outside-root/upload-roundtrip/clear/park"
+    "  ✔ allowlist skip/allow/empty-folder/Edge-bypass/empty-preserves-mode/prune/legacy/outside-root/upload-roundtrip/clear/present"
   );
 }
 
 async function scenario68_rateLimitBudget() {
-  console.log("\n== 6.8 Rate-limit gate + spendable delete-confirm GETs ==");
+  console.log("\n== 6.8 Rate-limit gate + export presence (no per-id GETs) ==");
   const eng = await importEngine();
-  const { POLICY, SYNC_MODE, JOB, MAX_ALIVE_CHECKS_PER_TICK } = eng.constants;
+  const { POLICY, SYNC_MODE, JOB } = eng.constants;
   await resetAll(eng.store);
 
   const mock = makeMockRaindrop();
@@ -1093,9 +955,10 @@ async function scenario68_rateLimitBudget() {
   assert.equal(mock._collections.size, 0, "no collection fetch while gated");
   await eng.store.clearRateLimit();
 
-  // Create root + many pairs that are NOT in the Raindrop listing → delete confirms.
+  // Many pairs whose raindrops are permanently gone: one export finds them all.
   const root = await mock.createCollection("ERS-Verify-Rate", null);
-  const orphans = MAX_ALIVE_CHECKS_PER_TICK + 5;
+  mock._seedRich(root._id, { link: "https://example.com/ers-rate-bystander", title: "bystander" });
+  const orphans = 45;
   for (let i = 0; i < orphans; i++) {
     const rid = 9000 + i;
     mock._raindrops.set(rid, {
@@ -1104,23 +967,22 @@ async function scenario68_rateLimitBudget() {
       title: `orphan-${i}`,
       collection: { $id: root._id },
     });
-    // Pair exists, then remove from Raindrop so confirm path runs.
-    await eng.store.recordSynced(`bm-orphan-${i}`, String(rid));
+    await eng.store.recordSynced(`bm-orphan-${i}`, String(rid), {
+      url: `https://example.com/ers-orphan-${i}`,
+    });
     mock._raindrops.delete(rid);
   }
 
   getRaindropCalls = 0;
+  const exportsBefore = mock._calls.exportRaindropsCsv;
   await eng.reconcile.reconcile();
-  assert.equal(
-    getRaindropCalls,
-    MAX_ALIVE_CHECKS_PER_TICK,
-    `alive checks exactly capped (got ${getRaindropCalls})`
-  );
+  assert.equal(getRaindropCalls, 0, "presence never GETs raindrops by id");
+  assert.equal(mock._calls.exportRaindropsCsv - exportsBefore, 1, "one export per cycle");
   let deleteJobs = (await eng.queue.list()).filter((j) => j.kind === JOB.DELETE_EDGE);
-  assert.equal(
-    deleteJobs.length,
-    MAX_ALIVE_CHECKS_PER_TICK,
-    "only confirmed-gone pairs enqueue deletes this tick"
+  assert.equal(deleteJobs.length, orphans, "every absent pair enqueued in one cycle");
+  assert.ok(
+    deleteJobs.every((j) => j.signal === "absent"),
+    "absence signal on the job"
   );
   const pairs = await eng.store.getPairs();
   assert.equal(
@@ -1128,22 +990,12 @@ async function scenario68_rateLimitBudget() {
     orphans,
     "pairs uncleared until DELETE_EDGE drains (no stampede side effects)"
   );
-  const offsetAfter = (await eng.store.getReconcileState()).aliveConfirmOffset;
-  assert.equal(
-    offsetAfter,
-    MAX_ALIVE_CHECKS_PER_TICK % orphans,
-    "aliveConfirmOffset advances past the first window"
-  );
 
-  // Second cycle rotates — remaining orphans get delete jobs (cap may wrap).
-  getRaindropCalls = 0;
+  // A second cycle does not duplicate jobs.
   await eng.reconcile.reconcile();
-  assert.ok(
-    getRaindropCalls > 0 && getRaindropCalls <= MAX_ALIVE_CHECKS_PER_TICK,
-    `second cycle still capped (got ${getRaindropCalls})`
-  );
   deleteJobs = (await eng.queue.list()).filter((j) => j.kind === JOB.DELETE_EDGE);
-  assert.equal(deleteJobs.length, orphans, "all orphans eventually queued across cycles");
+  assert.equal(deleteJobs.length, orphans, "no duplicate delete-edge jobs");
+  assert.equal(getRaindropCalls, 0, "still no per-id GETs");
 
   // 429 during drain sets global pause + defers due jobs.
   await eng.store.clearRateLimit();
@@ -1175,11 +1027,10 @@ async function scenario68_rateLimitBudget() {
   await eng.store.setReconcileState({
     cursorPage: 0,
     outsideCursor: null,
-    seenAcc: null,
     running: false,
     lastRunAt: Date.now(),
     lastSettledAt: Date.now(),
-    unsettledConfirmCatchUp: false,
+    presencePending: false,
     lastError: null,
   });
   const cooled = await eng.reconcile.reconcile({ force: false });
@@ -1188,48 +1039,35 @@ async function scenario68_rateLimitBudget() {
   const forced = await eng.reconcile.reconcile({ force: true });
   assert.notEqual(forced.skipped, true, "manual reconcile bypasses cooldown");
 
-  // Unsettled confirm catch-up: no cooldown; with seenAcc → confirm-only (no re-list).
+  // Due export did not fit the last finish: no cooldown, presence-only finish
+  // (no nested re-list).
   await eng.queue.clear(); // forced reconcile may have re-queued delete-edge work
   await eng.store.setReconcileState({
     cursorPage: 0,
     outsideCursor: null,
-    seenAcc: ["keep-presence"],
     running: false,
     lastRunAt: Date.now(),
     lastSettledAt: Date.now(),
-    unsettledConfirmCatchUp: true,
+    presencePending: true,
     lastError: null,
   });
   let listCalls = 0;
   const prevList = Proto.listRaindrops;
   Proto.listRaindrops = async function (collectionId, ...args) {
-    // Trash peek (-99) is allowed on confirm-only; nested root list is not.
+    // Trash peek (-99) is allowed on a presence-only finish; nested root list is not.
     if (collectionId !== -99) listCalls++;
     return prevList.apply(this, [collectionId, ...args]);
   };
-  const catchUp = await eng.reconcile.reconcile({ force: false });
+  const pendingFinish = await eng.reconcile.reconcile({ force: false });
   Proto.listRaindrops = prevList;
-  assert.notEqual(catchUp.reason, "cooldown", "unsettled catch-up skips cooldown");
-  assert.notEqual(catchUp.skipped, true, "unsettled catch-up runs");
-  assert.equal(catchUp.confirmCatchUp, true, "unsettled + seenAcc is confirm-only");
-  assert.equal(listCalls, 0, "confirm-only does not nested-list the sync root");
-
-  // Unsettled without a presence snapshot still starts a listing rebuild.
-  await eng.queue.clear();
-  await eng.store.setReconcileState({
-    cursorPage: 0,
-    outsideCursor: null,
-    seenAcc: null,
-    running: false,
-    lastRunAt: Date.now(),
-    lastSettledAt: Date.now(),
-    unsettledConfirmCatchUp: true,
-    lastError: null,
-  });
-  const catchUpList = await eng.reconcile.reconcile({ force: false });
-  assert.notEqual(catchUpList.reason, "cooldown", "unsettled without seenAcc skips cooldown");
-  assert.notEqual(catchUpList.skipped, true, "unsettled without seenAcc starts listing");
-  assert.notEqual(catchUpList.confirmCatchUp, true, "missing snapshot is not confirm-only");
+  assert.notEqual(pendingFinish.reason, "cooldown", "pending presence skips cooldown");
+  assert.equal(pendingFinish.presenceOnly, true, "pending presence finishes without listing");
+  assert.equal(listCalls, 0, "presence-only finish does not nested-list the sync root");
+  assert.equal(
+    (await eng.store.getReconcileState()).presencePending,
+    false,
+    "refresh landed; cycle complete"
+  );
 
   // Adaptive: quiet install honors a short configured interval.
   await eng.queue.clear();
@@ -1237,11 +1075,10 @@ async function scenario68_rateLimitBudget() {
   await eng.store.setReconcileState({
     cursorPage: 0,
     outsideCursor: null,
-    seenAcc: null,
     running: false,
     lastRunAt: Date.now() - 90_000,
     lastSettledAt: Date.now() - 90_000,
-    unsettledConfirmCatchUp: false,
+    presencePending: false,
     lastError: null,
   });
   const quiet = await eng.reconcile.reconcile({ force: false });
@@ -1252,11 +1089,10 @@ async function scenario68_rateLimitBudget() {
   await eng.store.setReconcileState({
     cursorPage: 0,
     outsideCursor: null,
-    seenAcc: null,
     running: false,
     lastRunAt: Date.now() - 90_000,
     lastSettledAt: Date.now() - 90_000,
-    unsettledConfirmCatchUp: false,
+    presencePending: false,
     lastError: null,
   });
   const queuedShare = await eng.reconcile.reconcile({ force: false });
@@ -1276,11 +1112,10 @@ async function scenario68_rateLimitBudget() {
   await eng.store.setReconcileState({
     cursorPage: 0,
     outsideCursor: null,
-    seenAcc: null,
     running: false,
     lastRunAt: Date.now() - 90_000,
     lastSettledAt: Date.now() - 90_000,
-    unsettledConfirmCatchUp: false,
+    presencePending: false,
     lastError: null,
   });
   let rootFetches = 0;
@@ -1300,11 +1135,10 @@ async function scenario68_rateLimitBudget() {
   await eng.store.setReconcileState({
     cursorPage: 1,
     outsideCursor: null,
-    seenAcc: ["1"],
     running: false,
     lastRunAt: Date.now() - 90_000,
     lastSettledAt: Date.now() - 90_000,
-    unsettledConfirmCatchUp: false,
+    presencePending: false,
     lastError: null,
   });
   const midCycle = await eng.reconcile.reconcile({ force: false });
@@ -1356,11 +1190,10 @@ async function scenario68_rateLimitBudget() {
   await eng.store.setReconcileState({
     cursorPage: 0,
     outsideCursor: null,
-    seenAcc: null,
     running: false,
     lastRunAt: Date.now() - 90_000,
     lastSettledAt: Date.now() - 90_000,
-    unsettledConfirmCatchUp: false,
+    presencePending: false,
     lastError: null,
   });
   const tickBm = await chrome.bookmarks.create({
@@ -1407,8 +1240,8 @@ async function scenario68_rateLimitBudget() {
   );
 
   console.log(
-    "  ✔ global gate, capped confirms, round-robin, skip reasons, settled cooldown, " +
-      "unsettled catch-up, ordered share, empty-budget gate, reentrancy busy, " +
+    "  ✔ global gate, one-export presence, skip reasons, completed cooldown, " +
+      "presence-only finish, ordered share, empty-budget gate, reentrancy busy, " +
       "tick prefer-drain+list, reconcileNow gate"
   );
 }
@@ -1436,7 +1269,12 @@ async function scenario68b_trashFastPath() {
   });
   const root = await mock.createCollection("ERS-Verify-Trash", null);
 
-  // Paired soft-delete → Trash list enqueues delete-edge without confirm GET.
+  // Unrelated live raindrop: the library never empties (an empty export while
+  // pairs exist is incomplete by design).
+  mock._seedRich(root._id, { link: "https://example.com/ers-trash-bystander", title: "bystander" });
+
+  // Paired soft-delete → Trash list enqueues delete-edge without any per-id GET.
+  // Id-only record (legacy shape): the Trash item's link fills the URL.
   const live = mock._seedRich(root._id, {
     link: "https://example.com/ers-trash-paired",
     title: "trash-paired",
@@ -1453,21 +1291,19 @@ async function scenario68b_trashFastPath() {
 
   getRaindropCalls = 0;
   await eng.reconcile.reconcile({ force: true });
-  assert.equal(
-    (await eng.queue.list()).filter(
-      (j) => j.kind === JOB.DELETE_EDGE && String(j.raindropId) === String(live._id)
-    ).length,
-    1,
-    "paired trash id enqueues delete-edge"
+  const trashJob = (await eng.queue.list()).filter(
+    (j) => j.kind === JOB.DELETE_EDGE && String(j.raindropId) === String(live._id)
   );
+  assert.equal(trashJob.length, 1, "paired trash id enqueues delete-edge");
+  assert.equal(trashJob[0].signal, "trash");
   assert.equal(
     (await eng.queue.list()).filter((j) => String(j.raindropId) === String(stray._id)).length,
     0,
     "unpaired trash id ignored"
   );
-  assert.equal(getRaindropCalls, 0, "trash fast path skips confirm GET for handled ids");
+  assert.equal(getRaindropCalls, 0, "trash fast path never GETs by id");
 
-  // Permanent delete (not in Trash) still uses confirm-GET fallback.
+  // Permanent delete (not in Trash): absence from a complete export snapshot.
   const jobs = await eng.queue.list();
   await chrome.storage.local.set({
     queue: jobs.filter((j) => j.id !== `de-${live._id}`),
@@ -1479,18 +1315,19 @@ async function scenario68b_trashFastPath() {
     title: "hard-gone",
     collection: { $id: root._id },
   });
-  await eng.store.recordSynced("bm-hard-gone", String(hardRid));
+  await eng.store.recordSynced("bm-hard-gone", String(hardRid), {
+    url: "https://example.com/ers-hard-gone",
+  });
   mock._raindrops.delete(hardRid); // hard gone — not moved to trash
 
   getRaindropCalls = 0;
   await eng.reconcile.reconcile({ force: true });
-  assert.ok(getRaindropCalls >= 1, "confirm GET still runs for non-trash absence");
-  assert.ok(
-    (await eng.queue.list()).some(
-      (j) => j.kind === JOB.DELETE_EDGE && String(j.raindropId) === String(hardRid)
-    ),
-    "confirm-GET fallback enqueues delete-edge for permanent delete"
+  assert.equal(getRaindropCalls, 0, "absence detection uses the export, not GETs");
+  const hardJob = (await eng.queue.list()).find(
+    (j) => j.kind === JOB.DELETE_EDGE && String(j.raindropId) === String(hardRid)
   );
+  assert.ok(hardJob, "snapshot absence enqueues delete-edge for permanent delete");
+  assert.equal(hardJob.signal, "absent");
 
   const hygiene = await eng.store.getReconcileState();
   assert.ok(hygiene.trashHygieneAt != null, "trash hygiene snapshot stamped");
@@ -1499,7 +1336,7 @@ async function scenario68b_trashFastPath() {
   const { deriveTrashSafeState } = await import("../src/lib/trash-hygiene.js");
   assert.equal(deriveTrashSafeState(hygiene), "safe", "complete clear ⇒ safe to empty");
 
-  console.log("  ✔ paired trash → delete-edge; unpaired ignored; confirm fallback for hard delete");
+  console.log("  ✔ paired trash → delete-edge; unpaired ignored; snapshot absence for hard delete");
 }
 
 async function scenario68e_trashSafeStatus() {
@@ -1529,6 +1366,7 @@ async function scenario68e_trashSafeStatus() {
     defaultPolicy: POLICY.SYNC_KEEP,
   });
   const root = await mock.createCollection("ERS-Verify-TrashSafe", null);
+  mock._seedRich(root._id, { link: "https://example.com/ers-trash-safe-other", title: "other" });
   const live = mock._seedRich(root._id, {
     link: "https://example.com/ers-trash-safe",
     title: "trash-safe",
@@ -1589,22 +1427,18 @@ async function scenario68e_trashSafeStatus() {
   assert.equal(preserved.trashScanComplete, true, "zero-budget peek keeps complete");
   assert.equal(deriveTrashSafeState(preserved), "safe");
 
-  console.log("  ✔ unknown → Check Trash safe; partial/waiting; one-way blocked; no zero-budget stomp");
+  console.log(
+    "  ✔ unknown → Check Trash safe; partial/waiting; one-way blocked; no zero-budget stomp"
+  );
 }
 
-async function scenario68c_parkOutOfScopeAlives() {
-  console.log("\n== 6.8c Park out-of-scope alive confirm candidates ==");
+async function scenario68c_outOfScopeAlivesStayPresent() {
+  console.log("\n== 6.8c Out-of-scope alive pairs are present in the export snapshot ==");
   const eng = await importEngine();
   const { POLICY, SYNC_MODE, JOB } = eng.constants;
   await resetAll(eng.store);
 
   const mock = makeMockRaindrop();
-  let getRaindropCalls = 0;
-  const origGet = mock.getRaindrop.bind(mock);
-  mock.getRaindrop = async (id) => {
-    getRaindropCalls++;
-    return origGet(id);
-  };
   patchClient(eng.raindropMod, mock);
 
   const rootName = "ERS-Verify-Park";
@@ -1620,66 +1454,37 @@ async function scenario68c_parkOutOfScopeAlives() {
     link: "https://example.com/ers-park-outside",
     title: "park-outside",
   });
-  await eng.store.recordSynced("bm-park-outside", String(item._id));
+  // Unrelated raindrop so the library is not emptied by the soft-delete below.
+  mock._seedRich(outside._id, { link: "https://example.com/ers-park-other", title: "other" });
+  const bm = await chrome.bookmarks.create({
+    parentId: "2",
+    title: "park-outside",
+    url: "https://example.com/ers-park-outside",
+  });
+  await eng.store.recordSynced(bm.id, String(item._id), { url: bm.url });
 
-  // Absent from scoped listing (empty allowlist) + alive → park.
-  getRaindropCalls = 0;
-  await eng.reconcile.reconcile({ force: true });
-  assert.ok(
-    (await eng.store.getParkedAliveIds()).has(String(item._id)),
-    "out-of-scope alive parked after confirm GET"
-  );
-  assert.equal(
-    (await eng.queue.list()).filter((j) => j.kind === JOB.DELETE_EDGE).length,
-    0,
-    "park does not enqueue delete-edge"
-  );
-  assert.ok(getRaindropCalls >= 1, "first cycle spends a confirm GET to park");
+  // Absent from scoped listing (empty allowlist) but present in the export.
+  const deleteEdgeJobs = async () =>
+    (await eng.queue.list()).filter((j) => j.kind === JOB.DELETE_EDGE);
+  for (let cycle = 0; cycle < 2; cycle++) {
+    await eng.reconcile.reconcile({ force: true });
+    assert.equal((await deleteEdgeJobs()).length, 0, "present in export → no delete-edge");
+  }
+  assert.equal(mock._calls.getRaindrop, 0, "presence never uses per-id GETs");
+  assert.equal(await eng.store.getBookmarkIdForRaindrop(String(item._id)), bm.id, "pair kept");
 
-  // Next cycle must not re-confirm the parked id.
-  getRaindropCalls = 0;
-  await eng.reconcile.reconcile({ force: true });
-  assert.equal(getRaindropCalls, 0, "parked id skipped on subsequent confirm window");
-  assert.ok(
-    (await eng.store.getParkedAliveIds()).has(String(item._id)),
-    "park persists across cycles"
-  );
-
-  // Soft-delete while parked → Trash fast path still deletes Edge.
+  // Soft-delete → Trash signal, no other copy of the URL → delete-edge.
   await mock.deleteRaindrop(item._id);
   assert.ok(mock._trash.has(Number(item._id)), "mock soft-delete lands in Trash");
   await eng.reconcile.reconcile({ force: true });
+  const jobs = await deleteEdgeJobs();
   assert.ok(
-    (await eng.queue.list()).some(
-      (j) => j.kind === JOB.DELETE_EDGE && String(j.raindropId) === String(item._id)
-    ),
-    "Trash fast path still deletes parked pair"
+    jobs.some((j) => String(j.raindropId) === String(item._id) && j.signal === "trash"),
+    "Trash signal enqueues delete-edge for an out-of-scope pair"
   );
+  assert.equal(mock._calls.getRaindrop, 0, "still no per-id GETs");
 
-  // In-scope alive under root is not parked when listed (seen → not a candidate).
-  await resetAll(eng.store);
-  const mock2 = makeMockRaindrop();
-  patchClient(eng.raindropMod, mock2);
-  await eng.store.setConfig({
-    token: "mock",
-    rootName,
-    syncMode: SYNC_MODE.BIDIRECTIONAL,
-    defaultPolicy: POLICY.SYNC_KEEP,
-  });
-  const root2 = await mock2.createCollection(rootName, null);
-  const inScope = mock2._seedRich(root2._id, {
-    link: "https://example.com/ers-park-inscope",
-    title: "park-inscope",
-  });
-  await eng.store.recordSynced("bm-park-inscope", String(inScope._id));
-  await eng.reconcile.reconcile({ force: true });
-  assert.equal(
-    (await eng.store.getParkedAliveIds()).has(String(inScope._id)),
-    false,
-    "in-scope listed pair is not parked"
-  );
-
-  console.log("  ✔ park out-of-scope; skip re-confirm; Trash still deletes; in-scope not parked");
+  console.log("  ✔ out-of-scope alive present; no GETs; Trash still deletes");
 }
 
 /**
@@ -1799,11 +1604,7 @@ async function scenario68d_pullNowWaitAndResume() {
     "done under pause is not rewritten as rate_limited skip"
   );
   assert.equal(await eng.store.isRateLimited(), true, "pause remains for drain skip");
-  assert.equal(
-    !!findEdgeByUrl(doneUrl),
-    false,
-    "drain skipped — Edge bookmark not created yet"
-  );
+  assert.equal(!!findEdgeByUrl(doneUrl), false, "drain skipped — Edge bookmark not created yet");
   assert.ok(
     (await eng.queue.list()).some(
       (j) => eng.queue.jobKind(j) === JOB.PULL_CREATE && j.link === doneUrl
@@ -2020,6 +1821,9 @@ async function scenario69_bookmarkMoves() {
     tags: ["keep-orphan"],
     note: "orphan-note",
   });
+  // The orphan predates this move; drop the in-memory snapshot (worker
+  // restart) so reclaim re-exports instead of trusting one taken earlier.
+  (await import("../src/lib/presence.js")).resetPresenceMemory();
   const rebindSrc = await chrome.bookmarks.create({
     parentId: "1",
     title: "ERS-Rebind-Src",
@@ -2041,7 +1845,11 @@ async function scenario69_bookmarkMoves() {
     oldParentId: rebindSrc.id,
     parentId: rebindDest.id,
   });
-  assert.equal(mock._calls.createRaindrop, createsBeforeRebind, "unpaired move creates no raindrop");
+  assert.equal(
+    mock._calls.createRaindrop,
+    createsBeforeRebind,
+    "unpaired move creates no raindrop"
+  );
   assert.equal(mock._raindrops.size, sizeBeforeRebind, "unpaired move does not fork");
   assert.equal(
     await eng.store.getRaindropId(unpairedBm.id),
@@ -2057,6 +1865,7 @@ async function scenario69_bookmarkMoves() {
   const multiUrl = "https://example.com/ers-verify-move-multi";
   const multiOld = mock._seedRich(orphanCol._id, { link: multiUrl, title: "multi-old" });
   const multiNew = mock._seedRich(orphanCol._id, { link: multiUrl, title: "multi-new" });
+  (await import("../src/lib/presence.js")).resetPresenceMemory(); // seeded before the move
   const multiBm = await chrome.bookmarks.create({
     parentId: rebindSrc.id,
     title: "multi move",
@@ -2113,11 +1922,7 @@ async function scenario69_bookmarkMoves() {
   assert.equal(mock._calls.createRaindrop, createsBeforeConflict, "conflict move creates none");
   assert.equal(mock._raindrops.size, sizeBeforeConflict, "conflict move does not fork");
   assert.equal(await eng.store.getRaindropId(conflictBm.id), null, "conflict mover stays unpaired");
-  assert.equal(
-    await eng.store.getRaindropId(ownerBm.id),
-    String(ownerRid),
-    "owner pair retained"
-  );
+  assert.equal(await eng.store.getRaindropId(ownerBm.id), String(ownerRid), "owner pair retained");
 
   console.log(
     "  ✔ move update, reorder no-op, folder fan-out, exclude, offload, 404 recreate, URL rebind"
@@ -2639,7 +2444,8 @@ async function scenario71_tombstonePruneAndPullUpdate() {
     (await eng.store.getFolderCollectionId(pullOnlyEdge.id)) != null,
     "pull-create records folder→collection mapping"
   );
-  const pullOnlyRemote = mock._collections.get(Number(pullOnlyCol._id)) || mock._collections.get(pullOnlyCol._id);
+  const pullOnlyRemote =
+    mock._collections.get(Number(pullOnlyCol._id)) || mock._collections.get(pullOnlyCol._id);
   pullOnlyRemote.title = "ERS-PullOnly-New";
   await eng.reconcile.reconcile({ force: true });
   assert.ok(
@@ -2716,6 +2522,7 @@ async function scenario72_deadLetterAndStorage() {
     id: "dr-999",
     kind: eng.constants.JOB.DELETE_RAINDROP,
     raindropId: "999",
+    url: "https://example.com/ers-poison-999", // onRemoved payload evidence
   });
   // Pre-set attempts just below the cap so one defer lands in dead-letter.
   const jobs = await eng.queue.list();
@@ -2742,6 +2549,7 @@ async function scenario72_deadLetterAndStorage() {
     id: "dr-998",
     kind: eng.constants.JOB.DELETE_RAINDROP,
     raindropId: "998",
+    url: "https://example.com/ers-poison-998", // onRemoved payload evidence
   });
   const q2 = await eng.queue.list();
   q2[0].attempts = MAX_JOB_ATTEMPTS - 1;
@@ -3009,14 +2817,9 @@ async function scenario74b_crashSafeCreates() {
 async function scenario75_bulkDrainPauseAndResume() {
   console.log("\n== 7.5 Queue bulk prompt pauses drain + tick reconcile ==");
   const eng = await importEngine();
-  const { POLICY, SYNC_MODE, QUEUE_BULK_PENDING_THRESHOLD, BULK_DRAIN_PAUSED_LOG } =
-    eng.constants;
-  const {
-    getBulkPrompt,
-    snoozeBulkPrompt,
-    BULK_PROMPT_NEEDS_CHOICE,
-    BULK_PROMPT_IDLE,
-  } = eng.queueBulkPrompt;
+  const { POLICY, SYNC_MODE, QUEUE_BULK_PENDING_THRESHOLD, BULK_DRAIN_PAUSED_LOG } = eng.constants;
+  const { getBulkPrompt, snoozeBulkPrompt, BULK_PROMPT_NEEDS_CHOICE, BULK_PROMPT_IDLE } =
+    eng.queueBulkPrompt;
   await resetAll(eng.store);
   const mock = makeMockRaindrop();
   patchClient(eng.raindropMod, mock);
@@ -3034,7 +2837,10 @@ async function scenario75_bulkDrainPauseAndResume() {
     title: "ERS bulk pause real",
     url: "https://example.com/ers-bulk-pause",
   });
-  const phantomIds = Array.from({ length: QUEUE_BULK_PENDING_THRESHOLD - 1 }, (_, i) => `phantom-bulk-${i}`);
+  const phantomIds = Array.from(
+    { length: QUEUE_BULK_PENDING_THRESHOLD - 1 },
+    (_, i) => `phantom-bulk-${i}`
+  );
   await eng.queue.enqueueMany(phantomIds);
   await eng.queue.enqueue(bm.id);
   assert.equal(await eng.queue.size(), QUEUE_BULK_PENDING_THRESHOLD);
@@ -3071,11 +2877,7 @@ async function scenario75_bulkDrainPauseAndResume() {
     listBefore,
     "tick skips reconcile listing while needs_choice"
   );
-  assert.equal(
-    mock._calls.exportRaindropsCsv,
-    exportBefore,
-    "tick/drain never fetch export.csv"
-  );
+  assert.equal(mock._calls.exportRaindropsCsv, exportBefore, "tick/drain never fetch export.csv");
   assert.equal(
     (await eng.store.getStatus()).reconcileSkipReason,
     "bulk_pause",
@@ -3121,12 +2923,8 @@ async function scenario76_applyMatchExistingAndImportSkip() {
   const eng = await importEngine();
   const { POLICY, SYNC_MODE, KEY } = eng.constants;
   const { applyMatchExisting } = eng.matchExisting;
-  const {
-    resolveBulkPromptAfterMatch,
-    BULK_PROMPT_NEEDS_CHOICE,
-    BULK_PROMPT_IDLE,
-    getBulkPrompt,
-  } = eng.queueBulkPrompt;
+  const { resolveBulkPromptAfterMatch, BULK_PROMPT_NEEDS_CHOICE, BULK_PROMPT_IDLE, getBulkPrompt } =
+    eng.queueBulkPrompt;
   await resetAll(eng.store);
   const mock = makeMockRaindrop();
   patchClient(eng.raindropMod, mock);
@@ -3230,7 +3028,6 @@ async function scenario76_applyMatchExistingAndImportSkip() {
   console.log("  ✔ apply pairs only; Import skip; resolveBulkPromptAfterMatch snoozes");
 }
 
-
 async function scenario78_deleteCircuitBreaker() {
   console.log("\n== 7.8 Delete circuit breaker holds deletes past the rolling limit ==");
   const eng = await importEngine();
@@ -3246,6 +3043,9 @@ async function scenario78_deleteCircuitBreaker() {
     defaultPolicy: POLICY.SYNC_KEEP,
   });
 
+  // A live bystander keeps the export non-empty (an empty export while pairs
+  // exist is incomplete and holds deletes on its own).
+  mock._seedRich(1, { link: "https://example.com/ers-breaker-bystander", title: "bystander" });
   // limit = max(50, 2% of pairs) → 50 for a small map. Queue 55 delete-edge jobs
   // for 55 real, paired Edge bookmarks whose raindrops are gone.
   const HELD = 5;
@@ -3259,7 +3059,12 @@ async function scenario78_deleteCircuitBreaker() {
     });
     const rid = String(900000 + i);
     await eng.store.recordSynced(bm.id, rid);
-    await eng.queue.enqueueJob({ id: `de-${rid}`, kind: JOB.DELETE_EDGE, raindropId: rid, bookmarkId: bm.id });
+    await eng.queue.enqueueJob({
+      id: `de-${rid}`,
+      kind: JOB.DELETE_EDGE,
+      raindropId: rid,
+      bookmarkId: bm.id,
+    });
     ids.push(bm.id);
   }
   // Drain more than once — per-wake job caps must not mask the window count.
@@ -3285,8 +3090,16 @@ async function scenario78_deleteCircuitBreaker() {
   await eng.queue.enqueue(fresh.id);
   const createBefore = mock._calls.createRaindrop;
   await eng.sync.drain();
-  assert.equal(mock._calls.createRaindrop, createBefore + 1, "uploads continue while deletes are held");
-  assert.equal((await eng.store.getStatus()).deleteBreakerTripped, true, "drain does not clear the trip");
+  assert.equal(
+    mock._calls.createRaindrop,
+    createBefore + 1,
+    "uploads continue while deletes are held"
+  );
+  assert.equal(
+    (await eng.store.getStatus()).deleteBreakerTripped,
+    true,
+    "drain does not clear the trip"
+  );
 
   // Allow → every held job released in one click, none counted, no re-trip.
   const heldIds = (await eng.queue.list())
@@ -3294,7 +3107,11 @@ async function scenario78_deleteCircuitBreaker() {
     .map((j) => j.id);
   await eng.store.resetDeleteBreaker({ allowJobIds: heldIds });
   await eng.sync.drain();
-  assert.equal(ids.filter((id) => chromeBookmarkExists(id)).length, 0, "all held deletes ran after one Allow");
+  assert.equal(
+    ids.filter((id) => chromeBookmarkExists(id)).length,
+    0,
+    "all held deletes ran after one Allow"
+  );
   const after = await eng.store.getStatus();
   assert.equal(after.deleteBreakerTripped, false);
   assert.equal(after.deletionsHalted, false);
@@ -3311,7 +3128,12 @@ async function scenario78_deleteCircuitBreaker() {
   });
   await eng.store.recordSynced(victim.id, "910000");
   await eng.store.tripDeleteBreaker(DELETE_BREAKER_MIN);
-  await eng.queue.enqueueJob({ id: "de-910000", kind: JOB.DELETE_EDGE, raindropId: "910000", bookmarkId: victim.id });
+  await eng.queue.enqueueJob({
+    id: "de-910000",
+    kind: JOB.DELETE_EDGE,
+    raindropId: "910000",
+    bookmarkId: victim.id,
+  });
   await eng.sync.drain();
   assert.ok(chromeBookmarkExists(victim.id), "tripped breaker holds a new delete");
   const dropped = await eng.queue.removeWhere((j) => j.kind === JOB.DELETE_EDGE);
@@ -3326,7 +3148,9 @@ function chromeBookmarkExists(id) {
 }
 
 async function scenario79_repairPairs() {
-  console.log("\n== 7.9 Repair pairs prunes dead pairs, rebinds by URL, clears alive tombstones ==");
+  console.log(
+    "\n== 7.9 Repair pairs rebinds stale ids, prunes the rest, clears alive tombstones =="
+  );
   const eng = await importEngine();
   const { POLICY, SYNC_MODE, JOB } = eng.constants;
   const { planRepairFromInputs, planRepairPairs, applyRepairPairs } = eng.repairPairs;
@@ -3346,10 +3170,26 @@ async function scenario79_repairPairs() {
     defaultPolicy: POLICY.SYNC_KEEP,
   });
 
-  const keep = await chrome.bookmarks.create({ parentId: "2", title: "keep", url: "https://example.com/ers-repair-keep" });
-  const ghost = await chrome.bookmarks.create({ parentId: "2", title: "ghost", url: "https://example.com/ers-repair-ghost" });
-  const tomb = await chrome.bookmarks.create({ parentId: "2", title: "tomb", url: "https://example.com/ers-repair-tomb" });
-  const edgeOnly = await chrome.bookmarks.create({ parentId: "2", title: "edge only", url: "https://example.com/ers-repair-edge-only" });
+  const keep = await chrome.bookmarks.create({
+    parentId: "2",
+    title: "keep",
+    url: "https://example.com/ers-repair-keep",
+  });
+  const ghost = await chrome.bookmarks.create({
+    parentId: "2",
+    title: "ghost",
+    url: "https://example.com/ers-repair-ghost",
+  });
+  const tomb = await chrome.bookmarks.create({
+    parentId: "2",
+    title: "tomb",
+    url: "https://example.com/ers-repair-tomb",
+  });
+  const edgeOnly = await chrome.bookmarks.create({
+    parentId: "2",
+    title: "edge only",
+    url: "https://example.com/ers-repair-edge-only",
+  });
   void edgeOnly;
 
   await eng.store.recordSynced(keep.id, "100"); // live ↔ live
@@ -3361,29 +3201,48 @@ async function scenario79_repairPairs() {
   await eng.store.addTombstone("400", "raindrop-remote-delete"); // alive in export → clear
   await eng.store.addTombstone("1867674135", "raindrop-remote-delete"); // gone → keep
   await eng.store.addTombstone("100", "edge-offload"); // alive on purpose → never cleared
-  await eng.queue.enqueueJob({ id: "de-1867674133", kind: JOB.DELETE_EDGE, raindropId: "1867674133", bookmarkId: ghost.id });
-  await eng.queue.enqueueJob({ id: "pull-400", kind: JOB.PULL_CREATE, raindropId: "400", link: "https://example.com/ers-repair-tomb" });
+  await eng.queue.enqueueJob({
+    id: "de-1867674133",
+    kind: JOB.DELETE_EDGE,
+    raindropId: "1867674133",
+    bookmarkId: ghost.id,
+  });
+  await eng.queue.enqueueJob({
+    id: "pull-400",
+    kind: JOB.PULL_CREATE,
+    raindropId: "400",
+    link: "https://example.com/ers-repair-tomb",
+  });
 
   const plan = await planRepairPairs();
   assert.equal(plan.ok, true);
   assert.equal(plan.pairsBefore, 5);
-  assert.equal(plan.keptLive, 1, "only keep↔100 is live on both sides");
-  assert.equal(plan.pruneRaindropDead, 1, "ghost forward link pruned");
-  assert.equal(plan.pruneEdgeDead, 2, "dead Edge ids with live raindrops pruned");
+  assert.equal(plan.keptLive, 1, "only keep↔100 is live on both sides before rebind");
+  // Ghost forward link (ghost → trashed fork) rebinds to the surviving raindrop
+  // 200, merging over 200's record whose Edge id is dead.
+  assert.equal(plan.raindropRebinds, 1, "ghost forward link rebinds to the survivor");
+  assert.equal(plan.edgeRebinds, 0);
+  assert.equal(plan.pruneRaindropDead, 0, "no Raindrop-dead prune: the ghost rebound");
+  assert.equal(plan.pruneEdgeDead, 2, "dead Edge ids (300, and 200's merged-away record)");
   assert.equal(plan.pruneBothDead, 1);
+  assert.equal(plan.keptPairs[ghost.id], "200", "ghost now pairs with the survivor");
   assert.deepEqual(
-    plan.matched.map((m) => [m.bookmarkId, m.raindropId]).sort(),
-    [[ghost.id, "200"], [tomb.id, "400"]].sort(),
-    "rebinds ghost→surviving raindrop and tombstoned URL"
+    plan.matched.map((m) => [m.bookmarkId, m.raindropId]),
+    [[tomb.id, "400"]],
+    "unpaired tombstoned URL re-matched"
   );
-  assert.equal(plan.conflicts, 0);
+  assert.equal(plan.conflicts, 0, "stale forward link is not a conflict");
   assert.equal(plan.edgeOnly, 1);
   assert.deepEqual(plan.tombstonesAlive, ["400"]);
   assert.equal(plan.queuedDeletes, 1);
 
   // Drain keeps running while the confirm dialog is open: a new upload pairs a
   // fresh bookmark after the dry-run. Apply must keep it.
-  const late = await chrome.bookmarks.create({ parentId: "2", title: "late", url: "https://example.com/ers-repair-late" });
+  const late = await chrome.bookmarks.create({
+    parentId: "2",
+    title: "late",
+    url: "https://example.com/ers-repair-late",
+  });
   await eng.store.recordSynced(late.id, "555");
 
   const createBefore = mock._calls.createRaindrop;
@@ -3391,7 +3250,7 @@ async function scenario79_repairPairs() {
   const result = await applyRepairPairs(plan);
   assert.equal(result.ok, true);
   assert.equal(result.pairs, 4);
-  assert.equal(result.rebound, 2);
+  assert.equal(result.rebound, 2, "1 Raindrop-side rebind + 1 URL match");
   assert.equal(result.tombstonesCleared, 1);
   assert.equal(result.deletesDropped, 1);
   assert.equal(mock._calls.createRaindrop, createBefore, "no Raindrop writes");
@@ -3405,27 +3264,59 @@ async function scenario79_repairPairs() {
     [tomb.id]: "400",
     [late.id]: "555",
   });
-  assert.deepEqual(pairs.byRaindrop, { "100": keep.id, "200": ghost.id, "400": tomb.id, "555": late.id });
+  assert.deepEqual(pairs.byRaindrop, { 100: keep.id, 200: ghost.id, 400: tomb.id, 555: late.id });
   assert.equal(await eng.store.hasTombstone("400"), false, "alive delete tombstone cleared");
   assert.equal(await eng.store.hasTombstone("100"), true, "offload tombstone never cleared");
   assert.equal(await eng.store.hasTombstone("1867674135"), true, "dead tombstone kept");
   const jobs = await eng.queue.list();
-  assert.equal(jobs.some((j) => j.kind === JOB.DELETE_EDGE), false, "queued delete dropped");
-  assert.equal(jobs.some((j) => j.kind === JOB.PULL_CREATE), true, "non-delete jobs kept");
-  const rs = await eng.store.getReconcileState();
-  assert.equal(rs.seenAcc, null);
-  assert.equal(rs.unsettledConfirmCatchUp, false);
-  assert.deepEqual(rs.parkedAliveIds, []);
+  assert.equal(
+    jobs.some((j) => j.kind === JOB.DELETE_EDGE),
+    false,
+    "queued delete dropped"
+  );
+  assert.equal(
+    jobs.some((j) => j.kind === JOB.PULL_CREATE),
+    true,
+    "non-delete jobs kept"
+  );
+  const health = await eng.store.getPairHealth();
+  assert.equal(health.pairs, 4, "pair health recomputed after apply");
+  assert.equal(health.staleRaindropId, 1, "late pair's raindrop is not in the export");
 
   // Pure planner: a reverse-only entry counts as both-dead noise, not a kept pair.
   const pure = planRepairFromInputs(
     "id,url\n1,https://a.example/\n",
     [{ id: "b1", url: "https://a.example/" }],
-    { byBookmark: {}, byRaindrop: { "999": "b-old" } },
+    { byBookmark: {}, byRaindrop: { 999: "b-old" } },
     {}
   );
   assert.equal(pure.pruneBothDead, 1);
   assert.equal(pure.matched.length, 1);
+
+  // Pure planner: stale Edge id (Chromium renumbered) rebinds under its
+  // recorded path, not a prune.
+  const renumbered = planRepairFromInputs(
+    "id,url\n7,https://b.example/page\n",
+    [
+      { id: "900", url: "https://b.example/page", path: ["Other favorites", "Elsewhere"] },
+      { id: "901", url: "https://b.example/page", path: ["Other favorites", "Dev"] },
+    ],
+    {
+      records: {
+        7: {
+          raindropId: "7",
+          bookmarkId: "12",
+          url: "https://b.example/page",
+          urlKey: "https://b.example/page",
+          edgePathAtSync: ["Other favorites", "Dev"],
+        },
+      },
+    },
+    {}
+  );
+  assert.equal(renumbered.edgeRebinds, 1, "listed as an Edge-side rebind");
+  assert.equal(renumbered.pruneEdgeDead, 0, "not a prune");
+  assert.equal(renumbered.keptPairs["901"], "7", "rebinds to the copy under edgePathAtSync");
 
   // Merge: a pair removed after the plan (a delete completed) is not resurrected,
   // and a rebind never steals a raindrop id claimed after the plan.
@@ -3450,7 +3341,9 @@ async function scenario79_repairPairs() {
   assert.deepEqual(await eng.store.getPairs(), before, "pairs untouched");
   const refusedApply = await applyRepairPairs({ ...plan, raindropCount: 0 });
   assert.equal(refusedApply.ok, false, "apply refuses a plan from an empty export");
-  console.log("  ✔ repair plan/apply (offload kept, post-plan pairs kept, empty export refused)");
+  console.log(
+    "  ✔ repair rebinds ghost + renumbered ids, prunes dead, keeps offload / post-plan pairs, refuses empty export"
+  );
 }
 
 async function scenario77_scanImportScopeAndPullBulkGate() {
@@ -3525,42 +3418,35 @@ async function scenario77_scanImportScopeAndPullBulkGate() {
   console.log("  ✔ scanImportScope matches Import rules; Pull one-way never suggests");
 }
 
-async function main() {
-  console.log(
-    `Mode: ${USE_LIVE ? "mock Edge + live Raindrop (ERS-Verify-* only)" : "fully mocked (no real Edge/Raindrop writes)"}`
-  );
-  console.log("Edge: in-memory disposable tree only (Favorites bar / Other favorites).");
+console.log(
+  `Mode: ${USE_LIVE ? "mock Edge + live Raindrop (ERS-Verify-* only)" : "fully mocked (no real Edge/Raindrop writes)"}`
+);
 
-  await scenario62_oneWay();
-  await scenario63_bidirectional();
-  await scenario64_syncAndDelete();
-  await scenario65_exclude();
-  await scenario66_raindropFolderModes();
-  await scenario67_raindropFolderAllowlist();
-  await scenario68_rateLimitBudget();
-  await scenario68b_trashFastPath();
-  await scenario68e_trashSafeStatus();
-  await scenario68c_parkOutOfScopeAlives();
-  await scenario68d_pullNowWaitAndResume();
-  await scenario69_bookmarkMoves();
-  await scenario70_onChangedAndFolderRename();
-  await scenario71_tombstonePruneAndPullUpdate();
-  await scenario72_deadLetterAndStorage();
-  await scenario73_coalesceActivityLog();
-  await scenario74_offloadResumeAndCreateSuppress();
-  await scenario74b_crashSafeCreates();
-  await scenario75_bulkDrainPauseAndResume();
-  await scenario76_applyMatchExistingAndImportSkip();
-  await scenario77_scanImportScopeAndPullBulkGate();
-  await scenario78_deleteCircuitBreaker();
-  await scenario79_repairPairs();
-  await optionalLiveSmoke();
-
-  console.log("\nAll checklist scenarios passed.");
-}
-
-main().catch(async (err) => {
-  console.error("\nVERIFY FAILED:", err);
+after(async () => {
   if (USE_LIVE) await liveCleanup();
-  process.exit(1);
 });
+
+test("scenario62_oneWay", scenario62_oneWay);
+test("scenario63_bidirectional", scenario63_bidirectional);
+test("scenario64_syncAndDelete", scenario64_syncAndDelete);
+test("scenario65_exclude", scenario65_exclude);
+test("scenario66_raindropFolderModes", scenario66_raindropFolderModes);
+test("scenario67_raindropFolderAllowlist", scenario67_raindropFolderAllowlist);
+test("scenario68_rateLimitBudget", scenario68_rateLimitBudget);
+test("scenario68b_trashFastPath", scenario68b_trashFastPath);
+test("scenario68e_trashSafeStatus", scenario68e_trashSafeStatus);
+test("scenario68c_outOfScopeAlivesStayPresent", scenario68c_outOfScopeAlivesStayPresent);
+test("scenario68d_pullNowWaitAndResume", scenario68d_pullNowWaitAndResume);
+test("scenario69_bookmarkMoves", scenario69_bookmarkMoves);
+test("scenario70_onChangedAndFolderRename", scenario70_onChangedAndFolderRename);
+test("scenario71_tombstonePruneAndPullUpdate", scenario71_tombstonePruneAndPullUpdate);
+test("scenario72_deadLetterAndStorage", scenario72_deadLetterAndStorage);
+test("scenario73_coalesceActivityLog", scenario73_coalesceActivityLog);
+test("scenario74_offloadResumeAndCreateSuppress", scenario74_offloadResumeAndCreateSuppress);
+test("scenario74b_crashSafeCreates", scenario74b_crashSafeCreates);
+test("scenario75_bulkDrainPauseAndResume", scenario75_bulkDrainPauseAndResume);
+test("scenario76_applyMatchExistingAndImportSkip", scenario76_applyMatchExistingAndImportSkip);
+test("scenario77_scanImportScopeAndPullBulkGate", scenario77_scanImportScopeAndPullBulkGate);
+test("scenario78_deleteCircuitBreaker", scenario78_deleteCircuitBreaker);
+test("scenario79_repairPairs", scenario79_repairPairs);
+test("optionalLiveSmoke", optionalLiveSmoke);

@@ -3,7 +3,7 @@
 // Three environments share one repo:
 //   - background / lib: chrome.* APIs, no DOM
 //   - options / popup: DOM + chrome.*
-//   - scripts: Node (verify scripts assign globalThis.chrome for mocks)
+//   - scripts, test: Node (tests assign globalThis.chrome for mocks)
 
 import js from "@eslint/js";
 import eslintConfigPrettier from "eslint-config-prettier";
@@ -59,7 +59,7 @@ export default [
   },
 
   {
-    files: ["scripts/**/*.{js,mjs}", "eslint.config.js"],
+    files: ["scripts/**/*.{js,mjs}", "test/**/*.mjs", "eslint.config.js"],
     languageOptions: {
       ecmaVersion: 2024,
       sourceType: "module",

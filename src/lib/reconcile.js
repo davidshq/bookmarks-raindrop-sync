@@ -2,24 +2,23 @@
 //
 // Lists raindrops under the configured root (nested), enqueues pull-creates for
 // unmapped items, pull-updates when a paired raindrop's title/URL/placement
-// drifts from Edge, pull-rename-folder when a mapped collection title drifts
-// from the Edge folder, and enqueues Edge deletes when a mapped raindrop
-// disappears.
+// drifts from Edge, and pull-rename-folder when a mapped collection title
+// drifts from the Edge folder. The listing is for placement only; presence
+// (and so remote deletes) comes from the export snapshot on finish.
 // Finish-cycle helpers: reconcile-finish.js. Pull enqueue: reconcile-enqueue.js.
 //
 // List paging uses RAINDROP_LIST_PER_PAGE + isListPageDone (shared with Trash).
 //
 // Rate-limit posture: shared WakeBudget (headers + soft wakeCap) for root /
-// outside-root listing, Trash, and confirm GETs; stop early when the client
-// reports low X-RateLimit-Remaining (throws RateLimitError). Soft page/confirm
+// outside-root listing, the presence export, and Trash; stop early when the
+// client reports low X-RateLimit-Remaining (throws RateLimitError). Soft page
 // constants are fairness backstops under spendable.
 // Heartbeat prefer-drains first (tick), then may start a *new* cycle when the
-// quiet-time interval has elapsed since the last *settled* finish (or confirm
-// catch-up is still unsettled). Unsettled catch-up with a durable seenAcc does
-// confirm/park/Trash only — it does not re-list until Pull now or the mountain
-// settles. Raindrop-bound queue jobs do NOT hard-skip listing — leftover
-// spendable funds Trash / list / confirm. In-progress cursors always continue.
-// Pull now (force) bypasses interval and refreshes the listing.
+// quiet-time interval has elapsed since the last completed finish.
+// Raindrop-bound queue jobs do NOT hard-skip listing — leftover spendable
+// funds Trash / list / export. In-progress cursors always continue, and a
+// finish whose due export did not fit (presencePending) completes on the next
+// wake without re-listing. Pull now (force) bypasses the interval.
 
 import {
   SYNC_MODE,
@@ -53,7 +52,8 @@ import {
 import { isAllowlistActive, pruneAllowlist } from "./allowlist.js";
 import { RaindropClient } from "./raindrop.js";
 import { maybeEnqueuePullCreate } from "./reconcile-enqueue.js";
-import { finishReconcileCycle, runConfirmCatchUp } from "./reconcile-finish.js";
+import { finishReconcileCycle, finishPendingPresence } from "./reconcile-finish.js";
+import { completePairMigration } from "./pair-migration.js";
 import { createWakeBudget, finalizeWakeBudget } from "./wake-budget.js";
 
 /** Job kinds that hit the Raindrop API (compete with listing for rate budget). */
@@ -110,27 +110,9 @@ export async function reconcile({ force = true, budget } = {}) {
   }
 }
 
-/**
- * Durable signals that a multi-tick *listing* is mid-flight.
- * Unsettled confirm catch-up keeps `seenAcc` as a presence snapshot — that is
- * not an in-progress list cursor (confirm-only wakes reuse it).
- */
+/** Durable signals that a multi-tick listing is mid-flight. */
 function isReconcileInProgress(state) {
-  if ((state.cursorPage || 0) > 0 || state.outsideCursor != null) return true;
-  if (state.unsettledConfirmCatchUp) return false;
-  return Array.isArray(state.seenAcc) && state.seenAcc.length > 0;
-}
-
-/** True when heartbeat should drain deferred confirms without re-listing. */
-function canConfirmCatchUpOnly(state, force) {
-  return (
-    !force &&
-    !!state.unsettledConfirmCatchUp &&
-    Array.isArray(state.seenAcc) &&
-    state.seenAcc.length > 0 &&
-    (state.cursorPage || 0) === 0 &&
-    state.outsideCursor == null
-  );
+  return (state.cursorPage || 0) > 0 || state.outsideCursor != null;
 }
 
 async function reconcileOnce({ force, budget }) {
@@ -146,15 +128,15 @@ async function reconcileOnce({ force, budget }) {
 
   const state = await getReconcileState();
   const inProgress = isReconcileInProgress(state);
-  const confirmOnly = canConfirmCatchUpOnly(state, force);
-  // Heartbeat only: after in-progress continues, honor quiet-time only after a
-  // *settled* finish. Unsettled confirm catch-up skips cooldown so Status never
-  // shows “0 pending + wait N minutes” over a postponed confirm mountain.
-  // Queue work is not a hard skip — tick prefer-drains first; leftover spendable
-  // funds Trash/list/confirm. Pull now (force) bypasses cooldown; rateLimitedUntil gated.
-  // Skip reason `busy` is only the in-process reconciling reentrancy above.
+  const presenceOnly = !force && !inProgress && !!state.presencePending;
+  // Heartbeat only: after in-progress continues, honor quiet-time after a
+  // completed finish. A pending presence refresh skips cooldown (the last
+  // finish did not complete). Queue work is not a hard skip — tick
+  // prefer-drains first; leftover spendable funds Trash/list/export. Pull now
+  // (force) bypasses cooldown; rateLimitedUntil gated. Skip reason `busy` is
+  // only the in-process reconciling reentrancy above.
   if (!force && !inProgress) {
-    if (!state.unsettledConfirmCatchUp) {
+    if (!presenceOnly) {
       const settledAt = state.lastSettledAt ?? state.lastRunAt;
       if (settledAt && Date.now() - settledAt < reconcileIntervalMs(config)) {
         return { enqueued: 0, pages: 0, done: true, skipped: true, reason: "cooldown" };
@@ -170,6 +152,13 @@ async function reconcileOnce({ force, budget }) {
 
   const client = new RaindropClient(config.token);
   budget.bindClient(client);
+  await completePairMigration({ client, budget });
+
+  // Listing finished last wake but its due export did not fit: finish now.
+  if (presenceOnly) {
+    return finishPendingPresence({ client, budget, config });
+  }
+
   const index = await buildCollectionIndex(client);
   client.throwIfShouldPause();
   const root = findRootCollection(index, config.rootName);
@@ -184,40 +173,16 @@ async function reconcileOnce({ force, budget }) {
       lastError: null,
       cursorPage: 0,
       outsideCursor: null,
-      seenAcc: null,
     });
     return { enqueued: 0, pages: 0, done: true };
   }
 
-  // Unsettled + durable presence snapshot → confirm/park/Trash only (no nested
-  // re-list). Pull now (force) always refreshes the listing instead.
-  if (confirmOnly) {
-    return runConfirmCatchUp({
-      client,
-      budget,
-      index,
-      rootId: root._id,
-      allowlist: config.raindropFolderAllowlist || {},
-    });
-  }
-
   let page = state.cursorPage || 0;
   let outsideCursor = state.outsideCursor || null;
-  // Fresh listing must not union a prior catch-up seenAcc into the new scan.
-  if (!inProgress) {
-    await setReconcileState({
-      running: true,
-      lastError: null,
-      seenAcc: null,
-      unsettledConfirmCatchUp: false,
-    });
-  } else {
-    await setReconcileState({ running: true, lastError: null });
-  }
+  await setReconcileState({ running: true, lastError: null });
 
   let enqueued = 0;
   let pages = 0;
-  const seenIds = new Set();
   const pairs = await getPairs();
   const overrides = await getOverrides();
   const topRoots = await getTopRoots();
@@ -251,7 +216,6 @@ async function reconcileOnce({ force, budget }) {
       allowlist,
       folderMode,
       pairs,
-      seenIds,
     };
 
     // Resume outside-root phase if a prior tick finished the root listing.
@@ -267,7 +231,6 @@ async function reconcileOnce({ force, budget }) {
       pages += outside.pages;
       if (!outside.done) {
         return checkpointOutsidePending({
-          seenIds,
           outsideCursor: outside.cursor,
           enqueued,
           pages,
@@ -310,7 +273,6 @@ async function reconcileOnce({ force, budget }) {
               pages += outside.pages;
               if (!outside.done) {
                 return checkpointOutsidePending({
-                  seenIds,
                   outsideCursor: outside.cursor,
                   enqueued,
                   pages,
@@ -322,8 +284,7 @@ async function reconcileOnce({ force, budget }) {
           return finishReconcileCycle({
             client,
             budget,
-            seenIds,
-            pairs,
+            force,
             index,
             rootId: root._id,
             config,
@@ -337,11 +298,9 @@ async function reconcileOnce({ force, budget }) {
         }
 
         page++;
-        await mergeSeenAcc(seenIds);
         await setReconcileState({ cursorPage: page, outsideCursor: null, running: true });
       }
 
-      await mergeSeenAcc(seenIds);
       await setReconcileState({ running: false, cursorPage: page, lastRunAt: Date.now() });
       if (enqueued > 0) {
         await appendLog(
@@ -352,12 +311,11 @@ async function reconcileOnce({ force, budget }) {
       return { enqueued, pages, done: false };
     }
 
-    // outsideCursor path finished above → delete detection + ensure.
+    // outsideCursor path finished above → presence, deletes + ensure.
     return finishReconcileCycle({
       client,
       budget,
-      seenIds,
-      pairs,
+      force,
       index,
       rootId: root._id,
       config,
@@ -462,21 +420,13 @@ async function continueOutsideRoot(client, cursor, pullCtx, maxPages, budget) {
   };
 }
 
-async function mergeSeenAcc(seenIds) {
-  const state = await getReconcileState();
-  const acc = new Set(state.seenAcc || []);
-  for (const id of seenIds) acc.add(id);
-  await setReconcileState({ seenAcc: [...acc] });
-}
-
 /**
  * Persist outside-root progress and end the tick without delete detection.
  * Used by both the resume path and root→outside handoff so cursor fields stay aligned.
  * Quiet when idle (enqueued === 0) — heartbeat used to spam this every minute.
  * @returns {{ enqueued: number, pages: number, done: false }}
  */
-async function checkpointOutsidePending({ seenIds, outsideCursor, enqueued, pages }) {
-  await mergeSeenAcc(seenIds);
+async function checkpointOutsidePending({ outsideCursor, enqueued, pages }) {
   await setReconcileState({
     running: false,
     cursorPage: 0,

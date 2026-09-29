@@ -1,30 +1,38 @@
-// Reconcile cycle finish: trash soft-delete fast path, delete-confirm GET,
-// tombstone prune, folder-rename pull.
+// Reconcile cycle finish: presence snapshot refresh, stale-id rebind,
+// evidence-based Raindrop→Edge deletes, tombstone prune, folder-rename pull.
 //
-// Soft-deletes: list Raindrop Trash (-99) first (paginated). Confirm GETs remain
-// for permanent deletes / non-trash absence. Out-of-scope alives are parked so
-// they stop re-candidating (option C). Follow-ons (collection 0, lastUpdate):
-// docs/raindrop-delete-detection-options.md
-//
-// While confirm catch-up is unsettled, finish keeps `seenAcc` and heartbeat may
-// call runConfirmCatchUp (Trash + confirms only — no nested re-list).
-//
-// Trash listing also writes the trash hygiene snapshot (safe-to-empty Status).
-// Trash + confirm-GET both enqueue via enqueueDeleteEdge (shared job id/payload).
-// Delete-confirm and tombstone-prune share rotateConfirmWindow for GET-budget fairness.
+// Presence comes from one Raindrop export per quiet interval (presence.js), not
+// per-id GETs. On finish:
+//   1. refresh the snapshot if due (heartbeat: reconcile interval; Pull now:
+//      always);
+//   2. list Raindrop Trash from page 0 (fast soft-delete signal);
+//   3. run the rebind pass (pair-rebind.js): stale Edge ids and stale Raindrop
+//      ids rebind by URL instead of reading as deletes;
+//   4. enqueue delete-edge only for paired ids with a positive signal (in
+//      Trash, or absent from a complete snapshot) whose URL no other live
+//      raindrop carries. Absence candidates are skipped while migration is
+//      partial, the snapshot is incomplete or aged out, or the
+//      presenceDeletesEnabled flag is off. Trash candidates enqueue even
+//      then; every delete-edge re-runs the survival check at drain time
+//      against an export taken after enqueue;
+//   5. drop tombstones for ids absent from a complete snapshot (set
+//      difference, no GETs).
+// A finish is complete when listing is done and, if a refresh was due, the
+// snapshot was refreshed. Completed finishes arm quiet-time cooldown, store
+// pair health, and drop the v1 pair backup. A due refresh that the wake could
+// not afford sets presencePending so the next wake finishes without re-listing.
 
 import {
   JOB,
-  MAX_ALIVE_CHECKS_PER_TICK,
   MAX_TRASH_PAGES_PER_TICK,
   RAINDROP_LIST_PER_PAGE,
   RAINDROP_TRASH_COLLECTION_ID,
   SOFT_MAX_REQS_PER_WAKE,
   isListPageDone,
+  reconcileIntervalMs,
 } from "./constants.js";
 import { rootTitlesEqual } from "./bookmark-roots.js";
 import {
-  hasTombstone,
   getTombstones,
   pruneTombstones,
   getFolderCollections,
@@ -34,11 +42,13 @@ import {
   getCollectionCache,
   getReconcileState,
   setReconcileState,
-  getParkedAliveIds,
-  parkAliveIds,
-  unparkAliveIds,
-  setParkedAliveIds,
-  getPairs,
+  getStoredPairs,
+  pairsView,
+  getConfig,
+  applyPairChanges,
+  dropPairsV1Backup,
+  pruneEdgeRemoved,
+  setPairHealth,
   appendLog,
 } from "./store.js";
 import * as queue from "./queue.js";
@@ -51,45 +61,55 @@ import {
   walkAncestorsFromFolder,
 } from "./bookmarks.js";
 import { getById, collectionsUnderRoot, isOutsideRootLandingSegments } from "./collections.js";
-import { isInScopedListing } from "./allowlist.js";
-import {
-  AuthError,
-  RateLimitError,
-  isNotFoundError,
-  raindropCollectionId,
-} from "./raindrop.js";
 import { ensureAllowlistedOrMirrorAll } from "./reconcile-enqueue.js";
-import { writeTrashHygieneSnapshot, getTrashHygieneNextPage } from "./trash-hygiene.js";
+import { writeTrashHygieneSnapshot } from "./trash-hygiene.js";
+import { ensurePresence, isUsableForAbsence, isUsableForUrls } from "./presence.js";
+import { loadTreeIndex } from "./tree-index.js";
+import { rebindPass, rebindLogLines } from "./pair-rebind.js";
+import { computePairHealth } from "./pair-health.js";
 
 /**
- * Enqueue a local Edge delete for a raindrop that is gone (trash or confirm-GET).
- * Shared by trash listing and missing-raindrop confirm so job id/payload stay aligned.
+ * Enqueue a local Edge delete for a raindrop with a positive gone signal.
+ * `signal` rides on the job so drain re-applies the matching rules.
+ * @param {string} rid
+ * @param {string|null} bookmarkId
+ * @param {"trash"|"absent"} signal
+ * @param {number} signalSeq presence snapshot seq that judged the survival check
+ * @param {string} [url] link from the Trash listing (for id-only records)
  * @returns {Promise<boolean>} true when a new job was added
  */
-async function enqueueDeleteEdge(rid, bookmarkId) {
+async function enqueueDeleteEdge(rid, bookmarkId, signal, signalSeq, url) {
   return queue.enqueueJob({
     id: `de-${rid}`,
     kind: JOB.DELETE_EDGE,
     raindropId: rid,
     bookmarkId,
+    signal,
+    // Drain re-checks against a later export than this one.
+    signalSeq,
+    ...(url ? { url } : {}),
   });
 }
 
-/** True when a delete-edge job for this raindrop is already queued. */
-async function hasQueuedDeleteEdge(rid) {
-  const target = String(rid);
-  const jobs = await queue.list();
-  return jobs.some((j) => {
-    if (queue.jobKind(j) !== JOB.DELETE_EDGE) return false;
-    return j.raindropId != null && String(j.raindropId) === target;
-  });
+/** Raindrop ids with a delete-edge job already queued. */
+async function queuedDeleteEdgeIds() {
+  const out = new Set();
+  for (const j of await queue.list()) {
+    if (queue.jobKind(j) === JOB.DELETE_EDGE && j.raindropId != null) {
+      out.add(String(j.raindropId));
+    }
+  }
+  return out;
 }
 
+/**
+ * Finish a completed listing: presence, deletes, folder renames, ensures.
+ * @param {{ force?: boolean }} args `force` is Pull now (always refresh presence)
+ */
 export async function finishReconcileCycle({
   client,
   budget,
-  seenIds,
-  pairs,
+  force = false,
   index,
   rootId,
   config,
@@ -100,9 +120,7 @@ export async function finishReconcileCycle({
   enqueued,
   pages,
 }) {
-  await finishConfirmGets(client, budget, seenIds, pairs, index, rootId, allowlist, {
-    catchUp: false,
-  });
+  const presence = await finishPresenceAndDeletes({ client, budget, force, config });
   await finishFolderRenamePull(index, config, overrides, rootId, topRoots);
   await ensureAllowlistedOrMirrorAll(
     index,
@@ -113,20 +131,7 @@ export async function finishReconcileCycle({
     folderMode,
     allowlist
   );
-  // Persist the completed listing's presence oracle. While confirm catch-up is
-  // unsettled, keep seenAcc so later heartbeats can confirm-only without
-  // re-listing; clear it once deferred confirms drain (settled).
-  const after = await getReconcileState();
-  const presence = new Set((after.seenAcc || []).map(String));
-  for (const id of seenIds) presence.add(String(id));
-  await setReconcileState({
-    running: false,
-    cursorPage: 0,
-    outsideCursor: null,
-    lastRunAt: Date.now(),
-    lastError: null,
-    seenAcc: after.unsettledConfirmCatchUp ? [...presence] : null,
-  });
+  await markFinish(presence);
   if (enqueued > 0) {
     await appendLog("info", `Pull queued ${enqueued} Raindrop change(s).`);
   }
@@ -134,107 +139,97 @@ export async function finishReconcileCycle({
 }
 
 /**
- * Confirm-only wake: reuse durable seenAcc (no nested re-list). Same Trash /
- * confirm / park / delete-edge safety as a normal finish; spends leftover
- * wake budget with a higher soft confirm backstop so catch-up can drain.
- *
- * @param {{
- *   client: import("./raindrop.js").RaindropClient,
- *   budget: import("./wake-budget.js").WakeBudget|null|undefined,
- *   index: object,
- *   rootId: number|string,
- *   allowlist: object,
- * }} args
+ * Wake after a finish whose presence refresh was due but unaffordable: refresh
+ * and run delete evidence without re-listing.
  */
-export async function runConfirmCatchUp({ client, budget, index, rootId, allowlist }) {
-  const pairs = await getPairs();
-  const state = await getReconcileState();
-  const seenIds = new Set((state.seenAcc || []).map(String));
-  await finishConfirmGets(client, budget, seenIds, pairs, index, rootId, allowlist, {
-    catchUp: true,
-  });
-  const after = await getReconcileState();
+export async function finishPendingPresence({ client, budget, force = false, config }) {
+  const presence = await finishPresenceAndDeletes({ client, budget, force, config });
+  await markFinish(presence);
+  return { enqueued: 0, pages: 0, done: true, presenceOnly: true };
+}
+
+/** Persist cursor reset + completion; completed finishes also run hygiene. */
+async function markFinish(presence) {
+  const now = Date.now();
+  const completed = !presence.due || presence.refreshed;
   await setReconcileState({
-    lastRunAt: Date.now(),
+    running: false,
+    cursorPage: 0,
+    outsideCursor: null,
+    lastRunAt: now,
     lastError: null,
-    seenAcc: after.unsettledConfirmCatchUp ? after.seenAcc : null,
+    presencePending: !completed,
+    ...(completed ? { lastSettledAt: now } : {}),
   });
-  if (!after.unsettledConfirmCatchUp) {
-    await appendLog("info", "Missing-raindrop confirm catch-up settled.");
-  }
-  return { enqueued: 0, pages: 0, done: true, confirmCatchUp: true };
+  if (completed) await afterCompletedFinish(presence, now);
 }
 
 /**
- * Trash soft-delete fast path, then shared GET budget for delete-confirm and
- * tombstone prune. Soft confirm backstop is MAX_ALIVE_CHECKS_PER_TICK on a
- * normal finish; catch-up may use up to SOFT_MAX_REQS_PER_WAKE under spendable.
- *
- * @param {{ catchUp?: boolean }} [opts]
+ * Pair health, v1 backup drop and ledger prune after a completed finish.
+ * @param {{ snapshot: import("./presence.js").PresenceSnapshot|null, treeIndex?: import("./tree-index.js").TreeIndex }} presence
  */
-async function finishConfirmGets(
-  client,
-  budget,
-  seenIds,
-  pairs,
-  index,
-  rootId,
-  allowlist,
-  opts = {}
-) {
-  const trashHandled = await finishTrashDeleteDetection(client, budget, pairs);
-  const softBackstop = opts.catchUp ? SOFT_MAX_REQS_PER_WAKE : MAX_ALIVE_CHECKS_PER_TICK;
-  const confirmCap = Math.min(softBackstop, budget?.allowance?.() ?? softBackstop);
-  let remaining = confirmCap;
-  remaining = await finishDeleteDetection(
+async function afterCompletedFinish(presence, now) {
+  const stored = await getStoredPairs();
+  const treeIndex = presence.treeIndex ?? (await loadTreeIndex());
+  await setPairHealth(
+    computePairHealth({ records: stored.records, treeIndex, snapshot: presence.snapshot, now })
+  );
+  if (!stored.migrationPartial && (await dropPairsV1Backup())) {
+    await appendLog("info", "Dropped the pre-migration pair backup after a completed check.");
+  }
+  await pruneEdgeRemoved(now);
+}
+
+/**
+ * Refresh presence (if due), list Trash, rebind stale ids, enqueue evidence
+ * deletes, prune tombstones.
+ * @returns {Promise<{ snapshot: import("./presence.js").PresenceSnapshot|null, due: boolean, refreshed: boolean, treeIndex: import("./tree-index.js").TreeIndex }>}
+ */
+async function finishPresenceAndDeletes({ client, budget, force, config }) {
+  const got = await ensurePresence({
     client,
     budget,
-    seenIds,
-    pairs,
-    remaining,
-    trashHandled,
-    index,
-    rootId,
-    allowlist
-  );
-  await finishTombstonePrune(client, budget, seenIds, remaining);
+    reason: force ? "pull-now" : "heartbeat",
+    intervalMs: reconcileIntervalMs(config),
+  });
+  client.throwIfShouldPause();
+  if (got.snapshot && !got.snapshot.complete && got.refreshed) {
+    await appendLog(
+      "warn",
+      `Raindrop export looks incomplete (${got.snapshot.error || "unknown"}); absence-based deletes skipped.`
+    );
+  }
+  const trash = await listTrash(client, budget, "reconcile");
+  const treeIndex = await loadTreeIndex();
+  await applyDeleteEvidence({
+    snapshot: got.snapshot,
+    trash,
+    treeIndex,
+    config,
+    source: "reconcile",
+  });
+  await pruneTombstonesFromSnapshot(got.snapshot);
+  return { snapshot: got.snapshot, due: got.due, refreshed: got.refreshed, treeIndex };
 }
 
 /**
- * List Raindrop Trash and enqueue delete-edge for paired ids.
- * Delete-detection only — never pull-create/update from trash.
- * Always starts at page 0 (newest first under Raindrop's default sort) so
- * recent soft-deletes are not starved by a forward cursor; overflow beyond
- * MAX_TRASH_PAGES_PER_TICK falls through to confirm-GET.
- * Writes trash hygiene snapshot (discovery debt for Status safe-to-empty).
- *
- * @param {import("./raindrop.js").RaindropClient} client
- * @param {import("./wake-budget.js").WakeBudget|null|undefined} budget
- * @param {{ byRaindrop: Record<string, string> }} pairs
- * @param {"reconcile"|"check-trash"} [source]
- * @returns {Promise<Set<string>>} raindrop ids handled this pass (skip confirm GET)
+ * List Raindrop Trash (paged, from page 0). Delete-detection only — never
+ * pull-create/update from Trash. Heartbeat shares leftover spendable
+ * (≤ MAX_TRASH_PAGES_PER_TICK); Check Trash may use more of the wake.
+ * @param {"reconcile"|"check-trash"} source
+ * @returns {Promise<{ ids: Set<string>, links: Map<string, string>, scanComplete: boolean, pages: number }>}
  */
-async function finishTrashDeleteDetection(client, budget, pairs, source = "reconcile") {
-  const handled = new Set();
-  // Heartbeat: always page 0 (newest soft-deletes). Check Trash: continue cursor.
-  let page = source === "check-trash" ? await getTrashHygieneNextPage() : 0;
-  let pages = 0;
-  let deleteJobs = 0;
-  let pairedPending = 0;
-  let scanComplete = false;
-  // Heartbeat finish shares leftover spendable (≤ MAX_TRASH_PAGES). Explicit
-  // Check Trash may burn more of the wake so large Trash can still complete.
+async function listTrash(client, budget, source) {
+  const ids = new Set();
+  const links = new Map();
   const softPageCap =
     source === "check-trash"
       ? Math.max(MAX_TRASH_PAGES_PER_TICK, SOFT_MAX_REQS_PER_WAKE)
       : MAX_TRASH_PAGES_PER_TICK;
   const trashCap = Math.min(softPageCap, budget?.allowance?.() ?? softPageCap);
-
-  // No request left — do not stamp a false "incomplete" over a prior good peek.
-  if (trashCap <= 0 || (budget && !budget.canSpend(1))) {
-    return handled;
-  }
-
+  let page = 0;
+  let pages = 0;
+  let scanComplete = false;
   while (pages < trashCap && (!budget || budget.canSpend(1))) {
     const { items, count } = await client.listRaindrops(RAINDROP_TRASH_COLLECTION_ID, {
       page,
@@ -243,67 +238,146 @@ async function finishTrashDeleteDetection(client, budget, pairs, source = "recon
     });
     pages++;
     client.throwIfShouldPause();
-
     for (const item of items) {
       const rid = String(item._id ?? item.id);
-      const bookmarkId = pairs.byRaindrop[rid];
-      if (bookmarkId == null) continue;
-      if (await hasTombstone(rid)) {
-        handled.add(rid);
-        continue;
-      }
-      if (await hasQueuedDeleteEdge(rid)) {
-        handled.add(rid);
-        continue;
-      }
-      // Still needs enroll — count, then enroll so post-peek pending drops.
-      pairedPending++;
-      handled.add(rid);
-      const added = await enqueueDeleteEdge(rid, bookmarkId);
-      if (added) {
-        deleteJobs++;
-        pairedPending--;
-      } else if (await hasQueuedDeleteEdge(rid)) {
-        pairedPending--;
-      }
+      ids.add(rid);
+      if (item.link) links.set(rid, item.link);
     }
-
     if (isListPageDone(page, RAINDROP_LIST_PER_PAGE, items, count)) {
       scanComplete = true;
       break;
     }
     page++;
   }
+  return { ids, links, scanComplete, pages };
+}
 
-  if (pages === 0) return handled;
+/**
+ * Rebind stale ids, then enqueue delete-edge for paired ids whose signal holds
+ * and whose URL survives nowhere. Writes the trash hygiene snapshot.
+ * @param {{
+ *   snapshot: import("./presence.js").PresenceSnapshot|null,
+ *   trash: { ids: Set<string>, links: Map<string, string>, scanComplete: boolean, pages: number },
+ *   treeIndex: import("./tree-index.js").TreeIndex,
+ *   config: object,
+ *   source: "reconcile"|"check-trash",
+ * }} args
+ * @returns {Promise<{ pairedPending: string[] }>}
+ */
+async function applyDeleteEvidence({ snapshot, trash, treeIndex, config, source }) {
+  const now = Date.now();
+  const stored = await getStoredPairs();
+  const urlSnap = isUsableForUrls(snapshot, now) ? snapshot : null;
+  const pass = rebindPass({
+    records: stored.records,
+    treeIndex,
+    snapshot: urlSnap,
+    urlHints: trash.links,
+    now,
+  });
+  const applied = await applyPairChanges(pass.changes);
+  const appliedEdge = new Set(applied.filter((c) => c.type === "edge").map((c) => c.raindropId));
+  const appliedRaindrop = new Set(
+    applied.filter((c) => c.type === "raindrop").map((c) => c.fromRaindropId)
+  );
+  for (const line of rebindLogLines({
+    edgeRebinds: pass.edgeRebinds.filter((r) => appliedEdge.has(r.raindropId)),
+    raindropRebinds: pass.raindropRebinds.filter((r) => appliedRaindrop.has(r.from)),
+  })) {
+    await appendLog("info", line);
+  }
 
-  if (deleteJobs > 0) {
+  const pairs = pairsView(await getStoredPairs());
+  const tombstones = await getTombstones();
+  const queued = await queuedDeleteEdgeIds();
+  const candidates = new Set(pass.raindropCandidates);
+  const absenceAllowed =
+    config.presenceDeletesEnabled !== false && !stored.migrationPartial && !!urlSnap;
+
+  let trashJobs = 0;
+  let absentJobs = 0;
+  const pairedPending = [];
+
+  for (const rid of trash.ids) {
+    const rec = pairs.records[rid];
+    if (!rec || tombstones[rid] || queued.has(rid)) continue; // unpaired or already enrolled
+    // Trash is a positive signal on its own. With a usable snapshot the pass
+    // already ran the survival check (rebound ids are no longer paired here);
+    // without one, enqueue anyway — drain re-checks survival against a later
+    // export before removing anything.
+    if (!urlSnap || candidates.has(rid)) {
+      const url = rec.url || trash.links.get(rid);
+      if (await enqueueDeleteEdge(rid, rec.bookmarkId, "trash", snapshot?.seq ?? 0, url)) {
+        trashJobs++;
+      }
+      queued.add(rid);
+      continue;
+    }
+    // Paired after the export began: judged on the next pass. Discovery debt
+    // behind safe-to-empty until then.
+    pairedPending.push(rid);
+  }
+
+  if (absenceAllowed) {
+    for (const rid of pass.raindropCandidates) {
+      const rec = pairs.records[rid];
+      if (!rec || trash.ids.has(rid) || tombstones[rid] || queued.has(rid)) continue;
+      if (await enqueueDeleteEdge(rid, rec.bookmarkId, "absent", urlSnap.seq, rec.url)) {
+        absentJobs++;
+      }
+      queued.add(rid);
+    }
+  }
+
+  if (trashJobs > 0) {
     await appendLog(
       "info",
-      `Pull queued ${deleteJobs} local delete(s) for raindrops found in Trash.`
+      `Pull queued ${trashJobs} local delete(s) for raindrops found in Trash.`
+    );
+  }
+  if (absentJobs > 0) {
+    await appendLog(
+      "info",
+      `Pull queued ${absentJobs} local delete(s) for raindrops gone from Raindrop (no other copy of the URL).`
     );
   }
 
   // Heartbeat truncated peeks only enroll — don't thrash Status to "partial".
-  // Check Trash owns the complete-scan oracle (and Continue cursor).
-  if (source === "reconcile" && !scanComplete) {
-    return handled;
+  if (trash.pages > 0 && (source === "check-trash" || trash.scanComplete)) {
+    let pendingIds = pairedPending;
+    if (!trash.scanComplete) {
+      // A partial scan restarts at page 0 and may not reach ids an earlier
+      // partial scan found; keep those that still need enroll.
+      const prev = (await getReconcileState()).trashPendingIds || [];
+      const carry = prev.filter(
+        (rid) => pairs.records[rid] && !tombstones[rid] && !queued.has(rid)
+      );
+      pendingIds = [...new Set([...pairedPending, ...carry])];
+    }
+    await writeTrashHygieneSnapshot({
+      scanComplete: trash.scanComplete,
+      pendingIds,
+      source,
+    });
   }
-
-  await writeTrashHygieneSnapshot({
-    scanComplete,
-    pairedPending,
-    source,
-    // After incomplete Check Trash, next click resumes here (not page 0 again).
-    nextPage: scanComplete ? 0 : page,
-  });
-  return handled;
+  return { pairedPending };
 }
 
 /**
- * Trash-only hygiene peek (Check Trash): list Trash, enroll paired deletes,
- * refresh the durable snapshot. Does not run confirm-GET or full reconcile.
- *
+ * Tombstones for ids absent from a complete snapshot are stale (the raindrop
+ * is gone for good). Tombstones for present ids (offload) are kept.
+ */
+async function pruneTombstonesFromSnapshot(snapshot) {
+  if (!isUsableForAbsence(snapshot)) return;
+  const absent = Object.keys(await getTombstones()).filter((rid) => !snapshot.ids.has(rid));
+  if (!absent.length) return;
+  await pruneTombstones(absent);
+  await appendLog("info", `Pruned ${absent.length} stale tombstone(s).`);
+}
+
+/**
+ * Check Trash (Options Status): list Trash from page 0, enroll paired deletes,
+ * refresh the hygiene snapshot. Does not run a full reconcile listing.
  * @param {{
  *   client: import("./raindrop.js").RaindropClient,
  *   budget?: import("./wake-budget.js").WakeBudget|null,
@@ -311,197 +385,25 @@ async function finishTrashDeleteDetection(client, budget, pairs, source = "recon
  * @returns {Promise<{ handled: number, scanComplete: boolean, pairedPending: number }>}
  */
 export async function runTrashHygienePeek({ client, budget }) {
-  const pairs = await getPairs();
-  await finishTrashDeleteDetection(client, budget, pairs, "check-trash");
+  const config = await getConfig();
+  const got = await ensurePresence({ client, budget, reason: "on-demand" });
+  client.throwIfShouldPause();
+  const trash = await listTrash(client, budget, "check-trash");
+  if (trash.pages > 0) {
+    await applyDeleteEvidence({
+      snapshot: got.snapshot,
+      trash,
+      treeIndex: await loadTreeIndex(),
+      config,
+      source: "check-trash",
+    });
+  }
   const state = await getReconcileState();
   return {
     handled: 0,
     scanComplete: !!state.trashScanComplete,
     pairedPending: Number(state.trashPairedPending) || 0,
   };
-}
-
-/**
- * Walk a rotating window of candidates under a GET budget; persist offset.
- * Empty candidate list resets the offset so a later non-empty list starts at 0.
- * Stops early when the shared wake budget is exhausted (unchecked stay deferred).
- *
- * @param {{
- *   candidates: any[],
- *   offsetKey: string,
- *   maxGets: number,
- *   visit: (candidate: any) => Promise<void>,
- *   budget?: import("./wake-budget.js").WakeBudget|null,
- * }} opts
- * @returns {Promise<{ checked: number, remaining: number }>}
- */
-async function rotateConfirmWindow({ candidates, offsetKey, maxGets, visit, budget }) {
-  const state = await getReconcileState();
-  if (!candidates.length) {
-    if ((state[offsetKey] || 0) !== 0) {
-      await setReconcileState({ [offsetKey]: 0 });
-    }
-    return { checked: 0, remaining: maxGets };
-  }
-  if (maxGets <= 0) return { checked: 0, remaining: 0 };
-
-  const offset = (state[offsetKey] || 0) % candidates.length;
-  const toCheck = Math.min(maxGets, candidates.length);
-  let checked = 0;
-  for (let n = 0; n < toCheck; n++) {
-    if (budget && !budget.canSpend(1)) break;
-    await visit(candidates[(offset + n) % candidates.length]);
-    checked++;
-  }
-  await setReconcileState({
-    [offsetKey]: (offset + checked) % candidates.length,
-  });
-  return { checked, remaining: maxGets - checked };
-}
-
-/** In-memory union of durable seenAcc and this cycle's live seenIds (no write). */
-async function seenAccWithLive(seenIds) {
-  const state = await getReconcileState();
-  const acc = new Set((state.seenAcc || []).map(String));
-  for (const id of seenIds) acc.add(String(id));
-  return acc;
-}
-
-/**
- * Confirm-GET fallback for pairs missing from scoped listing (permanent deletes,
- * emptied trash, etc.). Skips ids already handled by the Trash fast path and
- * ids parked as out-of-scope alives.
- */
-async function finishDeleteDetection(
-  client,
-  budget,
-  seenIds,
-  pairs,
-  maxGets,
-  skipIds,
-  index,
-  rootId,
-  allowlist
-) {
-  const acc = await seenAccWithLive(seenIds);
-
-  // Back in scoped listing → eligible for delete-confirm again if they leave later.
-  const parked = await getParkedAliveIds();
-  if (parked.size) {
-    const toUnpark = [];
-    for (const rid of parked) {
-      if (acc.has(String(rid))) toUnpark.push(rid);
-    }
-    if (toUnpark.length) await unparkAliveIds(toUnpark);
-  }
-
-  // Drop park entries for pairs that no longer exist.
-  const parkedAfterUnpark = await getParkedAliveIds();
-  if (parkedAfterUnpark.size) {
-    const kept = [...parkedAfterUnpark].filter((rid) => pairs.byRaindrop[rid] != null);
-    if (kept.length !== parkedAfterUnpark.size) await setParkedAliveIds(kept);
-  }
-  const parkedSkip = await getParkedAliveIds();
-
-  // Build the full candidate list first, then walk a rotating window so pairs
-  // past the per-tick budget are not starved across cycles.
-  const candidates = [];
-  for (const [rid, bookmarkId] of Object.entries(pairs.byRaindrop)) {
-    if (acc.has(String(rid))) continue;
-    if (skipIds?.has(String(rid))) continue;
-    if (parkedSkip.has(String(rid))) continue;
-    if (await hasTombstone(rid)) continue;
-    candidates.push([rid, bookmarkId]);
-  }
-
-  let deleteJobs = 0;
-  const newlyParked = [];
-  const { checked, remaining } = await rotateConfirmWindow({
-    candidates,
-    offsetKey: "aliveConfirmOffset",
-    maxGets,
-    budget,
-    visit: async ([rid, bookmarkId]) => {
-      // Pairs outside the nested root listing (e.g. cleared outside-root allowlist)
-      // never appear in seenIds — confirm with a direct get before deleting Edge.
-      const probe = await probeLivingRaindrop(client, rid);
-      if (probe.status === "unknown") {
-        client.throwIfShouldPause();
-        return;
-      }
-      if (probe.status === "alive") {
-        const col = raindropCollectionId(probe.item);
-        if (!isInScopedListing(col, index, rootId, allowlist)) {
-          newlyParked.push(String(rid));
-        }
-        client.throwIfShouldPause();
-        return;
-      }
-      const added = await enqueueDeleteEdge(rid, bookmarkId);
-      if (added) deleteJobs++;
-      client.throwIfShouldPause();
-    },
-  });
-
-  if (newlyParked.length) {
-    await parkAliveIds(newlyParked);
-    await appendLog(
-      "info",
-      `Parked ${newlyParked.length} out-of-scope alive pair(s) (skipped future missing-raindrop checks).`
-    );
-  }
-  if (deleteJobs > 0) {
-    await appendLog(
-      "info",
-      `Pull queued ${deleteJobs} local delete(s) for raindrops confirmed gone.`
-    );
-  }
-  const deferred = Math.max(0, candidates.length - checked);
-  if (deferred > 0) {
-    await appendLog(
-      "info",
-      `Reconcile postponed ${deferred} missing-raindrop check(s) ` +
-        `(confirm budget this cycle; continues next heartbeat).`
-    );
-    await setReconcileState({ unsettledConfirmCatchUp: true });
-  } else {
-    await setReconcileState({
-      unsettledConfirmCatchUp: false,
-      lastSettledAt: Date.now(),
-    });
-  }
-  return remaining;
-}
-
-/**
- * Drop tombstones for raindrops confirmed gone (not in this cycle's listing and
- * GET says absent/trash). Living offload targets remain listed → kept.
- * Uses leftover confirm budget after delete-detection.
- * @returns {Promise<number>} unused GET budget
- */
-async function finishTombstonePrune(client, budget, seenIds, maxGets) {
-  const acc = await seenAccWithLive(seenIds);
-
-  const stones = await getTombstones();
-  const candidates = Object.keys(stones).filter((rid) => !acc.has(rid));
-  const absent = [];
-
-  const { remaining } = await rotateConfirmWindow({
-    candidates,
-    offsetKey: "tombstonePruneOffset",
-    maxGets,
-    budget,
-    visit: async (rid) => {
-      if (!(await raindropStillAlive(client, rid))) absent.push(rid);
-      client.throwIfShouldPause();
-    },
-  });
-
-  if (absent.length) {
-    await pruneTombstones(absent);
-    await appendLog("info", `Pruned ${absent.length} stale tombstone(s).`);
-  }
-  return remaining;
 }
 
 /**
@@ -513,13 +415,7 @@ async function finishTombstonePrune(client, budget, seenIds, maxGets) {
 async function finishFolderRenamePull(index, config, overrides, rootId, topRoots) {
   let enqueued = 0;
   if (rootId != null) {
-    enqueued += await healUnmappedFolderCollections(
-      index,
-      rootId,
-      config,
-      overrides,
-      topRoots
-    );
+    enqueued += await healUnmappedFolderCollections(index, rootId, config, overrides, topRoots);
   }
 
   const map = await getFolderCollections();
@@ -693,32 +589,4 @@ async function resolveMirrorParentFolderId(relativeSegments, rootName, topRoots)
 async function edgeFolderIsOutsideRootLanding(folderId) {
   const { segments } = await walkAncestorsFromFolder(folderId, { soft: true });
   return isOutsideRootLandingSegments(segments);
-}
-
-/**
- * Probe whether Raindrop still has a non-trashed item for this id.
- * Fail-soft on transient errors (5xx/network): `unknown` so we neither
- * false-delete nor park. Only definite absence (null / 404 / trash) ⇒ gone.
- * @returns {Promise<{ status: 'gone' }|{ status: 'alive', item: object }|{ status: 'unknown' }>}
- */
-async function probeLivingRaindrop(client, rid) {
-  try {
-    const item = await client.getRaindrop(rid);
-    if (!item) return { status: "gone" };
-    const col = raindropCollectionId(item);
-    if (col === RAINDROP_TRASH_COLLECTION_ID || col === String(RAINDROP_TRASH_COLLECTION_ID)) {
-      return { status: "gone" };
-    }
-    return { status: "alive", item };
-  } catch (err) {
-    if (err instanceof AuthError || err instanceof RateLimitError) throw err;
-    if (isNotFoundError(err)) return { status: "gone" };
-    return { status: "unknown" };
-  }
-}
-
-/** True when Raindrop still has a non-trashed item (or probe is inconclusive). */
-async function raindropStillAlive(client, rid) {
-  const probe = await probeLivingRaindrop(client, rid);
-  return probe.status !== "gone";
 }

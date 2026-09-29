@@ -1,10 +1,9 @@
-#!/usr/bin/env node
 // Offline unit checks for pure sync helpers (no Raindrop token / Edge / chrome).
 // Imports the real src/lib modules — do not reimplement algorithms here.
-// Run: node scripts/verify-bidirectional-logic.mjs
-// Or:  npm test
+// Run: npm test (node --test test/)
 
 import assert from "node:assert/strict";
+import { test } from "node:test";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -63,8 +62,7 @@ import {
   DEFAULT_ROOT_NAME,
 } from "../src/lib/bookmark-roots.js";
 
-console.log("== canonical bookmark roots ==");
-{
+test("canonical bookmark roots", async () => {
   assert.equal(rootRole("Favorites bar"), "toolbar");
   assert.equal(rootRole("Bookmarks bar"), "toolbar");
   assert.equal(rootRole("Other favorites"), "other");
@@ -80,12 +78,11 @@ console.log("== canonical bookmark roots ==");
   ]);
   assert.equal(DEFAULT_CONFIG.rootName, DEFAULT_ROOT_NAME);
   console.log("  ✔ roles, aliases, upload canonicalize, default root");
-}
+});
 
-console.log("== roots migration (mock client) ==");
-{
+test("roots migration (mock client)", async () => {
   const { migrateLegacyRaindropRoots } = await import("../src/lib/migrate-roots.js");
-  const harness = await import("./lib/test-harness.mjs");
+  const harness = await import("../scripts/lib/test-harness.mjs");
   harness.storage.clear();
   harness.seedEdge();
   harness.installChromeMocks();
@@ -203,11 +200,10 @@ console.log("== roots migration (mock client) ==");
   assert.equal(cfgPartial.rootName, "Bookmarks");
   assert.ok(!cfgPartial.rootsMigratedAt);
   console.log("  ✔ partial root rename persists rootName for retry");
-}
+});
 
-console.log("== mirror placement aliases ==");
-{
-  const harness = await import("./lib/test-harness.mjs");
+test("mirror placement aliases", async () => {
+  const harness = await import("../scripts/lib/test-harness.mjs");
   harness.storage.clear();
   harness.seedEdge();
   harness.installChromeMocks();
@@ -226,10 +222,9 @@ console.log("== mirror placement aliases ==");
   assert.equal(chromePlan.startId, "1");
   assert.deepEqual(chromePlan.titles, ["Work"]);
   console.log("  ✔ Bookmarks bar lands on Edge Favorites bar and Chrome Bookmarks bar");
-}
+});
 
-console.log("== policy resolution ==");
-{
+test("policy resolution", async () => {
   const overrides = {
     work: { policy: POLICY.SYNC_KEEP },
     secrets: { policy: POLICY.EXCLUDE },
@@ -240,20 +235,18 @@ console.log("== policy resolution ==");
   assert.equal(isExcluded(["secrets", "work"], overrides, POLICY.SYNC_DELETE), true);
   assert.equal(isExcluded(["archive", "work"], overrides, POLICY.SYNC_DELETE), false);
   console.log("  ✔ nearest-ancestor + exclude");
-}
+});
 
-console.log("== raindropFolderMode default ==");
-{
+test("raindropFolderMode default", async () => {
   assert.equal(
     DEFAULT_CONFIG.raindropFolderMode,
     RAINDROP_FOLDER_MODE.CREATE_AS_NEEDED,
     "default preserves create-as-needed"
   );
   console.log("  ✔ default create-as-needed");
-}
+});
 
-console.log("== bidirectional coerces global keep-both ==");
-{
+test("bidirectional coerces global keep-both", async () => {
   const coerced = normalizeConfig({
     syncMode: SYNC_MODE.BIDIRECTIONAL,
     defaultPolicy: POLICY.SYNC_DELETE,
@@ -265,10 +258,9 @@ console.log("== bidirectional coerces global keep-both ==");
   });
   assert.equal(oneWay.defaultPolicy, POLICY.SYNC_DELETE, "one-way offload unchanged");
   console.log("  ✔ stale bidirectional offload → keep-both");
-}
+});
 
-console.log("== pull now loop ==");
-{
+test("pull now loop", async () => {
   let calls = 0;
   const finished = await runPullNow(async () => {
     calls++;
@@ -303,7 +295,11 @@ console.log("== pull now loop ==");
       }
       return { ok: true, done: true, enqueued: 1 };
     },
-    { sleepFn: async (ms) => { slept.push(ms); } }
+    {
+      sleepFn: async (ms) => {
+        slept.push(ms);
+      },
+    }
   );
   assert.equal(rateCalls, 2, "waits out rate limit then continues");
   assert.equal(slept.length, 1, "sleeps once for the pause");
@@ -351,10 +347,9 @@ console.log("== pull now loop ==");
   assert.match(doneUnderPause.text, /Pull finished: queued 1/);
 
   console.log("  ✔ popup and options share the pass loop / wait-and-resume rate limit");
-}
+});
 
-console.log("== collection path under root ==");
-{
+test("collection path under root", async () => {
   const byId = new Map();
   const root = { _id: 1, title: "Edge", parent: null };
   const bar = { _id: 2, title: "Favorites bar", parent: { $id: 1 } };
@@ -376,10 +371,9 @@ console.log("== collection path under root ==");
     "includes root with empty relative"
   );
   console.log("  ✔ path under root / outside root / collectionsUnderRoot");
-}
+});
 
-console.log("== collection cache vs live index ==");
-{
+test("collection cache vs live index", async () => {
   const byParent = new Map();
   const byId = new Map();
   const root = { _id: 1, title: "Edge", parent: null };
@@ -414,10 +408,9 @@ console.log("== collection cache vs live index ==");
   assert.equal(created.length, 0, "must not create a duplicate root");
   assert.equal(cache.Edge, 1);
   console.log("  ✔ stale cache dropped; title match reused");
-}
+});
 
-console.log("== job kind defaults ==");
-{
+test("job kind defaults", async () => {
   assert.equal(jobKind({ id: "1" }), JOB.UPLOAD);
   assert.equal(jobKind({ id: "pull-9", kind: JOB.PULL_CREATE }), JOB.PULL_CREATE);
   assert.ok(
@@ -430,10 +423,9 @@ console.log("== job kind defaults ==");
   );
   assert.equal(drainJobPriority(JOB.UPLOAD), drainJobPriority(JOB.PULL_CREATE));
   console.log("  ✔ legacy jobs are upload; rename before upload");
-}
+});
 
-console.log("== pending direction breakdown ==");
-{
+test("pending direction breakdown", async () => {
   assert.equal(jobDirection(JOB.UPLOAD), "edgeToRaindrop");
   assert.equal(jobDirection(JOB.DELETE_RAINDROP), "edgeToRaindrop");
   assert.equal(jobDirection(JOB.RENAME_COLLECTION), "edgeToRaindrop");
@@ -452,32 +444,19 @@ console.log("== pending direction breakdown ==");
     { id: "e", kind: JOB.RENAME_COLLECTION },
   ]);
   assert.deepEqual(counts, { total: 5, edgeToRaindrop: 3, raindropToEdge: 2 });
-  assert.equal(
-    formatPendingByDirection(counts),
-    "Edge → Raindrop: 3 · Raindrop → Edge: 2"
-  );
+  assert.equal(formatPendingByDirection(counts), "Edge → Raindrop: 3 · Raindrop → Edge: 2");
 
-  const optionsHtml = fs.readFileSync(
-    path.join(REPO_ROOT, "src/options/options.html"),
-    "utf8"
-  );
+  const optionsHtml = fs.readFileSync(path.join(REPO_ROOT, "src/options/options.html"), "utf8");
   assert.ok(
     optionsHtml.includes('id="pendingByDirection"'),
     "Options Status exposes pendingByDirection"
   );
-  const popupHtml = fs.readFileSync(
-    path.join(REPO_ROOT, "src/popup/popup.html"),
-    "utf8"
-  );
-  assert.ok(
-    popupHtml.includes('id="pendingByDirection"'),
-    "popup exposes pendingByDirection"
-  );
+  const popupHtml = fs.readFileSync(path.join(REPO_ROOT, "src/popup/popup.html"), "utf8");
+  assert.ok(popupHtml.includes('id="pendingByDirection"'), "popup exposes pendingByDirection");
   console.log("  ✔ Edge→Raindrop vs Raindrop→Edge counts + Status markup");
-}
+});
 
-console.log("== raindrop folder allowlist ==");
-{
+test("raindrop folder allowlist", async () => {
   assert.deepEqual(DEFAULT_CONFIG.raindropFolderAllowlist, {});
   assert.equal(DEFAULT_CONFIG.keepLongTermLog, false);
   assert.equal(LOG_LIMIT, 500);
@@ -673,10 +652,9 @@ console.log("== raindrop folder allowlist ==");
   const normalized = normalizeConfig({ token: "x" });
   assert.deepEqual(normalized.raindropFolderAllowlist, {});
   console.log("  ✔ active/parent/empty-mode/Edge-bypass/prune/path-resolve/outside-root");
-}
+});
 
-console.log("== outside-root forest list ids ==");
-{
+test("outside-root forest list ids", async () => {
   const { outsideRootListIds } = await import("../src/lib/reconcile.js");
   const byId = new Map();
   const syncRoot = { _id: 1, title: "Edge", parent: null };
@@ -704,10 +682,9 @@ console.log("== outside-root forest list ids ==");
     "skips sync-root member and child when parent allowlisted"
   );
   console.log("  ✔ forest roots only");
-}
+});
 
-console.log("== reconcile interval config ==");
-{
+test("reconcile interval config", async () => {
   assert.equal(DEFAULT_CONFIG.reconcileIntervalMinutes, DEFAULT_RECONCILE_INTERVAL_MINUTES);
   assert.equal(DEFAULT_RECONCILE_INTERVAL_MINUTES, 1);
   assert.equal(clampReconcileIntervalMinutes(undefined), 1);
@@ -719,16 +696,14 @@ console.log("== reconcile interval config ==");
   assert.equal(normalizeConfig({ reconcileIntervalMinutes: 1 }).reconcileIntervalMinutes, 1);
   assert.equal(reconcileIntervalMs({ reconcileIntervalMinutes: 2 }), 2 * 60_000);
   console.log("  ✔ default / clamp / reconcileIntervalMs");
-}
+});
 
-console.log("== rate-limit constants ==");
-{
+test("rate-limit constants", async () => {
   const {
     RATE_LIMIT_RESERVE: reserve,
     BOOTSTRAP_REQS,
     SOFT_MAX_REQS_PER_WAKE,
     SOFT_MAX_DRAIN_JOBS_PER_WAKE,
-    MAX_ALIVE_CHECKS_PER_TICK,
     MAX_JOBS_PER_DRAIN,
     MAX_JOBS_PER_DRAIN_BUSY,
     DRAIN_BUSY_PENDING_THRESHOLD,
@@ -741,7 +716,6 @@ console.log("== rate-limit constants ==");
   assert.ok(reserve <= 8);
   assert.ok(BOOTSTRAP_REQS >= 1 && BOOTSTRAP_REQS < SOFT_MAX_REQS_PER_WAKE);
   assert.ok(SOFT_MAX_DRAIN_JOBS_PER_WAKE >= MAX_JOBS_PER_DRAIN_BUSY);
-  assert.ok(MAX_ALIVE_CHECKS_PER_TICK > 8, "confirm soft backstop above legacy primary 8");
   assert.ok(MAX_JOBS_PER_DRAIN >= 1);
   assert.ok(MAX_JOBS_PER_DRAIN_BUSY > MAX_JOBS_PER_DRAIN);
   assert.equal(drainJobsCap(0), MAX_JOBS_PER_DRAIN);
@@ -759,26 +733,19 @@ console.log("== rate-limit constants ==");
   assert.equal(raindropCollectionId({ collection: { $id: 1, id: 2 } }), 1);
   assert.equal(raindropCollectionId(null), undefined);
   console.log("  ✔ reserve / wake budget constants / short drain caps / proactive RateLimitError");
-}
+});
 
-console.log("== wake budget spendable / self-cap ==");
-{
+test("wake budget spendable / self-cap", async () => {
   // chrome.storage mock for persist-window / lastThrottle helpers
-  await import("./lib/test-harness.mjs");
-  const { BOOTSTRAP_REQS, SHORT_WAKE_REQS, SOFT_MAX_REQS_PER_WAKE } = await import(
-    "../src/lib/constants.js"
-  );
+  await import("../scripts/lib/test-harness.mjs");
+  const { BOOTSTRAP_REQS, SHORT_WAKE_REQS, SOFT_MAX_REQS_PER_WAKE } =
+    await import("../src/lib/constants.js");
   assert.ok(SHORT_WAKE_REQS > BOOTSTRAP_REQS);
   assert.ok(SHORT_WAKE_REQS < SOFT_MAX_REQS_PER_WAKE, "short wake is below full wakeCap");
-  const {
-    WakeBudget,
-    createWakeBudget,
-    formatLastThrottleNotice,
-    loadPersistedRateWindow,
-  } = await import("../src/lib/wake-budget.js");
-  const { setStatus, getStatus, noteRateLimitedUntil, clearRateLimit } = await import(
-    "../src/lib/store.js"
-  );
+  const { WakeBudget, createWakeBudget, formatLastThrottleNotice, loadPersistedRateWindow } =
+    await import("../src/lib/wake-budget.js");
+  const { setStatus, getStatus, noteRateLimitedUntil, clearRateLimit } =
+    await import("../src/lib/store.js");
 
   // Opportunistic drains (live handlers) seed a short budget; full wakes use soft max.
   const shortBoot = new WakeBudget({
@@ -863,17 +830,16 @@ console.log("== wake budget spendable / self-cap ==");
   );
   assert.equal(shortFromStore.wakeCapReqs, SHORT_WAKE_REQS);
 
-  console.log("  ✔ bootstrap / short vs full / spendable / wake_cap / persist window / Status copy");
-}
+  console.log(
+    "  ✔ bootstrap / short vs full / spendable / wake_cap / persist window / Status copy"
+  );
+});
 
-console.log("== bulk candidate heuristics ==");
-{
-  const { assessFromScope, assessPullFromScope, formatBulkCandidatePrompt } = await import(
-    "../src/lib/bulk-candidate.js"
-  );
-  const { BULK_UNPAIRED_IMPORT_THRESHOLD, BULK_EDGE_COUNT_THRESHOLD } = await import(
-    "../src/lib/constants.js"
-  );
+test("bulk candidate heuristics", async () => {
+  const { assessFromScope, assessPullFromScope, formatBulkCandidatePrompt } =
+    await import("../src/lib/bulk-candidate.js");
+  const { BULK_UNPAIRED_IMPORT_THRESHOLD, BULK_EDGE_COUNT_THRESHOLD } =
+    await import("../src/lib/constants.js");
   const small = assessFromScope({ unpaired: 10, paired: 50, edgeScanned: 60 });
   assert.equal(small.suggest, false);
   const largeUnpaired = assessFromScope({
@@ -903,24 +869,34 @@ console.log("== bulk candidate heuristics ==");
   assert.ok(pullCopy.includes("before Pull"));
   assert.ok(!pullCopy.includes("re-uploaded"));
   console.log("  ✔ assessFromScope / assessPullFromScope / prompt copy");
-}
+});
 
-console.log("== browser-normalized URL compare (pull-update drift) ==");
-{
+test("browser-normalized URL compare (pull-update drift)", async () => {
   const { sameBookmarkUrl } = await import("../src/lib/url-match.js");
   assert.equal(sameBookmarkUrl("https://webawesome.com/", "https://webawesome.com"), true);
   assert.equal(sameBookmarkUrl("HTTPS://Example.com", "https://example.com/"), true);
   assert.equal(sameBookmarkUrl("edge://history/all", "edge://history/all"), true);
-  assert.equal(sameBookmarkUrl("https://a.example/x", "https://a.example/x/"), false, "path slash is real");
-  assert.equal(sameBookmarkUrl("https://a.example/?q=1", "https://a.example/?q=2"), false, "query is real");
-  assert.equal(sameBookmarkUrl("https://www.a.example/", "https://a.example/"), false, "www is real");
+  assert.equal(
+    sameBookmarkUrl("https://a.example/x", "https://a.example/x/"),
+    false,
+    "path slash is real"
+  );
+  assert.equal(
+    sameBookmarkUrl("https://a.example/?q=1", "https://a.example/?q=2"),
+    false,
+    "query is real"
+  );
+  assert.equal(
+    sameBookmarkUrl("https://www.a.example/", "https://a.example/"),
+    false,
+    "www is real"
+  );
   assert.equal(sameBookmarkUrl("not a url", "not a url"), true);
   assert.equal(sameBookmarkUrl("not a url", "other"), false);
   console.log("  ✔ origin trailing slash is not drift; real differences still are");
-}
+});
 
-console.log("== Raindrop GET cache busting ==");
-{
+test("Raindrop GET cache busting", async () => {
   const { cacheBustPath } = await import("../src/lib/raindrop.js");
   assert.equal(cacheBustPath("/collections", "a1"), "/collections?_cb=a1");
   assert.equal(
@@ -929,10 +905,9 @@ console.log("== Raindrop GET cache busting ==");
   );
   assert.notEqual(cacheBustPath("/x", 1), cacheBustPath("/x", 2), "nonce varies the URL");
   console.log("  ✔ every GET gets a unique _cb parameter");
-}
+});
 
-console.log("== export URL match + Match existing planner ==");
-{
+test("export URL match + Match existing planner", async () => {
   const { urlMatchKeys } = await import("../src/lib/url-match.js");
   const { parseCsvRows, indexExportByUrl } = await import("../src/lib/export-csv.js");
   const { planMatchFromExport } = await import("../src/lib/match-existing.js");
@@ -962,7 +937,7 @@ console.log("== export URL match + Match existing planner ==");
   ];
   const pairs = {
     byBookmark: { b2: "20" },
-    byRaindrop: { "20": "b2" },
+    byRaindrop: { 20: "b2" },
   };
   const plan = planMatchFromExport(csv, edge, pairs);
   assert.equal(plan.matched.length, 1);
@@ -989,7 +964,7 @@ console.log("== export URL match + Match existing planner ==");
   const conflict = planMatchFromExport(
     "id,url\n99,https://z.example/\n1,https://z-other.example/\n",
     [{ id: "z1", url: "https://z.example/" }],
-    { byBookmark: { z1: "1" }, byRaindrop: { "1": "z1" } }
+    { byBookmark: { z1: "1" }, byRaindrop: { 1: "z1" } }
   );
   assert.equal(conflict.matched.length, 0);
   assert.equal(conflict.conflicts, 1);
@@ -999,17 +974,21 @@ console.log("== export URL match + Match existing planner ==");
   const staleForward = planMatchFromExport(
     "id,url\n99,https://z.example/\n",
     [{ id: "z1", url: "https://z.example/" }],
-    { byBookmark: { z1: "1867674133" }, byRaindrop: { "1867674133": "z1" } }
+    { byBookmark: { z1: "1867674133" }, byRaindrop: { 1867674133: "z1" } }
   );
   assert.equal(staleForward.conflicts, 0);
   assert.equal(staleForward.matched.length, 1);
   assert.equal(staleForward.matched[0].raindropId, "99");
-  assert.equal(staleForward.matched[0].replacesRid, "1867674133", "row records the ghost it replaces");
+  assert.equal(
+    staleForward.matched[0].replacesRid,
+    "1867674133",
+    "row records the ghost it replaces"
+  );
   assert.ok(Array.isArray(staleForward.raindropIds) && staleForward.raindropIds.includes("99"));
 
   // classifyPairClaim without the export set keeps the old strict behaviour.
   const { classifyPairClaim } = await import("../src/lib/match-existing.js");
-  const ghostPairs = { byBookmark: { z1: "1867674133" }, byRaindrop: { "1867674133": "z1" } };
+  const ghostPairs = { byBookmark: { z1: "1867674133" }, byRaindrop: { 1867674133: "z1" } };
   assert.equal(classifyPairClaim("z1", "99", ghostPairs, new Set(["z1"])), "conflict");
   assert.equal(
     classifyPairClaim("z1", "99", ghostPairs, new Set(["z1"]), new Set(["99"])),
@@ -1019,7 +998,7 @@ console.log("== export URL match + Match existing planner ==");
   const pairedOk = planMatchFromExport(
     "id,url\n5,https://ok.example/\n",
     [{ id: "p1", url: "https://ok.example/" }],
-    { byBookmark: { p1: "5" }, byRaindrop: { "5": "p1" } }
+    { byBookmark: { p1: "5" }, byRaindrop: { 5: "p1" } }
   );
   assert.equal(pairedOk.alreadyPaired, 1);
   assert.equal(pairedOk.matched.length, 0);
@@ -1028,7 +1007,7 @@ console.log("== export URL match + Match existing planner ==");
   const staleReverse = planMatchFromExport(
     "id,url\n77,https://rebind.example/\n",
     [{ id: "new1", url: "https://rebind.example/" }],
-    { byBookmark: { oldGone: "77" }, byRaindrop: { "77": "oldGone" } }
+    { byBookmark: { oldGone: "77" }, byRaindrop: { 77: "oldGone" } }
   );
   assert.equal(staleReverse.matched.length, 1);
   assert.equal(staleReverse.matched[0].bookmarkId, "new1");
@@ -1042,19 +1021,17 @@ console.log("== export URL match + Match existing planner ==");
       { id: "want", url: "https://taken.example/" },
       { id: "owner", url: "https://other.example/" },
     ],
-    { byBookmark: { owner: "88" }, byRaindrop: { "88": "owner" } }
+    { byBookmark: { owner: "88" }, byRaindrop: { 88: "owner" } }
   );
   assert.equal(liveReverseConflict.matched.length, 0);
   assert.equal(liveReverseConflict.conflicts, 1);
 
   console.log("  ✔ urlMatchKeys / export CSV / planMatchFromExport");
-}
+});
 
-console.log("== move URL rebind picker ==");
-{
-  const { filterUrlMatchingItems, pickMoveRebindCandidate } = await import(
-    "../src/lib/move-rebind.js"
-  );
+test("move URL rebind picker", async () => {
+  const { filterUrlMatchingItems, pickMoveRebindCandidate } =
+    await import("../src/lib/move-rebind.js");
 
   const filtered = filterUrlMatchingItems("https://www.Example.com/a/", [
     { _id: 1, link: "https://example.com/a" },
@@ -1093,7 +1070,7 @@ console.log("== move URL rebind picker ==");
   const conflict = pickMoveRebindCandidate(
     "bm1",
     [{ _id: 7, link: "https://x.example/" }],
-    { byBookmark: { owner: "7" }, byRaindrop: { "7": "owner" } },
+    { byBookmark: { owner: "7" }, byRaindrop: { 7: "owner" } },
     new Set(["bm1", "owner"])
   );
   assert.equal(conflict.kind, "conflict");
@@ -1101,7 +1078,7 @@ console.log("== move URL rebind picker ==");
   const staleOk = pickMoveRebindCandidate(
     "bm1",
     [{ _id: 8, link: "https://x.example/" }],
-    { byBookmark: { gone: "8" }, byRaindrop: { "8": "gone" } },
+    { byBookmark: { gone: "8" }, byRaindrop: { 8: "gone" } },
     new Set(["bm1"])
   );
   assert.equal(staleOk.kind, "unique");
@@ -1109,10 +1086,9 @@ console.log("== move URL rebind picker ==");
 
   assert.equal(pickMoveRebindCandidate("bm1", [], emptyPairs, live).kind, "none");
   console.log("  ✔ filterUrlMatchingItems / pickMoveRebindCandidate");
-}
+});
 
-console.log("== reconcile skip Status copy ==");
-{
+test("reconcile skip Status copy", async () => {
   const { formatReconcileSkipNotice } = await import("../src/lib/store.js");
   assert.equal(formatReconcileSkipNotice(null), null);
   const busyNotice = formatReconcileSkipNotice({
@@ -1127,10 +1103,9 @@ console.log("== reconcile skip Status copy ==");
   assert.ok(coolNotice.includes("settled"), "cooldown copy mentions settled check");
   assert.ok(formatReconcileSkipNotice({ reconcileSkipReason: "bulk_pause" }).includes("Continue"));
   console.log("  ✔ busy / cooldown / bulk_pause notices");
-}
+});
 
-console.log("== trash-safe Status derive ==");
-{
+test("trash-safe Status derive", async () => {
   const {
     deriveTrashSafeState,
     formatTrashSafeNotice,
@@ -1156,50 +1131,62 @@ console.log("== trash-safe Status derive ==");
     formatTrashSafeNotice({ trashHygieneAt: 1, trashScanComplete: true, trashPairedPending: 0 }),
     "Safe to empty Raindrop Trash."
   );
-  assert.ok(formatTrashSafeNotice({ trashHygieneAt: 1, trashScanComplete: false }).includes("Continue"));
-  assert.equal(trashSafeButtonLabel("partial"), "Continue");
+  assert.ok(
+    formatTrashSafeNotice({ trashHygieneAt: 1, trashScanComplete: false }).includes(
+      "Check Trash again"
+    )
+  );
+  // Every click rescans from page 0, so there is no separate Continue.
+  assert.equal(trashSafeButtonLabel("partial"), "Check Trash");
   assert.equal(trashSafeButtonLabel("safe"), "Check Trash");
   assert.equal(buildTrashSafePayload(null).state, "unknown");
   assert.equal(buildTrashSafePayload(null).buttonLabel, "Check Trash");
   console.log("  ✔ unknown / partial / waiting / safe + short copy");
-}
+});
 
-console.log("== postpone confirm log copy ==");
-{
+test("confirm-GET presence machinery is gone", async () => {
   const fs = await import("node:fs/promises");
-  const finishSrc = await fs.readFile(
-    new URL("../src/lib/reconcile-finish.js", import.meta.url),
-    "utf8"
-  );
-  const reconcileSrc = await fs.readFile(
-    new URL("../src/lib/reconcile.js", import.meta.url),
-    "utf8"
-  );
-  assert.ok(
-    finishSrc.includes("confirm budget this cycle"),
-    "postpone log mentions confirm budget"
-  );
-  assert.ok(
-    !finishSrc.includes("rate-limit budget; continues next cycle"),
-    "postpone log must not blame rate-limit budget"
-  );
-  assert.ok(
-    finishSrc.includes("runConfirmCatchUp"),
-    "confirm-only catch-up export exists"
-  );
-  assert.ok(
-    finishSrc.includes("after.unsettledConfirmCatchUp ? [...presence]"),
-    "finish keeps seenAcc while unsettled"
-  );
-  assert.ok(
-    reconcileSrc.includes("canConfirmCatchUpOnly"),
-    "reconcile gates confirm-only catch-up"
-  );
-  console.log("  ✔ postpone log honesty + confirm-only catch-up hooks");
-}
+  const src = async (rel) => fs.readFile(new URL(`../src/lib/${rel}`, import.meta.url), "utf8");
+  const removed = [
+    "seenAcc",
+    "unsettledConfirmCatchUp",
+    "runConfirmCatchUp",
+    "finishConfirmGets",
+    "rotateConfirmWindow",
+    "seenAccWithLive",
+    "finishDeleteDetection",
+    "probeLivingRaindrop",
+    "raindropStillAlive",
+    "aliveConfirmOffset",
+    "parkAliveIds",
+    "unparkAliveIds",
+    "canConfirmCatchUpOnly",
+    "MAX_ALIVE_CHECKS_PER_TICK",
+    "getTrashHygieneNextPage",
+  ];
+  for (const file of [
+    "reconcile.js",
+    "reconcile-finish.js",
+    "trash-hygiene.js",
+    "wake-budget.js",
+    "repair-pairs.js",
+    "constants.js",
+  ]) {
+    const text = await src(file);
+    for (const name of removed) {
+      assert.ok(!text.includes(name), `${file} still references ${name}`);
+    }
+  }
+  // store.js names the legacy keys only to drop them on first load.
+  const store = await src("store.js");
+  assert.ok(store.includes("LEGACY_RECONCILE_KEYS"));
+  assert.ok(!store.includes("parkAliveIds"), "park helpers removed");
+  const finish = await src("reconcile-finish.js");
+  assert.ok(!finish.includes("getRaindrop("), "finish never GETs a raindrop by id");
+  console.log("  ✔ no confirm-GET / catch-up / parking symbols left");
+});
 
-console.log("== pulled-path folderCollections zip ==");
-{
+test("pulled-path folderCollections zip", async () => {
   const { recordFolderCollectionsForPulledPath } = await import("../src/lib/collections.js");
   // Minimal fake index: Bookmarks / Bookmarks bar / Leaf
   const byId = new Map();
@@ -1227,16 +1214,11 @@ console.log("== pulled-path folderCollections zip ==");
     ["edge-bar", 2],
   ]);
   console.log("  ✔ under-root pull path maps leaf+ancestors");
-}
+});
 
-console.log("== queue-depth bulk prompt ==");
-{
-  const {
-    QUEUE_BULK_PENDING_THRESHOLD,
-    BULK_DRAIN_PAUSED_LOG,
-    drainJobsCap,
-    HEARTBEAT_MINUTES,
-  } = await import("../src/lib/constants.js");
+test("queue-depth bulk prompt", async () => {
+  const { QUEUE_BULK_PENDING_THRESHOLD, BULK_DRAIN_PAUSED_LOG, drainJobsCap, HEARTBEAT_MINUTES } =
+    await import("../src/lib/constants.js");
   const {
     defaultBulkPrompt,
     evolveBulkPrompt,
@@ -1264,10 +1246,7 @@ console.log("== queue-depth bulk prompt ==");
   assert.equal(isBulkDrainPaused(idle), false);
 
   // Below threshold: stay idle
-  assert.equal(
-    evolveBulkPrompt(idle, QUEUE_BULK_PENDING_THRESHOLD - 1).status,
-    BULK_PROMPT_IDLE
-  );
+  assert.equal(evolveBulkPrompt(idle, QUEUE_BULK_PENDING_THRESHOLD - 1).status, BULK_PROMPT_IDLE);
 
   // Cross threshold → needs_choice
   const armed = evolveBulkPrompt(idle, QUEUE_BULK_PENDING_THRESHOLD);
@@ -1302,15 +1281,18 @@ console.log("== queue-depth bulk prompt ==");
   );
 
   const eta = estimateDrainEtaMinutes(QUEUE_BULK_PENDING_THRESHOLD);
-  assert.equal(eta, Math.ceil(QUEUE_BULK_PENDING_THRESHOLD / drainJobsCap(QUEUE_BULK_PENDING_THRESHOLD)) * HEARTBEAT_MINUTES);
+  assert.equal(
+    eta,
+    Math.ceil(QUEUE_BULK_PENDING_THRESHOLD / drainJobsCap(QUEUE_BULK_PENDING_THRESHOLD)) *
+      HEARTBEAT_MINUTES
+  );
   assert.ok(formatBulkQueueNotice(200).includes("200"));
   assert.ok(formatBulkQueueNotice(200).includes("Match"));
 
   console.log("  ✔ arm / snooze / clear watermarks / ETA / drain-pause predicate");
-}
+});
 
-console.log("== Options HTML bulk lane controls ==");
-{
+test("Options HTML bulk lane controls", async () => {
   const html = fs.readFileSync(path.join(REPO_ROOT, "src/options/options.html"), "utf8");
   assert.ok(html.includes('id="bulkQueueBanner"'), "Status bulk-queue banner");
   assert.ok(html.includes('id="bulkQueueMatch"'), "Match from queue banner");
@@ -1318,30 +1300,23 @@ console.log("== Options HTML bulk lane controls ==");
   assert.ok(html.includes('id="matchExisting"'), "Manual Sync Match existing");
   // Only the pair-map repair control may exist; no Edge-tree "repair" product control.
   const repairIds = [...html.matchAll(/id=["']([^"']*repair[^"']*)["']/gi)].map((m) => m[1]);
-  assert.deepEqual(repairIds.sort(), ["repairPairs", "repairPairsStatus"], "repair controls");
-  assert.ok(
-    !/Other\s+favorites\s+repair/i.test(html),
-    "no Other-favorites repair product control"
+  assert.deepEqual(
+    repairIds.sort(),
+    ["pairHealthRepair", "pairHealthRepairStatus", "repairPairs", "repairPairsStatus"],
+    "repair controls (Manual Sync + Status pair-health shortcut)"
   );
+  assert.ok(!/Other\s+favorites\s+repair/i.test(html), "no Other-favorites repair product control");
   assert.ok(html.includes('id="reconcileIntervalHelp"'), "reconcile interval help");
   assert.ok(
-    /leftover Raindrop budget/i.test(html),
+    /leftover\s+Raindrop\s+budget/i.test(html),
     "interval help describes leftover spendable for Trash/list"
   );
   assert.ok(
-    /do not hard-block listing/i.test(html),
+    /do not\s+hard-block\s+listing/i.test(html),
     "interval help says queued jobs do not hard-block listing"
   );
-  assert.ok(
-    !/busy queue defers listing/i.test(html),
-    "stale queue-busy deferral copy removed"
+  assert.ok(!/busy queue defers listing/i.test(html), "stale queue-busy deferral copy removed");
+  console.log(
+    "  ✔ bulk banner + Match existing; leftover-budget interval help; no Other-favorites repair"
   );
-  console.log("  ✔ bulk banner + Match existing; leftover-budget interval help; no Other-favorites repair");
-}
-
-console.log("\nAll offline checks passed.");
-console.log("Engine scenarios: npm test runs verify-checklist.mjs next (mocked Edge).");
-console.log(
-  "Bulk engine wiring: checklist 7.5–7.7 (drain pause, Match apply, scanImportScope)."
-);
-console.log("Manual Edge still useful for SW lifecycle / Options confirm dialogs only.");
+});

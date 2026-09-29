@@ -62,8 +62,8 @@ Automated (no real Edge tree):
 
 | Layer | Script | What it covers |
 |-------|--------|----------------|
-| Pure logic | `verify-bidirectional-logic.mjs` | Heuristics, CSV/`planMatchFromExport`, queue-prompt state machine, Options HTML control ids |
-| Engine (mocked chrome + Raindrop) | `verify-checklist.mjs` **7.5–7.7** | Enqueue arms `needs_choice`; drain/tick pause (zero Raindrop writes / no export.csv); Continue drip resume; `applyMatchExisting` → pairs + Import skip; `scanImportScope` exclude/pair rules; Pull bulk gate off in one-way |
+| Pure logic | `test/logic.test.mjs` | Heuristics, CSV/`planMatchFromExport`, queue-prompt state machine, Options HTML control ids |
+| Engine (mocked chrome + Raindrop) | `test/checklist.test.mjs` **7.5–7.7** | Enqueue arms `needs_choice`; drain/tick pause (zero Raindrop writes / no export.csv); Continue drip resume; `applyMatchExisting` → pairs + Import skip; `scanImportScope` exclude/pair rules; Pull bulk gate off in one-way |
 
 ```bash
 npm test

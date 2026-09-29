@@ -114,7 +114,7 @@ Chrome and Edge do not fork collections.
 
 ```bash
 npm test
-# node scripts/verify-bidirectional-logic.mjs && node scripts/verify-checklist.mjs
+# node --test test/*.test.mjs  (logic.test.mjs, checklist.test.mjs, engine invariants)
 ```
 
 ```bash

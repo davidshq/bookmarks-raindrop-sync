@@ -42,7 +42,10 @@ import {
   getStorageUsage,
   getDeleteBreaker,
   resetDeleteBreaker,
+  getPairHealth,
 } from "../lib/store.js";
+import { completePairMigration } from "../lib/pair-migration.js";
+import { RaindropClient } from "../lib/raindrop.js";
 import {
   noteQueueDepthForBulkPrompt,
   snoozeBulkPrompt,
@@ -54,6 +57,21 @@ import { buildTrashSafePayload } from "../lib/trash-hygiene.js";
 
 function ensureHeartbeat() {
   chrome.alarms.create(ALARM_NAME, { periodInMinutes: HEARTBEAT_MINUTES });
+}
+
+/**
+ * Convert a legacy pair map (id-only records) and, when a token exists, fill
+ * URLs from the tree + one export. Drain / reconcile retry if this fails.
+ */
+async function migratePairs() {
+  await ensurePairsMigrated();
+  const config = await getConfig();
+  const client = config.token ? new RaindropClient(config.token) : null;
+  try {
+    await completePairMigration({ client });
+  } catch (err) {
+    await handleClientError(err);
+  }
 }
 
 function logSwError(context, err) {
@@ -70,14 +88,14 @@ void healStoredConfig();
 
 chrome.runtime.onInstalled.addListener(() => {
   ensureHeartbeat();
-  void ensurePairsMigrated();
+  void migratePairs().catch((err) => logSwError("pair migration", err));
   void healStoredConfig();
   void appendLog("info", "Extension installed; heartbeat scheduled.");
 });
 
 chrome.runtime.onStartup.addListener(() => {
   ensureHeartbeat();
-  void ensurePairsMigrated();
+  void migratePairs().catch((err) => logSwError("pair migration", err));
   void healStoredConfig();
 });
 
@@ -140,9 +158,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           const bulkPrompt = await noteQueueDepthForBulkPrompt(pending);
           const reconcile = await getReconcileState();
           const trashSafe =
-            config.syncMode === SYNC_MODE.BIDIRECTIONAL
-              ? buildTrashSafePayload(reconcile)
-              : null;
+            config.syncMode === SYNC_MODE.BIDIRECTIONAL ? buildTrashSafePayload(reconcile) : null;
           sendResponse({
             ok: true,
             status: await getStatus(),
@@ -157,6 +173,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             bulkEtaMinutes: estimateDrainEtaMinutes(pending),
             bulkNotice: formatBulkQueueNotice(pending),
             trashSafe,
+            pairHealth: await getPairHealth(),
             deleteBreaker: {
               ...(await getDeleteBreaker()),
               queuedDeletes: (await queue.list()).filter((j) => {

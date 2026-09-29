@@ -4,16 +4,16 @@
   "type": "module",
   "description": "Manifest V3 Chromium extension: sync browser bookmarks with Raindrop.io",
   "scripts": {
-    "test": "node scripts/verify-bidirectional-logic.mjs && node scripts/verify-checklist.mjs",
-    "test:live": "node scripts/verify-bidirectional-logic.mjs && node scripts/verify-checklist.mjs --live",
+    "test": "node --test test/*.test.mjs",
+    "test:live": "node test/checklist.test.mjs --live",
     "test:integration": "node scripts/verify-integration.mjs",
     "test:smoke-bulk": "node scripts/smoke-bulk-options.mjs",
     "spike": "node scripts/spike-raindrop.mjs",
     "pack": "node scripts/pack-extension.mjs",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "format": "prettier --write \"src/**/*.{js,html,css,json}\" \"scripts/**/*.{js,mjs}\" eslint.config.js",
-    "format:check": "prettier --check \"src/**/*.{js,html,css,json}\" \"scripts/**/*.{js,mjs}\" eslint.config.js"
+    "format": "prettier --write \"src/**/*.{js,html,css,json}\" \"scripts/**/*.{js,mjs}\" \"test/**/*.mjs\" eslint.config.js",
+    "format:check": "prettier --check \"src/**/*.{js,html,css,json}\" \"scripts/**/*.{js,mjs}\" \"test/**/*.mjs\" eslint.config.js"
   },
   "engines": {
     "node": ">=18"

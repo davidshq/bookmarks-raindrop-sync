@@ -1,18 +1,21 @@
-// Repair pairs: rebuild the Edge ↔ Raindrop pair map from what actually exists.
+// Repair pairs: rebuild the Edge ↔ Raindrop pair records from what exists.
 //
 // Why this exists: when Edge renumbers bookmark ids (checksum reassignment,
-// profile rebuild) or forked raindrops get trashed, the pair map fills with
-// entries whose Edge id or Raindrop id is dead. Reconcile then reads absence
-// as "user deleted" and removes real bookmarks. Match existing alone cannot
-// fix that — it never drops dead entries and never clears tombstones.
+// profile rebuild) or forked raindrops get trashed, pair records point at dead
+// ids. The engine's rebind pass fixes those on every completed reconcile; this
+// is the same pass on demand, plus pruning and tombstone cleanup, behind a
+// dry-run the user confirms.
 //
-// Plan (dry-run, one export request):
-//   1. Prune every pair whose bookmark id is not in the live tree OR whose
-//      raindrop id is not in the export. Both-dead, Edge-dead and
-//      Raindrop-dead are counted separately for the summary.
-//   2. Re-match by URL on the pruned map (planMatchFromExport — same claim
-//      rules as Match existing, including the stale-forward-link rule).
-//   3. Delete tombstones whose raindrop id is alive in the export are cleared
+// Plan (dry-run, one export request, shared with the presence snapshot):
+//   1. Rebind pass (pair-rebind.js), both sides: a dead bookmark id rebinds to
+//      the same URL under its recorded path, then anywhere in the synced
+//      scope; a dead raindrop id rebinds to the oldest live raindrop with the
+//      URL. Edge-side and Raindrop-side rebinds are reported separately.
+//   2. Prune every record still dead on either side after rebind. Both-dead,
+//      Edge-dead and Raindrop-dead are counted separately.
+//   3. Re-match by URL for bookmarks left unpaired (planMatchFromExport — same
+//      claim rules as Match existing).
+//   4. Delete tombstones whose raindrop id is alive in the export are cleared
 //      so pull-create can recreate the Edge side. Offload tombstones
 //      (`edge-offload`) are never cleared: that raindrop is alive on purpose
 //      and clearing would pull the offloaded bookmark back into the browser.
@@ -23,31 +26,37 @@
 //     the dry-run (drain kept running while the confirm dialog was open)
 //     wins over the plan.
 // Apply:
-//   - rewrite PAIRS with kept-live + matched, merged with post-plan changes;
+//   - rewrite PAIRS with kept + rebound + matched records, merged with
+//     post-plan changes;
 //   - clear alive tombstones;
 //   - drop queued delete jobs (they were computed against the old map);
-//   - reset reconcile presence state so the next cycle lists fresh.
+//   - reset the delete breaker and recompute pair health.
 // No Raindrop writes, no Edge writes.
 
 import { JOB } from "./constants.js";
 import {
   getConfig,
   getPairs,
+  getStoredPairs,
   rewritePairs,
+  recordsFromLegacy,
   getTombstones,
   pruneTombstones,
-  setReconcileState,
   resetDeleteBreaker,
+  setPairHealth,
   appendLog,
   isRateLimited,
   ensurePairsMigrated,
 } from "./store.js";
 import * as queue from "./queue.js";
-import { collectAllBookmarks } from "./bookmarks.js";
 import { indexExportByUrl } from "./export-csv.js";
 import { planMatchFromExport, emptyPlan } from "./match-existing.js";
 import { RaindropClient, RateLimitError, AuthError } from "./raindrop.js";
 import { handleClientError } from "./client-errors.js";
+import { adoptExportCsv, buildSnapshot, loadPresence } from "./presence.js";
+import { loadTreeIndex, treeIndexFromList } from "./tree-index.js";
+import { rebindPass } from "./pair-rebind.js";
+import { computePairHealth } from "./pair-health.js";
 
 /**
  * @typedef {{
@@ -58,10 +67,12 @@ import { handleClientError } from "./client-errors.js";
  *   raindropCount: number,
  *   pairsBefore: number,
  *   keptLive: number,
+ *   edgeRebinds: number,
+ *   raindropRebinds: number,
  *   pruneBothDead: number,
  *   pruneEdgeDead: number,
  *   pruneRaindropDead: number,
- *   matched: { bookmarkId: string, raindropId: string }[],
+ *   matched: { bookmarkId: string, raindropId: string, url?: string }[],
  *   ambiguous: number,
  *   conflicts: number,
  *   edgeOnly: number,
@@ -70,6 +81,7 @@ import { handleClientError } from "./client-errors.js";
  *   tombstonesTotal: number,
  *   queuedDeletes: number,
  *   keptPairs?: Record<string, string>,
+ *   keptRecords?: Record<string, import("./store.js").PairRecord>,
  *   pairsSnapshot?: Record<string, string>,
  * }} RepairPlan
  */
@@ -82,25 +94,49 @@ const CLEARABLE_TOMBSTONE_REASONS = new Set([
 ]);
 
 /**
- * Pure planner. `pairs` is the current map, `edgeBookmarks` the live tree,
- * `csvText` the Raindrop export, `tombstones` the current tombstone map.
+ * Pure planner.
+ * @param {string} csvText Raindrop export
+ * @param {import("./tree-index.js").TreeIndex|{ id: string, url: string, path?: string[] }[]} edge
+ *   live tree index, or a flat bookmark list (every entry in scope)
+ * @param {{ records?: Record<string, object>, byBookmark?: Record<string, string>, byRaindrop?: Record<string, string> }} pairs
+ *   pair view (records) or a legacy id map
+ * @param {Record<string, { reason?: string }>} tombstones
  * @returns {Omit<RepairPlan, 'ok'|'error'|'reason'|'queuedDeletes'>}
  */
-export function planRepairFromInputs(csvText, edgeBookmarks, pairs, tombstones) {
-  const { raindropIds, raindropCount } = indexExportByUrl(csvText);
-  const liveRids = new Set([...raindropIds].map(String));
-  const liveBids = new Set(edgeBookmarks.map((b) => String(b.id)));
+export function planRepairFromInputs(csvText, edge, pairs, tombstones) {
+  const treeIndex = Array.isArray(edge) ? treeIndexFromList(edge) : edge;
+  const snapshot = buildSnapshot(csvText);
+  const { raindropCount } = indexExportByUrl(csvText);
+  const liveRids = snapshot.ids;
+  const liveBids = new Set(treeIndex.byId.keys());
 
-  const byBookmark = pairs.byBookmark || {};
+  const records = pairs.records ?? recordsFromLegacy(pairs);
+  const pairsSnapshot = {};
+  for (const [rid, rec] of Object.entries(records)) {
+    if (rec?.bookmarkId != null) pairsSnapshot[String(rec.bookmarkId)] = rid;
+  }
+  let keptLive = 0;
+  for (const [rid, rec] of Object.entries(records)) {
+    if (liveBids.has(String(rec.bookmarkId)) && liveRids.has(rid)) keptLive++;
+  }
+  // Reverse-only legacy entries (byRaindrop without a byBookmark twin) are
+  // dropped by rebuilding from byBookmark; count them as both-dead noise.
+  const reverseOnly = pairs.records
+    ? 0
+    : Object.keys(pairs.byRaindrop || {}).filter((rid) => !records[String(rid)]).length;
+
+  const pass = rebindPass({ records, treeIndex, snapshot });
   const kept = {};
-  let pruneBothDead = 0;
+  const keptRecords = {};
+  let pruneBothDead = reverseOnly;
   let pruneEdgeDead = 0;
   let pruneRaindropDead = 0;
-  for (const [bid, rid] of Object.entries(byBookmark)) {
-    const edgeAlive = liveBids.has(String(bid));
-    const rdAlive = liveRids.has(String(rid));
+  for (const [rid, rec] of Object.entries(pass.records)) {
+    const edgeAlive = rec.bookmarkId != null && liveBids.has(String(rec.bookmarkId));
+    const rdAlive = liveRids.has(rid);
     if (edgeAlive && rdAlive) {
-      kept[String(bid)] = String(rid);
+      kept[String(rec.bookmarkId)] = rid;
+      keptRecords[rid] = rec;
     } else if (!edgeAlive && !rdAlive) {
       pruneBothDead++;
     } else if (!edgeAlive) {
@@ -109,17 +145,16 @@ export function planRepairFromInputs(csvText, edgeBookmarks, pairs, tombstones) 
       pruneRaindropDead++;
     }
   }
-  // Reverse-only entries (byRaindrop without a byBookmark twin) are dropped by
-  // rebuilding from byBookmark; count them as both-dead noise.
-  const reverseOnly = Object.keys(pairs.byRaindrop || {}).filter(
-    (rid) => !Object.values(byBookmark).some((r) => String(r) === String(rid))
-  ).length;
-  pruneBothDead += reverseOnly;
+  // A Raindrop rebind that merged over a dead-bookmark record removed that record.
+  pruneEdgeDead += pass.raindropRebinds.filter((r) => r.replacedBookmarkId != null).length;
 
-  const keptPairs = { byBookmark: { ...kept }, byRaindrop: {} };
-  for (const [bid, rid] of Object.entries(kept)) keptPairs.byRaindrop[rid] = bid;
-
-  const match = planMatchFromExport(csvText, edgeBookmarks, keptPairs);
+  const keptView = { byBookmark: { ...kept }, byRaindrop: {} };
+  for (const [bid, rid] of Object.entries(kept)) keptView.byRaindrop[rid] = bid;
+  const edgeBookmarks = [...treeIndex.byId.values()]
+    .filter((e) => e.inScope)
+    .map((e) => ({ id: e.id, url: e.url }));
+  const match = planMatchFromExport(csvText, edgeBookmarks, keptView);
+  const urlByBid = new Map(edgeBookmarks.map((b) => [b.id, b.url]));
 
   const tombstonesAlive = Object.entries(tombstones || {})
     .filter(([rid]) => liveRids.has(String(rid)))
@@ -127,14 +162,16 @@ export function planRepairFromInputs(csvText, edgeBookmarks, pairs, tombstones) 
     .map(([rid]) => rid);
 
   return {
-    edgeScanned: edgeBookmarks.length,
+    edgeScanned: treeIndex.byId.size,
     raindropCount,
-    pairsBefore: Object.keys(byBookmark).length,
-    keptLive: Object.keys(kept).length,
+    pairsBefore: Object.keys(records).length + reverseOnly,
+    keptLive,
+    edgeRebinds: pass.edgeRebinds.filter((r) => kept[r.to] === r.raindropId).length,
+    raindropRebinds: pass.raindropRebinds.filter((r) => keptRecords[r.to]).length,
     pruneBothDead,
     pruneEdgeDead,
     pruneRaindropDead,
-    matched: match.matched,
+    matched: match.matched.map((m) => ({ ...m, url: urlByBid.get(m.bookmarkId) })),
     ambiguous: match.ambiguous,
     conflicts: match.conflicts,
     edgeOnly: match.edgeOnly,
@@ -142,7 +179,8 @@ export function planRepairFromInputs(csvText, edgeBookmarks, pairs, tombstones) 
     tombstonesAlive,
     tombstonesTotal: Object.keys(tombstones || {}).length,
     keptPairs: kept,
-    pairsSnapshot: { ...byBookmark },
+    keptRecords,
+    pairsSnapshot,
   };
 }
 
@@ -155,6 +193,7 @@ export async function planRepairPairs() {
 
   const client = new RaindropClient(config.token);
   let csv;
+  const exportStartedAt = Date.now();
   try {
     csv = await client.exportRaindropsCsv(0);
     client.throwIfShouldPause();
@@ -166,13 +205,10 @@ export async function planRepairPairs() {
     throw err;
   }
 
-  const edgeBookmarks = (await collectAllBookmarks()).map(({ node }) => ({
-    id: String(node.id),
-    url: node.url,
-  }));
+  const treeIndex = await loadTreeIndex();
   const pairs = await getPairs();
   const tombstones = await getTombstones();
-  const plan = planRepairFromInputs(csv, edgeBookmarks, pairs, tombstones);
+  const plan = planRepairFromInputs(csv, treeIndex, pairs, tombstones);
   if (plan.raindropCount === 0 && plan.pairsBefore > 0) {
     await appendLog("warn", "Repair pairs refused: Raindrop export returned no items.");
     return emptyRepairPlan({
@@ -180,13 +216,15 @@ export async function planRepairPairs() {
       error: "Raindrop export returned no items; refusing to prune every pair. Try again later.",
     });
   }
+  await adoptExportCsv(csv, exportStartedAt);
   const queuedDeletes = (await queue.list()).filter((j) => {
     const k = queue.jobKind(j);
     return k === JOB.DELETE_EDGE || k === JOB.DELETE_RAINDROP;
   }).length;
   await appendLog(
     "info",
-    `Repair pairs dry-run: keep ${plan.keptLive}, rebind ${plan.matched.length}, ` +
+    `Repair pairs dry-run: keep ${plan.keptLive}, rebind ${plan.edgeRebinds} Edge id(s) and ` +
+      `${plan.raindropRebinds} Raindrop id(s), match ${plan.matched.length} by URL, ` +
       `prune ${plan.pruneBothDead + plan.pruneEdgeDead + plan.pruneRaindropDead} dead ` +
       `(${plan.pruneEdgeDead} Edge-dead, ${plan.pruneRaindropDead} Raindrop-dead, ${plan.pruneBothDead} both), ` +
       `clear ${plan.tombstonesAlive.length} alive tombstone(s), drop ${queuedDeletes} queued delete(s).`
@@ -222,10 +260,17 @@ export async function applyRepairPairs(plan) {
     };
   }
   // Re-check liveness of the Edge side at apply time (tree may have changed).
-  const liveBids = new Set((await collectAllBookmarks()).map(({ node }) => String(node.id)));
-  const { pairCount, rebound } = await rewritePairs((current) =>
-    mergeRepairPlan(plan, current, liveBids)
-  );
+  const treeIndex = await loadTreeIndex();
+  const liveBids = new Set(treeIndex.byId.keys());
+  const seed = { ...(plan.keptRecords || {}) };
+  for (const row of plan.matched) {
+    if (!seed[String(row.raindropId)]) seed[String(row.raindropId)] = { url: row.url ?? null };
+  }
+  const { pairCount, rebound } = await rewritePairs((current) => ({
+    ...mergeRepairPlan(plan, current, liveBids),
+    seed,
+  }));
+  const reboundTotal = rebound + (plan.edgeRebinds || 0) + (plan.raindropRebinds || 0);
 
   const tombstonesCleared = (plan.tombstonesAlive || []).length;
   if (tombstonesCleared) await pruneTombstones(plan.tombstonesAlive);
@@ -234,27 +279,19 @@ export async function applyRepairPairs(plan) {
     const k = queue.jobKind(j);
     return k === JOB.DELETE_EDGE || k === JOB.DELETE_RAINDROP;
   });
-
-  // Presence state was computed against the old map — start the next cycle clean.
-  await setReconcileState({
-    cursorPage: 0,
-    outsideCursor: null,
-    seenAcc: null,
-    unsettledConfirmCatchUp: false,
-    aliveConfirmOffset: 0,
-    tombstonePruneOffset: 0,
-    parkedAliveIds: [],
-    running: false,
-    lastError: null,
-  });
   await resetDeleteBreaker();
+
+  const stored = await getStoredPairs();
+  await setPairHealth(
+    computePairHealth({ records: stored.records, treeIndex, snapshot: await loadPresence() })
+  );
 
   await appendLog(
     "info",
-    `Repair pairs applied: ${pairCount} pair(s) (${rebound} rebound by URL), ` +
+    `Repair pairs applied: ${pairCount} pair(s) (${reboundTotal} rebound), ` +
       `${tombstonesCleared} tombstone(s) cleared, ${deletesDropped} queued delete(s) dropped.`
   );
-  return { ok: true, pairs: pairCount, rebound, tombstonesCleared, deletesDropped };
+  return { ok: true, pairs: pairCount, rebound: reboundTotal, tombstonesCleared, deletesDropped };
 }
 
 /**
@@ -313,6 +350,8 @@ export function emptyRepairPlan({ ok = true, error, reason } = {}) {
     raindropCount: 0,
     pairsBefore: 0,
     keptLive: 0,
+    edgeRebinds: 0,
+    raindropRebinds: 0,
     pruneBothDead: 0,
     pruneEdgeDead: 0,
     pruneRaindropDead: 0,

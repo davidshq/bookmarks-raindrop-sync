@@ -1,5 +1,6 @@
-// Resolve an existing Raindrop by URL when an unpaired Edge move would otherwise
-// create a second copy. Claim rules match Match-existing (`classifyPairClaim`).
+// Resolve an existing Raindrop by URL instead of creating a second copy.
+// Claim rules match Match-existing (`classifyPairClaim`); pair-rebind.js uses
+// the same pick for stale Raindrop ids.
 
 import { urlMatchKeys } from "./url-match.js";
 import { classifyPairClaim } from "./match-existing.js";
@@ -31,14 +32,23 @@ export function filterUrlMatchingItems(edgeUrl, items) {
  */
 
 /**
- * Pick a claimable raindrop id for an unpaired move (oldest id wins on multi).
+ * Pick a claimable raindrop id by URL (oldest id wins on multi). Used by
+ * upload reclaim, the stale-Raindrop-id rebind, and survival checks.
  * @param {string} bookmarkId
  * @param {{ _id?: number|string }[]} matchingItems URL-filtered hits
  * @param {{ byBookmark?: Record<string, string>, byRaindrop?: Record<string, string> }} pairs
- * @param {Set<string>} liveIds
+ * @param {Set<string>} liveIds live Edge bookmark ids
+ * @param {Set<string>} [liveRaindropIds] snapshot ids; a forward link to an id
+ *   outside it is stale (rebindable), not a conflict
  * @returns {MoveRebindPick}
  */
-export function pickMoveRebindCandidate(bookmarkId, matchingItems, pairs, liveIds) {
+export function pickMoveRebindCandidate(
+  bookmarkId,
+  matchingItems,
+  pairs,
+  liveIds,
+  liveRaindropIds
+) {
   const items = matchingItems || [];
   if (!items.length) return { kind: "none" };
 
@@ -46,7 +56,7 @@ export function pickMoveRebindCandidate(bookmarkId, matchingItems, pairs, liveId
   const claimable = [];
   for (const item of items) {
     const rid = String(item._id);
-    const verdict = classifyPairClaim(bookmarkId, rid, pairs, liveIds);
+    const verdict = classifyPairClaim(bookmarkId, rid, pairs, liveIds, liveRaindropIds);
     if (verdict === "conflict") continue;
     claimable.push({ rid });
   }

@@ -4,6 +4,11 @@ Notes from reviewing the Raindrop REST API against this extension’s bidirectio
 
 See also: [`raindrop-api-best-practices.md`](./raindrop-api-best-practices.md) for general API usage rules.
 
+> **Superseded (2026-09-28).** The confirm-GET / `seenAcc` / parking design
+> described below was replaced by the export presence snapshot and
+> evidence-based deletes — see [`sync-engine-rewrite.md`](./sync-engine-rewrite.md).
+> Kept for history.
+
 ## Current behavior
 
 Reconcile:

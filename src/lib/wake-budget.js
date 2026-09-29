@@ -2,7 +2,7 @@
 //
 // Heartbeat / Pull now / Drain now create a *full* budget. Live bookmark
 // handlers use a *short* budget so event storms cannot burn the shared token
-// bucket. Fixed historical caps (25/55/8) are fairness backstops under this.
+// bucket. Fixed historical drain caps (25/55) are fairness backstops under this.
 
 import {
   BOOTSTRAP_REQS,

@@ -12,6 +12,8 @@ import {
   consumeCreateSuppression,
   claimExtensionCreate,
   isChangeSuppressed,
+  addEdgeRemoved,
+  primaryUrlKey,
   appendLog,
 } from "./store.js";
 import * as queue from "./queue.js";
@@ -69,10 +71,16 @@ function bookmarkLogLabel(target) {
   return target.title || target.url || target.id;
 }
 
+/** One "no payload" log line per worker lifetime (a wake), not per event. */
+let loggedMissingPayload = false;
+
 /**
  * Handle a user (or extension) remove of an Edge bookmark or folder.
- * Policy-suppressed removes are ignored; mapped user deletes enqueue Raindrop
- * delete unless the bookmark lived under an effective `exclude` policy.
+ * Policy-suppressed removes are ignored. The node payload is the only
+ * evidence of intent: each mapped URL in it is written to the durable
+ * `edgeRemoved` ledger and enqueues a Raindrop delete (unless under an
+ * effective `exclude` policy); drain then runs the survival check. An event
+ * with no payload enqueues nothing — the pair stays for the stale-id rebind.
  * Folder deletes walk `removeInfo.node` (Chromium's recursive payload).
  * @param {string} bookmarkId
  * @param {{ parentId?: string, node?: object }} [removeInfo] from chrome.bookmarks.onRemoved
@@ -82,6 +90,17 @@ export async function handleBookmarkRemoved(bookmarkId, removeInfo) {
 
   const config = await getConfig();
   if (config.syncMode !== SYNC_MODE.BIDIRECTIONAL) return;
+
+  if (!removeInfo?.node) {
+    if ((await getRaindropId(String(bookmarkId))) && !loggedMissingPayload) {
+      loggedMissingPayload = true;
+      await appendLog(
+        "warn",
+        `Bookmark removal without a node payload (id ${bookmarkId}); no Raindrop delete, pair kept.`
+      );
+    }
+    return;
+  }
 
   const targets = collectRemovedUrlNodes(bookmarkId, removeInfo);
   if (!targets.length) return;
@@ -105,6 +124,16 @@ export async function handleBookmarkRemoved(bookmarkId, removeInfo) {
       continue;
     }
 
+    await addEdgeRemoved([
+      {
+        urlKey: primaryUrlKey(target.url),
+        url: target.url,
+        title: target.title,
+        at: Date.now(),
+        bookmarkId: target.id,
+        raindropId: String(raindropId),
+      },
+    ]);
     const added = await queue.enqueueJob({
       id: `dr-${raindropId}`,
       kind: JOB.DELETE_RAINDROP,

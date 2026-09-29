@@ -8,6 +8,16 @@ import { urlMatchKeys } from "./url-match.js";
  * @returns {string[][]}
  */
 export function parseCsvRows(text) {
+  return parseCsv(text).rows;
+}
+
+/**
+ * Parse and report whether the body ended inside a quoted field (a truncated
+ * response). Presence treats that as a parse error.
+ * @param {string} text
+ * @returns {{ rows: string[][], unterminated: boolean }}
+ */
+function parseCsv(text) {
   const rows = [];
   let row = [];
   let field = "";
@@ -61,28 +71,38 @@ export function parseCsvRows(text) {
     row.push(field);
     rows.push(row);
   }
-  return rows;
+  return { rows, unterminated: inQuotes };
 }
 
 /**
  * Index export.csv by URL match keys → raindrop id(s).
  * @param {string} csvText
+ * Throws on a missing id/url header or a body that ends inside a quoted field.
+ * @param {string} csvText
  * @returns {{
  *   byKey: Map<string, string[]>,
  *   raindropIds: Set<string>,
  *   raindropCount: number,
+ *   urlById: Map<string, string>,
  * }}
  */
 export function indexExportByUrl(csvText) {
-  const rows = parseCsvRows(csvText);
+  const { rows, unterminated } = parseCsv(csvText);
+  if (unterminated) throw new Error("export.csv ended inside a quoted field");
   /** @type {Map<string, string[]>} */
   const byKey = new Map();
   const raindropIds = new Set();
+  /** @type {Map<string, string>} */
+  const urlById = new Map();
   if (rows.length < 2) {
-    return { byKey, raindropIds, raindropCount: 0 };
+    return { byKey, raindropIds, raindropCount: 0, urlById };
   }
 
-  const header = rows[0].map((h) => String(h || "").trim().toLowerCase());
+  const header = rows[0].map((h) =>
+    String(h || "")
+      .trim()
+      .toLowerCase()
+  );
   const idIdx = header.indexOf("id");
   const urlIdx = header.indexOf("url");
   if (idIdx < 0 || urlIdx < 0) {
@@ -96,11 +116,12 @@ export function indexExportByUrl(csvText) {
     if (!url || !id) continue;
     const rid = String(id);
     raindropIds.add(rid);
+    urlById.set(rid, url);
     for (const key of urlMatchKeys(url)) {
       const list = byKey.get(key) || [];
       if (!list.includes(rid)) list.push(rid);
       byKey.set(key, list);
     }
   }
-  return { byKey, raindropIds, raindropCount: raindropIds.size };
+  return { byKey, raindropIds, raindropCount: raindropIds.size, urlById };
 }

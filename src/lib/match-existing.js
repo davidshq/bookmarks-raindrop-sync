@@ -6,6 +6,7 @@ import { indexExportByUrl } from "./export-csv.js";
 import { urlMatchKeys } from "./url-match.js";
 import { RaindropClient, RateLimitError, AuthError } from "./raindrop.js";
 import { handleClientError } from "./client-errors.js";
+import { adoptExportCsv } from "./presence.js";
 import {
   getConfig,
   getPairs,
@@ -71,11 +72,7 @@ export function classifyPairClaim(bid, rid, pairs, liveIds, liveRaindropIds) {
     const forwardIsStale = liveRaindropIds != null && !liveRaindropIds.has(String(existingRid));
     if (!forwardIsStale) return "conflict";
   }
-  if (
-    existingBid != null &&
-    String(existingBid) !== bidS &&
-    liveIds.has(String(existingBid))
-  ) {
+  if (existingBid != null && String(existingBid) !== bidS && liveIds.has(String(existingBid))) {
     return "conflict";
   }
   return "match";
@@ -203,6 +200,7 @@ export async function planMatchExisting() {
 
   const client = new RaindropClient(config.token);
   let csv;
+  const exportStartedAt = Date.now();
   try {
     csv = await client.exportRaindropsCsv(0);
     client.throwIfShouldPause();
@@ -218,6 +216,8 @@ export async function planMatchExisting() {
     throw err;
   }
 
+  // One export serves Match and the engine's presence snapshot.
+  await adoptExportCsv(csv, exportStartedAt);
   const all = await collectAllBookmarks();
   const edgeBookmarks = all.map(({ node }) => ({
     id: String(node.id),
@@ -241,9 +241,10 @@ export async function applyMatchExisting(matched, { liveRaindropIds } = {}) {
     return { ok: false, paired: 0, error: "Invalid match list" };
   }
 
-  const liveIds = new Set(
-    (await collectAllBookmarks()).map(({ node }) => String(node.id))
+  const nodes = new Map(
+    (await collectAllBookmarks()).map(({ node, segments }) => [String(node.id), { node, segments }])
   );
+  const liveIds = new Set(nodes.keys());
   const liveRids = liveRaindropIds ? new Set([...liveRaindropIds].map(String)) : undefined;
 
   let paired = 0;
@@ -261,7 +262,13 @@ export async function applyMatchExisting(matched, { liveRaindropIds } = {}) {
       continue;
     }
     if (classifyPairClaim(bid, rid, pairs, liveIds, liveRids) !== "match") continue;
-    await recordSynced(bid, rid);
+    const { node, segments } = nodes.get(bid);
+    await recordSynced(bid, rid, {
+      url: node.url,
+      title: node.title ?? null,
+      edgeParentId: node.parentId ?? null,
+      edgePathAtSync: segments,
+    });
     paired++;
   }
 

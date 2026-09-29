@@ -10,8 +10,8 @@
 // Pair, suppress, log, and status mutations share withLock with the queue so
 // concurrent drain / live-capture / reconcile cannot clobber each other's RMW
 // updates. The lock is in-process only (one service worker); getConfig does
-// not write, so an Options save cannot race a heal. Legacy DEDUP is migrated
-// into PAIRS on first load; pair mutations write PAIRS only.
+// not write, so an Options save cannot race a heal. Pairs are v2 records keyed
+// by raindrop id (see the pairs section); legacy DEDUP / v1 maps convert once.
 // Confirmed deletes/offloads use clearPairWithTombstone (tombstone + forget pair).
 
 import {
@@ -27,9 +27,11 @@ import {
   SYNC_MODE,
   STORAGE_QUOTA_FALLBACK_BYTES,
   DELETE_BREAKER_WINDOW_MS,
+  EDGE_REMOVED_TTL_MS,
 } from "./constants.js";
 import { withLock } from "./mutex.js";
 import { appendArchiveEntry } from "./log-archive.js";
+import { urlMatchKeys } from "./url-match.js";
 
 async function read(key, fallback) {
   const got = await chrome.storage.local.get(key);
@@ -200,46 +202,193 @@ export async function clearOverride(folderId) {
   await write(KEY.OVERRIDES, overrides);
 }
 
-/* ---- bidirectional pairs (bookmark id ↔ raindrop id) ---- */
+/* ---- bidirectional pairs: records keyed by raindrop id ---- */
+//
+// PAIRS v2 persists one record per raindrop id. Raindrop id is the key because
+// it is stable while the raindrop lives; the Edge bookmark id is a cached
+// field that Chromium may reassign at any time (AGENTS.md). byBookmark /
+// byRaindrop / byUrlKey are rebuilt from the records on every load and are
+// never written. A legacy v1 map ({ byBookmark, byRaindrop }) is converted to
+// minimal records on first load, backed up under PAIRS_V1_BACKUP, and flagged
+// migrationPartial until pair-migration.js fills URLs from the tree and the
+// presence snapshot.
 
-function emptyPairs() {
-  return { byBookmark: {}, byRaindrop: {} };
+/**
+ * @typedef {{
+ *   raindropId: string,
+ *   bookmarkId: string|null,
+ *   urlKey: string|null,
+ *   url: string|null,
+ *   collectionId: string|null,
+ *   edgeParentId: string|null,
+ *   edgePathAtSync: string[]|null,
+ *   title: string|null,
+ *   lastSeenEdgeAt: number|null,
+ *   lastSeenRaindropAt: number|null,
+ * }} PairRecord
+ *
+ * @typedef {{ v: 2, records: Record<string, PairRecord>, migrationPartial?: boolean, migrationLogged?: boolean }} StoredPairs
+ *
+ * @typedef {{
+ *   v: 2,
+ *   records: Record<string, PairRecord>,
+ *   byBookmark: Record<string, string>,
+ *   byRaindrop: Record<string, string>,
+ *   byUrlKey: Record<string, string[]>,
+ *   migrationPartial: boolean,
+ * }} PairsView
+ */
+
+/** Primary URL key stored on a record (strongest urlMatchKeys entry). */
+export function primaryUrlKey(url) {
+  if (!url) return null;
+  return urlMatchKeys(url)[0] ?? null;
 }
 
-/** Load PAIRS, migrating from legacy DEDUP if needed. Caller must hold withLock. */
-async function loadPairsUnlocked() {
-  const existing = await read(KEY.PAIRS, null);
-  if (existing && existing.byBookmark && existing.byRaindrop) return existing;
+/**
+ * Build a record. Missing fields stay null; `url` also sets `urlKey`.
+ * @param {string} raindropId
+ * @param {Partial<PairRecord>} fields
+ * @returns {PairRecord}
+ */
+export function makePairRecord(raindropId, fields = {}) {
+  const url = fields.url ?? null;
+  return {
+    raindropId: String(raindropId),
+    bookmarkId: fields.bookmarkId != null ? String(fields.bookmarkId) : null,
+    urlKey: fields.urlKey ?? primaryUrlKey(url),
+    url,
+    collectionId: fields.collectionId != null ? String(fields.collectionId) : null,
+    edgeParentId: fields.edgeParentId != null ? String(fields.edgeParentId) : null,
+    edgePathAtSync: Array.isArray(fields.edgePathAtSync) ? [...fields.edgePathAtSync] : null,
+    title: fields.title ?? null,
+    lastSeenEdgeAt: fields.lastSeenEdgeAt ?? null,
+    lastSeenRaindropAt: fields.lastSeenRaindropAt ?? null,
+  };
+}
 
-  const legacy = await read(KEY.DEDUP, {});
-  const pairs = emptyPairs();
-  for (const [bookmarkId, raindropId] of Object.entries(legacy)) {
-    if (raindropId == null) continue;
-    const rid = String(raindropId);
-    pairs.byBookmark[bookmarkId] = rid;
-    pairs.byRaindrop[rid] = bookmarkId;
+/**
+ * Derived indexes over stored records. Pure; used on every load.
+ * @param {StoredPairs|null|undefined} stored
+ * @returns {PairsView}
+ */
+export function pairsView(stored) {
+  const records = stored?.records || {};
+  const byBookmark = {};
+  const byRaindrop = {};
+  const byUrlKey = {};
+  for (const [rid, rec] of Object.entries(records)) {
+    const bid = rec?.bookmarkId != null ? String(rec.bookmarkId) : null;
+    if (bid != null) {
+      byBookmark[bid] = rid;
+      byRaindrop[rid] = bid;
+    }
+    if (rec?.urlKey) (byUrlKey[rec.urlKey] ||= []).push(rid);
   }
-  await write(KEY.PAIRS, pairs);
-  return pairs;
+  return {
+    v: 2,
+    records,
+    byBookmark,
+    byRaindrop,
+    byUrlKey,
+    migrationPartial: !!stored?.migrationPartial,
+  };
 }
 
-/** Migrate legacy DEDUP map into PAIRS once, then keep PAIRS authoritative (no dual-write). */
+/** True for the legacy two-map shape. */
+export function isLegacyPairs(stored) {
+  return !!stored && stored.v !== 2 && !!stored.byBookmark && !!stored.byRaindrop;
+}
+
+/**
+ * Minimal v2 records from a v1 map: ids only, no URL. Later forward links to
+ * the same raindrop id win (matches v1 recordSynced overwrite order).
+ * @param {{ byBookmark?: Record<string, string> }} v1
+ * @returns {Record<string, PairRecord>}
+ */
+export function recordsFromLegacy(v1) {
+  const records = {};
+  for (const [bid, rid] of Object.entries(v1?.byBookmark || {})) {
+    if (rid == null || bid == null) continue;
+    records[String(rid)] = makePairRecord(rid, { bookmarkId: bid });
+  }
+  return records;
+}
+
+/**
+ * Load stored v2 pairs, converting legacy DEDUP / v1 once. Caller holds withLock.
+ * @returns {Promise<StoredPairs>}
+ */
+async function loadStoredPairsUnlocked() {
+  const existing = await read(KEY.PAIRS, null);
+  if (existing?.v === 2 && existing.records) return existing;
+
+  let legacy = isLegacyPairs(existing) ? existing : null;
+  if (!legacy) {
+    const dedup = await read(KEY.DEDUP, {});
+    legacy = { byBookmark: {}, byRaindrop: {} };
+    for (const [bookmarkId, raindropId] of Object.entries(dedup)) {
+      if (raindropId == null) continue;
+      legacy.byBookmark[bookmarkId] = String(raindropId);
+      legacy.byRaindrop[String(raindropId)] = bookmarkId;
+    }
+  }
+  const records = recordsFromLegacy(legacy);
+  /** @type {StoredPairs} */
+  const stored = { v: 2, records, migrationPartial: Object.keys(records).length > 0 };
+  if (stored.migrationPartial) {
+    await writeMany({ [KEY.PAIRS_V1_BACKUP]: legacy, [KEY.PAIRS]: stored });
+  } else {
+    await write(KEY.PAIRS, stored);
+  }
+  return stored;
+}
+
+/**
+ * Read-modify-write the stored records under the pair lock.
+ * @template T
+ * @param {(records: Record<string, PairRecord>, stored: StoredPairs) => T} fn
+ * @returns {Promise<T>}
+ */
+async function mutatePairs(fn) {
+  return withLock(async () => {
+    const stored = await loadStoredPairsUnlocked();
+    const result = fn(stored.records, stored);
+    await write(KEY.PAIRS, stored);
+    return result;
+  });
+}
+
+/**
+ * Convert a legacy map to v2 records (id-only, migrationPartial) and drop
+ * reconcile keys the confirm-GET engine used. URLs are filled by
+ * pair-migration.js once the tree and a presence snapshot are available.
+ * @returns {Promise<PairsView>}
+ */
 export async function ensurePairsMigrated() {
-  return withLock(() => loadPairsUnlocked());
+  const view = await getPairs();
+  await dropLegacyReconcileState();
+  return view;
 }
 
+/** @returns {Promise<PairsView>} */
 export async function getPairs() {
-  return ensurePairsMigrated();
+  return withLock(async () => pairsView(await loadStoredPairsUnlocked()));
+}
+
+/** Stored shape (records + flags) without derived indexes. */
+export async function getStoredPairs() {
+  return withLock(() => loadStoredPairsUnlocked());
 }
 
 export async function hasSynced(bookmarkId) {
   const pairs = await getPairs();
-  return Object.prototype.hasOwnProperty.call(pairs.byBookmark, bookmarkId);
+  return Object.prototype.hasOwnProperty.call(pairs.byBookmark, String(bookmarkId));
 }
 
 export async function getRaindropId(bookmarkId) {
   const pairs = await getPairs();
-  return pairs.byBookmark[bookmarkId] ?? null;
+  return pairs.byBookmark[String(bookmarkId)] ?? null;
 }
 
 export async function getBookmarkIdForRaindrop(raindropId) {
@@ -247,65 +396,231 @@ export async function getBookmarkIdForRaindrop(raindropId) {
   return pairs.byRaindrop[String(raindropId)] ?? null;
 }
 
-export async function recordSynced(bookmarkId, raindropId) {
-  return withLock(async () => {
-    const pairs = await loadPairsUnlocked();
-    const rid = String(raindropId);
-    // Drop any previous reverse link for this raindrop or bookmark.
-    const prevRid = pairs.byBookmark[bookmarkId];
-    if (prevRid != null) delete pairs.byRaindrop[String(prevRid)];
-    const prevBid = pairs.byRaindrop[rid];
-    if (prevBid != null) delete pairs.byBookmark[prevBid];
-    pairs.byBookmark[bookmarkId] = rid;
-    pairs.byRaindrop[rid] = bookmarkId;
-    await write(KEY.PAIRS, pairs);
+/** @returns {Promise<PairRecord|null>} */
+export async function getPairRecord(raindropId) {
+  const pairs = await getPairs();
+  return pairs.records[String(raindropId)] ?? null;
+}
+
+/**
+ * Record (or refresh) a pair. `meta` carries what the caller knows at sync
+ * time: url, title, collectionId, edgeParentId, edgePathAtSync. Fields not
+ * passed keep their previous value. Any other record bound to this bookmark
+ * id is dropped (one forward link per bookmark).
+ * @param {string} bookmarkId
+ * @param {string|number} raindropId
+ * @param {Partial<PairRecord>} [meta]
+ */
+export async function recordSynced(bookmarkId, raindropId, meta = {}) {
+  const bid = String(bookmarkId);
+  const rid = String(raindropId);
+  const now = Date.now();
+  return mutatePairs((records) => {
+    for (const [r, rec] of Object.entries(records)) {
+      if (r !== rid && rec?.bookmarkId != null && String(rec.bookmarkId) === bid) {
+        delete records[r];
+      }
+    }
+    const prev = records[rid] || {};
+    const pick = (key) => (meta[key] !== undefined ? meta[key] : (prev[key] ?? null));
+    records[rid] = makePairRecord(rid, {
+      bookmarkId: bid,
+      url: pick("url"),
+      title: pick("title"),
+      collectionId: pick("collectionId"),
+      edgeParentId: pick("edgeParentId"),
+      edgePathAtSync: pick("edgePathAtSync"),
+      lastSeenEdgeAt: now,
+      lastSeenRaindropAt: now,
+    });
   });
 }
 
 export async function forgetSynced(bookmarkId) {
-  return withLock(async () => {
-    const pairs = await loadPairsUnlocked();
-    const rid = pairs.byBookmark[bookmarkId];
-    if (rid != null) delete pairs.byRaindrop[String(rid)];
-    delete pairs.byBookmark[bookmarkId];
-    await write(KEY.PAIRS, pairs);
+  const bid = String(bookmarkId);
+  return mutatePairs((records) => {
+    for (const [r, rec] of Object.entries(records)) {
+      if (rec?.bookmarkId != null && String(rec.bookmarkId) === bid) delete records[r];
+    }
   });
 }
 
 /**
- * Rewrite the whole pair map atomically (Repair pairs apply). `fn` receives the
- * current `byBookmark` read under the pair lock and returns the next one, so a
- * pair recorded by drain between a dry-run and apply is seen, not clobbered.
- * Both indexes are rebuilt from the returned `byBookmark` so they cannot drift.
+ * Rewrite the whole pair map atomically (Repair pairs apply). `fn` receives
+ * the current `byBookmark` read under the pair lock and returns the next one,
+ * so a pair recorded by drain between a dry-run and apply is seen, not
+ * clobbered. Records keep their metadata when the (bookmark, raindrop) pair
+ * survives; `seed` supplies metadata for new pairs (e.g. rebound records).
  * @template T
- * @param {(current: Record<string, string>) => { byBookmark: Record<string, string>, result: T }} fn
+ * @param {(current: Record<string, string>) => { byBookmark: Record<string, string>, result: T, seed?: Record<string, Partial<PairRecord>> }} fn
  * @returns {Promise<T>}
  */
 export async function rewritePairs(fn) {
-  return withLock(async () => {
-    const current = await loadPairsUnlocked();
-    const { byBookmark, result } = fn({ ...current.byBookmark });
-    const pairs = emptyPairs();
+  return mutatePairs((records, stored) => {
+    const view = pairsView(stored);
+    const { byBookmark, result, seed } = fn({ ...view.byBookmark });
+    const next = {};
     for (const [bid, rid] of Object.entries(byBookmark || {})) {
       if (rid == null || bid == null) continue;
-      pairs.byBookmark[String(bid)] = String(rid);
-      pairs.byRaindrop[String(rid)] = String(bid);
+      const r = String(rid);
+      const same = records[r] && String(records[r].bookmarkId) === String(bid);
+      const base = same ? records[r] : (seed?.[r] ?? records[r] ?? {});
+      next[r] = makePairRecord(r, { ...base, bookmarkId: String(bid) });
     }
-    await write(KEY.PAIRS, pairs);
+    stored.records = next;
     return result;
   });
 }
 
 export async function forgetPairByRaindrop(raindropId) {
-  return withLock(async () => {
-    const pairs = await loadPairsUnlocked();
-    const rid = String(raindropId);
-    const bookmarkId = pairs.byRaindrop[rid];
-    if (bookmarkId != null) delete pairs.byBookmark[bookmarkId];
-    delete pairs.byRaindrop[rid];
-    await write(KEY.PAIRS, pairs);
-    return bookmarkId ?? null;
+  const rid = String(raindropId);
+  return mutatePairs((records) => {
+    const bookmarkId = records[rid]?.bookmarkId ?? null;
+    delete records[rid];
+    return bookmarkId;
   });
+}
+
+/**
+ * @typedef {(
+ *   { type: "edge", raindropId: string, fromBookmarkId: string|null, record: PairRecord } |
+ *   { type: "raindrop", fromRaindropId: string, toRaindropId: string, record: PairRecord, replacesBookmarkId?: string|null } |
+ *   { type: "fill", raindropId: string, bookmarkId: string|null, record: PairRecord } |
+ *   { type: "drop", raindropId: string, bookmarkId: string|null }
+ * )} PairChange
+ */
+
+/**
+ * Apply rebind / fill / drop changes computed outside the lock (rebind pass,
+ * survival checks). Each change applies only if the stored record still has
+ * the ids the change was computed from, so a concurrent upload or delete wins.
+ * @param {PairChange[]} changes
+ * @returns {Promise<PairChange[]>} the changes that applied
+ */
+export async function applyPairChanges(changes) {
+  if (!changes?.length) return [];
+  return mutatePairs((records) => {
+    const applied = [];
+    const boundTo = (bid) =>
+      Object.values(records).find((r) => r?.bookmarkId != null && String(r.bookmarkId) === bid);
+    for (const c of changes) {
+      if (c.type === "edge" || c.type === "fill") {
+        const cur = records[c.raindropId];
+        const from = c.type === "edge" ? c.fromBookmarkId : c.bookmarkId;
+        if (!cur || String(cur.bookmarkId) !== String(from)) continue;
+        const newBid = c.record.bookmarkId != null ? String(c.record.bookmarkId) : null;
+        const other = newBid != null ? boundTo(newBid) : null;
+        if (other && other.raindropId !== c.raindropId) continue;
+        records[c.raindropId] = makePairRecord(c.raindropId, c.record);
+        applied.push(c);
+      } else if (c.type === "raindrop") {
+        const cur = records[c.fromRaindropId];
+        if (!cur) continue;
+        // The survivor may carry a record only when the plan saw it bound to
+        // the (dead) bookmark it replaces.
+        const occupant = records[c.toRaindropId];
+        if (occupant && String(occupant.bookmarkId) !== String(c.replacesBookmarkId ?? ""))
+          continue;
+        if (String(cur.bookmarkId) !== String(c.record.bookmarkId)) continue;
+        delete records[c.fromRaindropId];
+        records[c.toRaindropId] = makePairRecord(c.toRaindropId, c.record);
+        applied.push(c);
+      } else if (c.type === "drop") {
+        const cur = records[c.raindropId];
+        if (!cur || String(cur.bookmarkId) !== String(c.bookmarkId)) continue;
+        delete records[c.raindropId];
+        applied.push(c);
+      }
+    }
+    return applied;
+  });
+}
+
+/**
+ * Replace records wholesale under the lock (pair migration). `fn` receives the
+ * current stored pairs and returns the next records plus flags.
+ * @template T
+ * @param {(stored: StoredPairs) => { records: Record<string, PairRecord>, migrationPartial?: boolean, migrationLogged?: boolean, result: T }} fn
+ * @returns {Promise<T>}
+ */
+export async function rewritePairRecords(fn) {
+  return mutatePairs((_records, stored) => {
+    const out = fn(stored);
+    stored.records = out.records;
+    if (out.migrationPartial !== undefined) stored.migrationPartial = !!out.migrationPartial;
+    if (out.migrationLogged !== undefined) stored.migrationLogged = !!out.migrationLogged;
+    return out.result;
+  });
+}
+
+/** Drop the v1 backup once a completed reconcile finish proves v2 works. */
+export async function dropPairsV1Backup() {
+  const got = await chrome.storage.local.get(KEY.PAIRS_V1_BACKUP);
+  if (!(KEY.PAIRS_V1_BACKUP in got)) return false;
+  await chrome.storage.local.remove(KEY.PAIRS_V1_BACKUP);
+  return true;
+}
+
+/* ---- Edge→Raindrop delete ledger (evidence from onRemoved payloads) ---- */
+
+/**
+ * @typedef {{ urlKey: string|null, url: string, title?: string, at: number, bookmarkId: string, raindropId: string }} EdgeRemovedEntry
+ */
+
+/** @returns {Promise<Record<string, EdgeRemovedEntry>>} keyed by removed bookmark id */
+export async function getEdgeRemoved() {
+  return read(KEY.EDGE_REMOVED, {});
+}
+
+/**
+ * Record removals seen in onRemoved payloads and prune entries past the TTL.
+ * @param {EdgeRemovedEntry[]} entries
+ */
+export async function addEdgeRemoved(entries, now = Date.now()) {
+  return withLock(async () => {
+    const ledger = await read(KEY.EDGE_REMOVED, {});
+    pruneLedger(ledger, now);
+    for (const e of entries) ledger[String(e.bookmarkId)] = { ...e, at: e.at ?? now };
+    await write(KEY.EDGE_REMOVED, ledger);
+  });
+}
+
+export async function removeEdgeRemoved(bookmarkId) {
+  return withLock(async () => {
+    const ledger = await read(KEY.EDGE_REMOVED, {});
+    if (!(String(bookmarkId) in ledger)) return;
+    delete ledger[String(bookmarkId)];
+    await write(KEY.EDGE_REMOVED, ledger);
+  });
+}
+
+/** Drop ledger entries older than EDGE_REMOVED_TTL_MS. */
+export async function pruneEdgeRemoved(now = Date.now()) {
+  return withLock(async () => {
+    const ledger = await read(KEY.EDGE_REMOVED, {});
+    if (pruneLedger(ledger, now)) await write(KEY.EDGE_REMOVED, ledger);
+  });
+}
+
+function pruneLedger(ledger, now) {
+  let changed = false;
+  for (const [k, e] of Object.entries(ledger)) {
+    if (!e?.at || now - e.at > EDGE_REMOVED_TTL_MS) {
+      delete ledger[k];
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/* ---- pair health (last computed; Options → Status) ---- */
+
+export async function getPairHealth() {
+  return read(KEY.PAIR_HEALTH, null);
+}
+
+export async function setPairHealth(health) {
+  await write(KEY.PAIR_HEALTH, health);
 }
 
 /* ---- tombstones (block recreate after user delete) ---- */
@@ -501,33 +816,30 @@ export async function isChangeSuppressed(bookmarkId) {
 
 /* ---- reconcile progress ---- */
 
+/** Reconcile-state keys the confirm-GET engine used; dropped on first load. */
+const LEGACY_RECONCILE_KEYS = [
+  "seenAcc",
+  "unsettledConfirmCatchUp",
+  "aliveConfirmOffset",
+  "tombstonePruneOffset",
+  "tombstoneConfirmOffset",
+  "parkedAliveIds",
+  "trashHygieneNextPage",
+];
+
 export async function getReconcileState() {
   return read(KEY.RECONCILE, {
     cursorPage: 0,
     running: false,
     lastRunAt: null,
-    /**
-     * Epoch ms of last *settled* finish (no deferred unparked confirms).
-     * Quiet-time cooldown keys off this (not lastRunAt). Missing → treat as
-     * lastRunAt at the cooldown gate for upgrade continuity.
-     */
+    /** Epoch ms of the last completed finish. Quiet-time cooldown keys off this. */
     lastSettledAt: null,
     /**
-     * True when finish deferred unparked missing-raindrop confirms.
-     * While true, heartbeat skips quiet-time cooldown. When `seenAcc` is also
-     * present, heartbeat runs confirm-only catch-up (no nested re-list).
+     * Listing finished but a due presence refresh could not run (budget).
+     * The next wake refreshes presence and finishes without re-listing.
      */
-    unsettledConfirmCatchUp: false,
+    presencePending: false,
     lastError: null,
-    /** Rotating index into delete-confirm candidates (survives completed cycles). */
-    aliveConfirmOffset: 0,
-    /** Rotating index into tombstone-prune candidates (survives completed cycles). */
-    tombstonePruneOffset: 0,
-    /**
-     * Raindrop ids confirmed alive outside scoped listing — skip delete-confirm
-     * until they reappear in seenAcc (moved back into scope / re-allowlisted).
-     */
-    parkedAliveIds: [],
     /**
      * Trash hygiene snapshot (bidirectional discovery debt for safe-to-empty).
      * Missing trashHygieneAt ⇒ Status unknown. See trash-hygiene.js.
@@ -535,10 +847,10 @@ export async function getReconcileState() {
     trashHygieneAt: null,
     trashScanComplete: false,
     trashPairedPending: 0,
+    /** Paired Trash ids still needing enroll, kept across partial Check Trash scans. */
+    trashPendingIds: [],
     /** @type {"reconcile"|"check-trash"|null} */
     trashHygieneSource: null,
-    /** Next Trash list page for Check Trash continue (0 after complete). */
-    trashHygieneNextPage: 0,
   });
 }
 
@@ -548,45 +860,13 @@ export async function setReconcileState(patch) {
   return next;
 }
 
-/** @returns {Promise<Set<string>>} */
-export async function getParkedAliveIds() {
-  const state = await getReconcileState();
-  return new Set((state.parkedAliveIds || []).map(String));
-}
-
-/**
- * Merge raindrop ids into the parked-alive set.
- * @param {Iterable<string|number>} ids
- */
-export async function parkAliveIds(ids) {
-  const add = [...ids].map(String).filter(Boolean);
-  if (!add.length) return;
-  const next = await getParkedAliveIds();
-  for (const id of add) next.add(id);
-  await setReconcileState({ parkedAliveIds: [...next] });
-}
-
-/**
- * Remove raindrop ids from the parked-alive set.
- * @param {Iterable<string|number>} ids
- */
-export async function unparkAliveIds(ids) {
-  const remove = new Set([...ids].map(String));
-  if (!remove.size) return;
-  const next = await getParkedAliveIds();
-  let changed = false;
-  for (const id of remove) {
-    if (next.delete(id)) changed = true;
-  }
-  if (changed) await setReconcileState({ parkedAliveIds: [...next] });
-}
-
-/**
- * Replace parked-alive set (e.g. after pruning unpaired ids).
- * @param {Iterable<string|number>} ids
- */
-export async function setParkedAliveIds(ids) {
-  await setReconcileState({ parkedAliveIds: [...new Set([...ids].map(String))] });
+/** Remove confirm-GET / catch-up / parking fields left by older versions. */
+async function dropLegacyReconcileState() {
+  const state = await read(KEY.RECONCILE, null);
+  if (!state || !LEGACY_RECONCILE_KEYS.some((k) => k in state)) return;
+  const next = { ...state };
+  for (const k of LEGACY_RECONCILE_KEYS) delete next[k];
+  await write(KEY.RECONCILE, next);
 }
 
 /* ---- collection-path cache: "Edge/Work/ProjectA" -> collectionId ---- */

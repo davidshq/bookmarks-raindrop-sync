@@ -28,6 +28,7 @@ import {
 } from "../lib/store.js";
 import { formatLastThrottleNotice } from "../lib/wake-budget.js";
 import { formatTrashSafeNotice, trashSafeButtonLabel } from "../lib/trash-hygiene.js";
+import { formatPairHealth, pairHealthNeedsRepair } from "../lib/pair-health.js";
 import { countArchiveEntries, exportArchiveEntries, clearArchive } from "../lib/log-archive.js";
 import { getTree, mirrorPathExists, getTopRoots } from "../lib/bookmarks.js";
 import {
@@ -379,6 +380,7 @@ async function refreshStatus() {
 
   renderBulkQueueBanner(resp);
   renderDeleteBreaker(resp);
+  await renderPairHealth(resp);
 
   const log = $("log");
   log.innerHTML = "";
@@ -427,7 +429,9 @@ async function continueBulkDripFromStatus() {
   out.textContent = "Resuming drip…";
   try {
     const resp = await chrome.runtime.sendMessage({ type: MSG.CONTINUE_BULK_DRIP });
-    out.textContent = resp?.ok ? "Continuing drip (prompt snoozed until the queue shrinks)." : `Failed: ${resp?.error}`;
+    out.textContent = resp?.ok
+      ? "Continuing drip (prompt snoozed until the queue shrinks)."
+      : `Failed: ${resp?.error}`;
   } catch (err) {
     out.textContent = `Failed: ${err.message}`;
   }
@@ -523,9 +527,7 @@ function promptBulkGate(assessment, opLabel, op) {
   );
   if (matchFirst) return "match";
   const cont = window.confirm(
-    `Continue ${opLabel} without matching?\n\n` +
-      "OK = continue without Match\n" +
-      "Cancel = abort"
+    `Continue ${opLabel} without matching?\n\n` + "OK = continue without Match\n" + "Cancel = abort"
   );
   return cont ? "continue" : "cancel";
 }
@@ -705,7 +707,7 @@ async function runMatchExistingUi() {
 
 /**
  * Repair pairs: dry-run summary, confirm, apply. Pair map only — no Edge or
- * Raindrop writes. Drops queued delete jobs and resets presence state.
+ * Raindrop writes. Drops queued delete jobs and resets the delete breaker.
  */
 async function runRepairPairsUi() {
   const out = $("repairPairsStatus");
@@ -721,15 +723,22 @@ async function runRepairPairsUi() {
       return;
     }
     const pruned = plan.pruneBothDead + plan.pruneEdgeDead + plan.pruneRaindropDead;
+    const rebinds = (plan.edgeRebinds || 0) + (plan.raindropRebinds || 0);
     const summary =
-      `Pairs now ${plan.pairsBefore}: keep ${plan.keptLive} live, rebind ${plan.matched.length} by URL, ` +
+      `Pairs now ${plan.pairsBefore}: keep ${plan.keptLive} live, ` +
+      `rebind ${plan.edgeRebinds || 0} Edge id(s) and ${plan.raindropRebinds || 0} Raindrop id(s), ` +
+      `match ${plan.matched.length} by URL, ` +
       `prune ${pruned} dead (${plan.pruneEdgeDead} Edge id gone, ${plan.pruneRaindropDead} raindrop gone, ` +
       `${plan.pruneBothDead} both). Ambiguous ${plan.ambiguous}, conflicts ${plan.conflicts}, ` +
       `Edge-only ${plan.edgeOnly}, Raindrop-only ${plan.raindropOnly}. ` +
       `Clear ${plan.tombstonesAlive.length} of ${plan.tombstonesTotal} tombstone(s) (raindrop alive), ` +
       `drop ${plan.queuedDeletes} queued delete(s).`;
     out.textContent = summary;
-    const nothing = plan.matched.length === 0 && pruned === 0 && plan.tombstonesAlive.length === 0;
+    const nothing =
+      plan.matched.length === 0 &&
+      rebinds === 0 &&
+      pruned === 0 &&
+      plan.tombstonesAlive.length === 0;
     if (nothing) {
       out.textContent = `${summary} Nothing to repair.`;
       return;
@@ -752,6 +761,26 @@ async function runRepairPairsUi() {
     out.textContent = `Repair failed: ${err.message}`;
   }
   refreshStatus();
+}
+
+/**
+ * Pair health from the worker's last completed check (never fetches the
+ * export here). Repair shortcut appears when any stale-id count is non-zero.
+ */
+async function renderPairHealth(resp) {
+  const row = $("pairHealthRow");
+  if (!row) return;
+  if (resp.syncMode !== SYNC_MODE.BIDIRECTIONAL) {
+    row.classList.add("hidden");
+    return;
+  }
+  row.classList.remove("hidden");
+  $("pairHealthLine").textContent =
+    formatPairHealth(resp.pairHealth) ??
+    "Pair health appears after the next completed Raindrop check.";
+  $("pairHealthRepair").classList.toggle("hidden", !pairHealthNeedsRepair(resp.pairHealth));
+  const config = await getConfig();
+  $("presenceDeletesEnabled").checked = config.presenceDeletesEnabled !== false;
 }
 
 function renderDeleteBreaker(resp) {
@@ -1392,6 +1421,18 @@ $("backfill").addEventListener("click", runBackfill);
 $("reconcile").addEventListener("click", () => runReconcile());
 $("matchExisting").addEventListener("click", () => void runMatchExistingUi());
 $("repairPairs").addEventListener("click", () => void runRepairPairsUi());
+$("pairHealthRepair").addEventListener("click", async () => {
+  // Same dry-run → confirm → apply flow as Manual Sync; mirror its status here.
+  const out = $("pairHealthRepairStatus");
+  await runRepairPairsUi();
+  out.textContent = $("repairPairsStatus").textContent;
+});
+$("presenceDeletesEnabled").addEventListener("change", async (e) => {
+  await setConfig({ presenceDeletesEnabled: e.target.checked });
+  $("pairHealthRepairStatus").textContent = e.target.checked
+    ? "Absence-based deletes on."
+    : "Absence-based deletes off; Trash-listed deletes still run.";
+});
 $("allowDeletes").addEventListener("click", async () => {
   const out = $("deleteBreakerStatus");
   out.textContent = "Allowing…";
@@ -1409,7 +1450,9 @@ $("discardDeletes").addEventListener("click", async () => {
   out.textContent = "Discarding…";
   try {
     const resp = await chrome.runtime.sendMessage({ type: MSG.DISCARD_DELETES });
-    out.textContent = resp?.ok ? `Dropped ${resp.dropped} delete job(s).` : `Failed: ${resp?.error}`;
+    out.textContent = resp?.ok
+      ? `Dropped ${resp.dropped} delete job(s).`
+      : `Failed: ${resp?.error}`;
   } catch (err) {
     out.textContent = `Failed: ${err.message}`;
   }
@@ -1435,7 +1478,8 @@ $("checkTrash").addEventListener("click", async () => {
       out.textContent = resp?.error || "Check Trash failed.";
     } else {
       // Full notice lives on #trashSafeLine after refreshStatus — keep this short.
-      out.textContent = resp.trashSafe?.state === "partial" ? "More to scan." : "Done.";
+      out.textContent =
+        resp.trashSafe?.state === "partial" ? "Scan incomplete; check again." : "Done.";
     }
     await refreshStatus();
   } catch (err) {

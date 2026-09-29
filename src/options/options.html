@@ -104,6 +104,21 @@
             <span id="deleteBreakerStatus" class="hint" role="status"></span>
           </div>
         </div>
+        <div id="pairHealthRow" class="hidden">
+          <p id="pairHealthLine" class="status-line muted" role="status"></p>
+          <div class="row">
+            <button id="pairHealthRepair" type="button" class="secondary hidden">Repair pairs</button>
+            <span id="pairHealthRepairStatus" class="hint" role="status"></span>
+          </div>
+          <label class="checkbox">
+            <input id="presenceDeletesEnabled" type="checkbox" />
+            Remove browser bookmarks whose raindrop is gone from the Raindrop export
+          </label>
+          <p class="field-help hint">
+            On by default. Off keeps only Trash-listed deletes; a raindrop missing from the export
+            then never removes its browser bookmark.
+          </p>
+        </div>
         <p class="status-line muted">Local storage: <span id="storageUsage">—</span></p>
         <div id="deadLetterRow" class="row hidden">
           <button id="retryDeadLetter" type="button" class="secondary">Retry dead-lettered</button>
@@ -214,11 +229,10 @@
             </select>
           </label>
           <p id="reconcileIntervalHelp" class="field-help hint">
-            How often to start a full Raindrop check when confirm catch-up is settled. Each
-            heartbeat prefers draining the sync queue, then uses leftover Raindrop budget for
-            Trash / list work — queued jobs do not hard-block listing. Unfinished missing-raindrop
-            checks continue every minute as confirm-only (no full re-list) until the backlog drains
-            or parks. Use <strong>Pull now</strong> for an immediate full check.
+            How often to start a full Raindrop check and refresh the Raindrop export that tells
+            the extension which raindrops still exist. Each heartbeat prefers draining the sync
+            queue, then uses leftover Raindrop budget for Trash / list work — queued jobs
+            do not hard-block listing. Use <strong>Pull now</strong> for an immediate full check.
           </p>
           <label>
             Raindrop → browser folders

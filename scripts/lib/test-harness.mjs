@@ -1,6 +1,6 @@
 /**
  * Shared in-memory Edge / chrome.storage mocks for verify scripts.
- * Used by verify-checklist.mjs, verify-integration.mjs, and smoke-bulk-options.mjs
+ * Used by test/*.test.mjs, verify-integration.mjs, and smoke-bulk-options.mjs
  * (token/ROOT only for smoke) — keep mocks here, not duplicated.
  * Never touches the real Edge bookmark tree.
  */
@@ -92,6 +92,9 @@ export function installChromeMocks() {
         async set(obj) {
           for (const [k, v] of Object.entries(obj)) storage.set(k, structuredClone(v));
         },
+        async remove(keys) {
+          for (const k of Array.isArray(keys) ? keys : [keys]) storage.delete(k);
+        },
       },
     },
     bookmarks: {
@@ -118,6 +121,22 @@ export function installChromeMocks() {
         };
         attach(root);
         return [root];
+      },
+      async getSubTree(id) {
+        const n = bookmarks.get(String(id));
+        if (!n) throw new Error("Bookmark not found");
+        const copy = { ...n };
+        const attach = (parent) => {
+          parent.children = [...bookmarks.values()]
+            .filter((c) => c.parentId === parent.id)
+            .map((c) => {
+              const child = { ...c };
+              if (!child.url) attach(child);
+              return child;
+            });
+        };
+        if (!copy.url) attach(copy);
+        return [copy];
       },
       async create({ parentId, title, url }) {
         return bmNode({ parentId: String(parentId), title, url });
@@ -223,6 +242,9 @@ export function patchClient(raindropMod, clientImpl) {
 
 export async function resetAll(store, { integration = false } = {}) {
   storage.clear();
+  // The presence snapshot also lives in worker memory; a reset is a restart.
+  const presence = await import(pathToFileURL(path.join(ROOT, "src/lib/presence.js")).href);
+  presence.resetPresenceMemory();
   if (integration) seedIntegrationEdge();
   else seedEdge();
   await store.ensurePairsMigrated();

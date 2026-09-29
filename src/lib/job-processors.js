@@ -1,11 +1,19 @@
 // Durable queue job processors (upload, pull, delete, folder rename).
 // Invoked only from drain.js. Confirm-before-act and suppress rules live here.
 //
-// Crash-safe creates: before createRaindrop / createBookmark the job is patched
-// with createAttemptedAt / pullCreateAttemptedAt. A service-worker death between
-// the side effect and recordSynced leaves the job queued with the marker; the
-// next drain reclaims by URL instead of forking a duplicate. Same pattern as
-// offloadRaindropId for destructive offload.
+// Reclaim before every create: an upload with no pair looks up its URL in the
+// presence snapshot (or one Raindrop search when the snapshot is stale and
+// cannot be refreshed) and binds to a claimable existing raindrop instead of
+// creating a copy. createAttemptedAt / pullCreateAttemptedAt still mark
+// in-flight creates so a SW death between the side effect and recordSynced
+// reclaims on retry; a snapshot older than the marker cannot see that create,
+// so marked jobs search. Same pattern as offloadRaindropId for offload.
+//
+// Deletes need evidence plus a failed survival check (delete-evidence spec):
+//   delete-raindrop  onRemoved payload (ledger) and no other copy of the URL in
+//                    the synced scope; a surviving copy rebinds the pair.
+//   delete-edge      Trash or snapshot absence, re-checked here against the
+//                    current snapshot; a surviving raindrop rebinds the pair.
 
 import {
   POLICY,
@@ -29,6 +37,11 @@ import {
   getPairs,
   forgetSynced,
   forgetPairByRaindrop,
+  getPairRecord,
+  getStoredPairs,
+  applyPairChanges,
+  getEdgeRemoved,
+  removeEdgeRemoved,
   clearPairWithTombstone,
   addTombstone,
   hasTombstone,
@@ -57,10 +70,11 @@ import {
   getTopRoots,
   mirrorPathExists,
   ancestorIdsFromFolder,
+  walkAncestorsFromFolder,
   isFolderExcluded,
 } from "./bookmarks.js";
 import { resolvePolicy, isExcluded } from "./policy.js";
-import { isNotFoundError } from "./raindrop.js";
+import { isNotFoundError, AuthError, RateLimitError } from "./raindrop.js";
 import {
   ensureCollectionPath,
   findRootCollection,
@@ -75,6 +89,10 @@ import { canCreateRaindropOnlyPath } from "./allowlist.js";
 import { computePullUpdatePlan } from "./pull-update.js";
 import { filterUrlMatchingItems, pickMoveRebindCandidate } from "./move-rebind.js";
 import { urlMatchKeys } from "./url-match.js";
+import { PRESENCE_STALE_MS } from "./constants.js";
+import { ensurePresence, isUsableForUrls, idsForUrl } from "./presence.js";
+import { loadTreeIndex, treeEntriesForUrl } from "./tree-index.js";
+import { rebindStaleEdgeId, rebindStaleRaindropId } from "./pair-rebind.js";
 
 /** Job kinds that run in one-way mode (Edge→Raindrop). */
 const ONE_WAY_KINDS = new Set([JOB.UPLOAD, JOB.RENAME_COLLECTION]);
@@ -117,28 +135,26 @@ export async function processJob(job, ctx) {
 }
 
 /**
- * Search Raindrop for a URL and pick a claimable raindrop id (move rebind or
- * crash-recovery after createAttemptedAt).
+ * Pick a claimable raindrop id among URL matches for an unpaired bookmark.
+ * A match paired to another *live* bookmark is a conflict; one paired to a
+ * gone bookmark is claimable.
  * @param {string} bookmarkId
- * @param {string} url
- * @param {import("./raindrop.js").RaindropClient} client
+ * @param {string[]} rids URL-matching raindrop ids
+ * @param {Set<string>} [liveRaindropIds] snapshot ids (forward-link staleness)
  * @returns {Promise<{ kind: 'unique'|'multi'|'conflict'|'none', rid?: string, extras: number }>}
  */
-async function tryReclaimRaindropByUrl(bookmarkId, url, client) {
-  const { items } = await client.searchRaindrops(url);
-  const matching = filterUrlMatchingItems(url, items);
-  if (!matching.length) return { kind: "none", extras: 0 };
-
+async function pickClaimable(bookmarkId, rids, liveRaindropIds) {
+  if (!rids.length) return { kind: "none", extras: 0 };
   const pairs = await getPairs();
   const liveIds = new Set([String(bookmarkId)]);
-  for (const item of matching) {
-    const otherBid = pairs.byRaindrop?.[String(item._id)];
+  for (const rid of rids) {
+    const otherBid = pairs.byRaindrop?.[String(rid)];
     if (otherBid == null) continue;
     const other = await getNodeOrNull(String(otherBid));
     if (other?.url) liveIds.add(String(otherBid));
   }
-
-  const pick = pickMoveRebindCandidate(bookmarkId, matching, pairs, liveIds);
+  const items = rids.map((rid) => ({ _id: rid }));
+  const pick = pickMoveRebindCandidate(bookmarkId, items, pairs, liveIds, liveRaindropIds);
   if (pick.kind === "none" || pick.kind === "conflict") {
     return { kind: pick.kind, extras: 0 };
   }
@@ -146,11 +162,82 @@ async function tryReclaimRaindropByUrl(bookmarkId, url, client) {
 }
 
 /**
+ * Find an existing raindrop for this URL before creating one. Snapshot first
+ * (free when fresh); one search when the snapshot is stale and cannot be
+ * refreshed, or predates this job's createAttemptedAt (it cannot see a create
+ * that a crashed drain already sent).
+ * @param {{ id: string, createAttemptedAt?: number }} job
+ * @param {string} url
+ * @param {{ client: import("./raindrop.js").RaindropClient, budget?: import("./wake-budget.js").WakeBudget|null }} ctx
+ */
+async function tryReclaimRaindropByUrl(job, url, ctx) {
+  const { client, budget } = ctx;
+  let snapshot = null;
+  try {
+    ({ snapshot } = await ensurePresence({ client, budget, reason: "on-demand" }));
+  } catch (err) {
+    if (err instanceof AuthError || err instanceof RateLimitError) throw err;
+  }
+  const now = Date.now();
+  const fresh =
+    isUsableForUrls(snapshot, now) &&
+    now - snapshot.at < PRESENCE_STALE_MS &&
+    (job.createAttemptedAt == null || snapshot.at > job.createAttemptedAt);
+  if (fresh) {
+    // Raindrops this engine paired after the export began are live too; the
+    // snapshot just cannot see them yet.
+    const pairs = await getPairs();
+    const known = new Set(snapshot.ids);
+    const rids = idsForUrl(snapshot, url);
+    for (const key of urlMatchKeys(url)) {
+      for (const rid of pairs.byUrlKey[key] || []) {
+        const rec = pairs.records[rid];
+        if (rec?.lastSeenRaindropAt == null || rec.lastSeenRaindropAt < snapshot.at) continue;
+        known.add(rid);
+        if (!rids.includes(rid)) rids.push(rid);
+      }
+    }
+    return pickClaimable(job.id, rids, known);
+  }
+  const { items } = await client.searchRaindrops(url);
+  const matching = filterUrlMatchingItems(url, items);
+  return pickClaimable(
+    job.id,
+    matching.map((item) => String(item._id))
+  );
+}
+
+/**
+ * Pair-record metadata for an Edge bookmark synced into `collectionId`.
+ * @param {{ url?: string, title?: string, parentId?: string }} node
+ * @param {string[]} segments folder titles, top root first
+ * @param {string|number|null} collectionId
+ */
+function edgeMeta(node, segments, collectionId) {
+  return {
+    url: node.url ?? null,
+    title: node.title ?? null,
+    collectionId: collectionId ?? null,
+    edgeParentId: node.parentId ?? null,
+    edgePathAtSync: segments ?? null,
+  };
+}
+
+/**
  * Apply a URL reclaim: record pair, optionally log extras, update Edge-owned fields.
  * @returns {Promise<string|null>} raindrop id, or null if update 404'd
  */
-async function applyReclaimedRaindrop(job, node, rid, extras, collectionId, pathLabel, client) {
-  await recordSynced(job.id, rid);
+async function applyReclaimedRaindrop(
+  job,
+  node,
+  rid,
+  extras,
+  collectionId,
+  pathLabel,
+  client,
+  segments
+) {
+  await recordSynced(job.id, rid, edgeMeta(node, segments, collectionId));
   if (extras > 0) {
     await appendLog(
       "warn",
@@ -166,7 +253,7 @@ async function applyReclaimedRaindrop(job, node, rid, extras, collectionId, path
     if (job.reason === "move") {
       await appendLog("info", `Moved: ${node.title || node.url} → ${pathLabel}`);
     } else {
-      await appendLog("info", `Synced: ${node.title || node.url}`);
+      await appendLog("info", `Synced (existing raindrop): ${node.title || node.url}`);
     }
     return rid;
   } catch (err) {
@@ -239,6 +326,7 @@ async function processUpload(job, ctx) {
         title: node.title,
         collectionId,
       });
+      await recordSynced(job.id, rid, edgeMeta(node, segments, collectionId));
       if (job.reason === "move") {
         await appendLog("info", `Moved: ${node.title || node.url} → ${pathLabel}`);
       } else {
@@ -252,12 +340,12 @@ async function processUpload(job, ctx) {
     }
   }
 
-  // Unpaired move, or crash recovery after createAttemptedAt: reclaim by URL
-  // instead of forking a second Raindrop copy.
-  const shouldReclaim =
-    !rid && (job.reason === "move" || job.createAttemptedAt != null);
-  if (shouldReclaim) {
-    const rebound = await tryReclaimRaindropByUrl(job.id, node.url, client);
+  // Every unpaired upload reclaims by URL before creating, whatever its
+  // reason: an Import after Chromium renumbered ids must bind, not fork.
+  if (!rid) {
+    const rebound = await tryReclaimRaindropByUrl(job, node.url, ctx);
+    // Move conflict (every match owned by another live bookmark) drops; a
+    // plain create in conflict creates — two bookmarks, two raindrops.
     if (rebound.kind === "conflict" && job.reason === "move") {
       await appendLog(
         "warn",
@@ -274,7 +362,8 @@ async function processUpload(job, ctx) {
         rebound.extras || 0,
         collectionId,
         pathLabel,
-        client
+        client,
+        segments
       );
     }
   }
@@ -288,7 +377,7 @@ async function processUpload(job, ctx) {
       title: node.title,
       collectionId,
     });
-    await recordSynced(job.id, item._id);
+    await recordSynced(job.id, item._id, edgeMeta(node, segments, collectionId));
     rid = String(item._id);
     await appendLog("info", `Synced: ${node.title || node.url}`);
   }
@@ -471,7 +560,7 @@ async function processPullCreate(job, ctx) {
     const orphan = await findUnpairedPullCreateOrphan(parentId, job.link, rid);
     if (orphan) {
       await suppressCreate(orphan.id);
-      await recordSynced(orphan.id, rid);
+      await recordSynced(orphan.id, rid, await pulledMeta(orphan, job, collectionId));
       await recordPulledFolderCollections({
         getIndex,
         index,
@@ -507,7 +596,7 @@ async function processPullCreate(job, ctx) {
   }
   await suppressCreate(node.id);
   releaseExtensionCreate(node.id);
-  await recordSynced(node.id, rid);
+  await recordSynced(node.id, rid, await pulledMeta(node, job, collectionId));
   // Learn folder→collection so later Raindrop renames can pull-rename in place.
   await recordPulledFolderCollections({
     getIndex,
@@ -520,6 +609,23 @@ async function processPullCreate(job, ctx) {
   });
   await appendLog("info", `Pulled: ${job.title || job.link}`);
   await queue.remove(job.id);
+}
+
+/**
+ * Pair-record metadata for a pulled (Raindrop→Edge) bookmark.
+ * @param {{ url?: string, title?: string, parentId?: string }} node
+ * @param {{ link?: string, title?: string }} job
+ * @param {string|number|null} collectionId
+ */
+async function pulledMeta(node, job, collectionId) {
+  const { segments } = node.parentId
+    ? await walkAncestorsFromFolder(String(node.parentId), { soft: true })
+    : { segments: [] };
+  return edgeMeta(
+    { ...node, url: node.url || job.link, title: node.title || job.title },
+    segments,
+    collectionId
+  );
 }
 
 /**
@@ -778,10 +884,75 @@ async function hasPendingDeleteForRaindrop(rid) {
   });
 }
 
+/**
+ * Edge→Raindrop delete. Evidence is the onRemoved node payload (ledger entry,
+ * or the url/title the handler put on the job). Survival check: another URL
+ * bookmark in the synced scope, not bound to a different pair, means the user
+ * removed a duplicate — rebind the pair to it and keep the raindrop.
+ */
 async function processDeleteRaindrop(job, ctx) {
   const { client } = ctx;
   const rid = job.raindropId != null ? String(job.raindropId) : null;
   if (!rid) {
+    await queue.remove(job.id);
+    return;
+  }
+  const removedBid = job.bookmarkId != null ? String(job.bookmarkId) : null;
+  const entry = removedBid ? (await getEdgeRemoved())[removedBid] : null;
+  const record = await getPairRecord(rid);
+  const url = entry?.url || job.url || record?.url || null;
+  const label = job.title || entry?.title || url || rid;
+
+  if (!entry && !job.url) {
+    // No onRemoved payload: absence of the bookmark is not intent to delete.
+    await appendLog(
+      "info",
+      `Skipped Raindrop delete for ${label}: no removal evidence; pair kept.`
+    );
+    await queue.remove(job.id);
+    return;
+  }
+  if (
+    record &&
+    removedBid &&
+    record.bookmarkId != null &&
+    String(record.bookmarkId) !== removedBid
+  ) {
+    // Pair already points at another bookmark: the removed copy was not the paired one.
+    await removeEdgeRemoved(removedBid);
+    await queue.remove(job.id);
+    return;
+  }
+
+  const treeIndex = await loadTreeIndex();
+  const pairs = await getPairs();
+  const survivor = treeEntriesForUrl(treeIndex, url).find((e) => {
+    if (!e.inScope || e.id === removedBid) return false;
+    const bound = pairs.byBookmark[e.id];
+    return bound == null || String(bound) === rid;
+  });
+  if (survivor) {
+    if (record) {
+      await applyPairChanges([
+        {
+          type: "edge",
+          raindropId: rid,
+          fromBookmarkId: record.bookmarkId,
+          record: {
+            ...record,
+            bookmarkId: survivor.id,
+            edgeParentId: survivor.parentId,
+            edgePathAtSync: survivor.path,
+            lastSeenEdgeAt: Date.now(),
+          },
+        },
+      ]);
+    }
+    if (removedBid) await removeEdgeRemoved(removedBid);
+    await appendLog(
+      "info",
+      `Kept raindrop for ${label}: another copy is still in the browser (pair rebound).`
+    );
     await queue.remove(job.id);
     return;
   }
@@ -794,20 +965,90 @@ async function processDeleteRaindrop(job, ctx) {
     if (!isNotFoundError(err)) throw err;
   }
   await clearPairWithTombstone(rid, "edge-user-delete");
-  const label = job.title || job.url || rid;
+  if (removedBid) await removeEdgeRemoved(removedBid);
   await appendLog("info", `Deleted from Raindrop: ${label} (propagated from browser).`);
   await queue.remove(job.id);
 }
 
 /**
- * Propagate a missing Raindrop item to Edge. Skips the Edge remove when the
- * paired bookmark sits under an effective `exclude` policy (hands-off subtree),
- * but still clears the pair and tombstones so reconcile does not re-queue.
+ * Raindrop→Edge delete. Re-checks the evidence against the current snapshot:
+ * a raindrop that is live again, or whose URL survives under another id,
+ * keeps the Edge bookmark (the latter rebinds the pair). Absence-signal jobs
+ * also re-check presenceDeletesEnabled and migrationPartial. Skips the Edge
+ * remove when the bookmark sits under an effective `exclude` policy but still
+ * clears the pair and tombstones so reconcile does not re-queue.
  */
 async function processDeleteEdge(job, ctx) {
-  const { config, overrides } = ctx;
+  const { client, budget, config, overrides } = ctx;
   const rid = job.raindropId != null ? String(job.raindropId) : null;
-  const bookmarkId = job.bookmarkId;
+  const record = rid ? await getPairRecord(rid) : null;
+  if (!record) {
+    // Pair already gone (rebound, repaired, or deleted by another job).
+    await queue.remove(job.id);
+    return;
+  }
+  const url = record.url || job.url || null;
+  const label = record.title || url || rid;
+
+  // Jobs queued by older versions carry no signal; hold them to the absence rules.
+  const signal = job.signal === "trash" ? "trash" : "absent";
+  if (signal === "absent") {
+    const { migrationPartial } = await getStoredPairs();
+    if (config.presenceDeletesEnabled === false || migrationPartial) {
+      await appendLog("info", `Skipped local delete for ${label}: absence-based deletes are off.`);
+      await queue.remove(job.id);
+      return;
+    }
+  }
+
+  // Survival check on an export taken after enqueue (a second, independent
+  // look), not the one that produced the signal. One export serves a batch.
+  // Jobs from older versions have no signalSeq: any usable snapshot will do.
+  const afterSeq = job.signalSeq ?? null;
+  let snapshot = null;
+  try {
+    ({ snapshot } = await ensurePresence({ client, budget, reason: "on-demand", afterSeq }));
+  } catch (err) {
+    if (err instanceof AuthError || err instanceof RateLimitError) throw err;
+  }
+  if (!isUsableForUrls(snapshot) || (afterSeq != null && (snapshot.seq || 0) <= afterSeq)) {
+    // Needs a fresh URL-indexed snapshot; defer rather than guess.
+    throw new Error(`Presence snapshot unavailable; local delete of ${label} deferred`);
+  }
+  if (snapshot.ids.has(rid)) {
+    await appendLog("info", `Kept local bookmark ${label}: the raindrop is live again.`);
+    await queue.remove(job.id);
+    return;
+  }
+
+  const treeIndex = await loadTreeIndex();
+  const pairs = await getPairs();
+  const liveIds = new Set(treeIndex.byId.keys());
+  const survivor = rebindStaleRaindropId({ ...record, url }, snapshot, pairs, liveIds);
+  if (survivor && !pairs.records[survivor.raindropId]) {
+    await applyPairChanges([
+      {
+        type: "raindrop",
+        fromRaindropId: rid,
+        toRaindropId: survivor.raindropId,
+        record: {
+          ...record,
+          url,
+          raindropId: survivor.raindropId,
+          lastSeenRaindropAt: Date.now(),
+        },
+      },
+    ]);
+    await appendLog("info", `Rebound: ${label} (Raindrop id changed); local bookmark kept.`);
+    await queue.remove(job.id);
+    return;
+  }
+
+  // Current bookmark for this pair; a stale id resolves by URL first.
+  let bookmarkId = record.bookmarkId != null ? String(record.bookmarkId) : null;
+  if (bookmarkId && !treeIndex.byId.has(bookmarkId)) {
+    bookmarkId = rebindStaleEdgeId({ ...record, url }, treeIndex, pairs)?.entry.id ?? null;
+  }
 
   if (bookmarkId) {
     // Missing node → already gone; still clear pair/tombstone below.
@@ -818,11 +1059,11 @@ async function processDeleteEdge(job, ctx) {
       try {
         const parentId = node.parentId;
         const ancestorIds = await ancestorIdsFromFolder(parentId);
-        const label = node.title || node.url || bookmarkId;
+        const nodeLabel = node.title || node.url || bookmarkId;
         if (isExcluded(ancestorIds, overrides, config.defaultPolicy)) {
           await appendLog(
             "info",
-            `Skipped local delete for excluded bookmark ${label} (raindrop gone).`
+            `Skipped local delete for excluded bookmark ${nodeLabel} (raindrop gone).`
           );
         } else {
           await suppressRemove(bookmarkId);
@@ -831,7 +1072,7 @@ async function processDeleteEdge(job, ctx) {
           if (config.pruneEmpty) await pruneIfEmpty(parentId, config, overrides);
           await appendLog(
             "info",
-            `Deleted local bookmark ${label} (propagated from Raindrop).`
+            `Deleted local bookmark ${nodeLabel} (propagated from Raindrop).`
           );
         }
       } catch {
@@ -840,11 +1081,7 @@ async function processDeleteEdge(job, ctx) {
     }
   }
 
-  if (rid) {
-    await clearPairWithTombstone(rid, "raindrop-remote-delete");
-  } else if (bookmarkId) {
-    await forgetSynced(bookmarkId);
-  }
+  await clearPairWithTombstone(rid, "raindrop-remote-delete");
   await queue.remove(job.id);
 }
 

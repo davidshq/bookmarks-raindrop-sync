@@ -106,13 +106,23 @@ export const KEY = {
   /** Poison / exhausted jobs removed from QUEUE: [{ ...job, lastError, deadAt }] */
   DEAD_LETTER: "deadLetter",
   DEDUP: "dedup", // legacy { [bookmarkId]: raindropId } — read once into PAIRS, not dual-written
-  PAIRS: "pairs", // { byBookmark: { [bookmarkId]: raindropId }, byRaindrop: { [raindropId]: bookmarkId } }
+  // v2: { v: 2, records: { [raindropId]: PairRecord }, migrationPartial? }.
+  // byBookmark / byUrlKey are derived in memory (store.js), never persisted.
+  // v1 (legacy): { byBookmark: { [bookmarkId]: raindropId }, byRaindrop: { … } }
+  PAIRS: "pairs",
+  /** v1 pair map kept after migration until the next completed reconcile finish. */
+  PAIRS_V1_BACKUP: "pairsV1Backup",
+  /** Presence snapshot, durable form: { at, ids: string[], complete, count, lastCompleteCount }. */
+  PRESENCE: "presence",
+  /** Edge→Raindrop delete evidence: { [bookmarkId]: { urlKey, url, title, at, bookmarkId, raindropId } }. */
+  EDGE_REMOVED: "edgeRemoved",
+  /** Last computed pair health (pair-health.js), shown in Options → Status. */
+  PAIR_HEALTH: "pairHealth",
   TOMBSTONES: "tombstones", // { [raindropId]: { at, reason } }
   SUPPRESS: "suppress", // { removes, creates, changes: { [bookmarkId]: expiresAt } }
   // reconcile: { cursorPage, outsideCursor, running, lastRunAt, lastSettledAt,
-  //   unsettledConfirmCatchUp, lastError, seenAcc, aliveConfirmOffset,
-  //   tombstonePruneOffset, parkedAliveIds, trashHygieneAt, trashScanComplete,
-  //   trashPairedPending, trashHygieneSource, trashHygieneNextPage }
+  //   presencePending, lastError, trashHygieneAt, trashScanComplete,
+  //   trashPairedPending, trashPendingIds, trashHygieneSource }
   RECONCILE: "reconcile",
   COLLECTION_CACHE: "collectionCache", // { [collectionPath]: collectionId }
   /** Edge folder id → Raindrop collection id (for in-place folder renames). */
@@ -129,7 +139,7 @@ export const KEY = {
 };
 
 /** Quiet-time bidirectional reconcile presets / clamps (minutes). */
-/** Quiet-time gap after a *settled* finish (alarm floor). Was 15; see right-sizing memo. */
+/** Quiet-time gap after a completed finish (alarm floor). Was 15; see right-sizing memo. */
 export const DEFAULT_RECONCILE_INTERVAL_MINUTES = 1;
 export const MIN_RECONCILE_INTERVAL_MINUTES = 1;
 export const MAX_RECONCILE_INTERVAL_MINUTES = 60;
@@ -146,11 +156,16 @@ export const DEFAULT_CONFIG = {
   /** When true, appendLog also writes to the IndexedDB long-term archive. */
   keepLongTermLog: false,
   /**
-   * Minimum gap (minutes) between *settled* heartbeat reconcile cycles when
-   * the durable queue has no Raindrop-bound jobs. Bidirectional only.
-   * Unsettled confirm catch-up ignores this gap.
+   * Minimum gap (minutes) between completed heartbeat reconcile cycles, and
+   * the minimum presence-snapshot age before a heartbeat re-exports.
+   * Bidirectional only.
    */
   reconcileIntervalMinutes: DEFAULT_RECONCILE_INTERVAL_MINUTES,
+  /**
+   * Raindrop→Edge deletes from absence in a complete presence snapshot. Off
+   * falls back to Trash-listed deletes only (rollout safety valve).
+   */
+  presenceDeletesEnabled: true,
   /**
    * Set by one-shot roots migration (legacy Edge/Favorites → Bookmarks/…).
    * @type {number|undefined}
@@ -172,7 +187,8 @@ export const HEARTBEAT_MINUTES = 1;
 
 /**
  * Quiet-time cooldown in ms from config (after normalizeConfig).
- * Applied only after a settled finish (see reconcile.js).
+ * Applied after a completed finish (see reconcile.js); also the minimum
+ * snapshot age before a heartbeat refreshes presence.
  * @param {{ reconcileIntervalMinutes?: number }|null|undefined} config
  */
 export function reconcileIntervalMs(config) {
@@ -247,12 +263,22 @@ export function drainJobsCap(pending) {
   return n >= DRAIN_BUSY_PENDING_THRESHOLD ? MAX_JOBS_PER_DRAIN_BUSY : MAX_JOBS_PER_DRAIN;
 }
 /**
- * Soft max GET /raindrop/{id} confirms per *normal* reconcile finish (shared by
- * delete-detection and tombstone prune). Primary stop is wake spendable;
- * unchecked work rotates next cycle. Unsettled confirm catch-up may use up to
- * {@link SOFT_MAX_REQS_PER_WAKE} under the same spendable/wakeCap.
+ * Presence snapshot (Raindrop export.csv) age after which on-demand consumers
+ * (upload reclaim, delete survival check, Repair, migration) refresh it. Fixed,
+ * independent of the reconcile interval; heartbeat refresh uses the interval.
  */
-export const MAX_ALIVE_CHECKS_PER_TICK = 40;
+export const PRESENCE_STALE_MS = 10 * 60 * 1000;
+/** A snapshot older than this never counts as complete for delete decisions. */
+export const PRESENCE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** A new export below this fraction of the last complete row count is incomplete. */
+export const PRESENCE_MIN_COMPLETE_FRACTION = 0.5;
+/**
+ * The shrink rule applies only when the last complete snapshot had at least
+ * this many rows; tiny libraries swing by half on ordinary edits.
+ */
+export const PRESENCE_SHRINK_MIN_ROWS = 50;
+/** Edge→Raindrop delete ledger entries older than this are pruned. */
+export const EDGE_REMOVED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** Soft max Raindrop list pages (root + outside-root) per reconcile tick. */
 export const MAX_RECONCILE_PAGES_PER_TICK = 15;
 /** Raindrop system collection for soft-deleted raindrops. */

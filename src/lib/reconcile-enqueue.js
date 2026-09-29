@@ -23,7 +23,6 @@ import { raindropCollectionId } from "./raindrop.js";
 
 export async function maybeEnqueuePullCreate(item, ctx, resolveRelative) {
   const rid = String(item._id);
-  ctx.seenIds.add(rid);
 
   if (await hasTombstone(rid)) return 0;
   if (!item.link) return 0;
@@ -176,9 +175,7 @@ export async function ensureAllowlistedOrMirrorAll(
   }
   if (ensured > 0) {
     // Paths checked/created-if-missing — not "created N folders this cycle".
-    const label = isAllowlistActive(allowlist)
-      ? "Verified allowlisted"
-      : "Verified mirrored";
+    const label = isAllowlistActive(allowlist) ? "Verified allowlisted" : "Verified mirrored";
     await appendLog("info", `${label} local folder path(s): ${ensured}.`);
   }
 }

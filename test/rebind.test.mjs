@@ -1,0 +1,194 @@
+// Stale-id rebind rules (design D3; memo invariants 3 and 4). Pure over
+// (records, tree index, snapshot).
+
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { rebindPass, rebindStaleEdgeId, rebindLogLines } from "../src/lib/pair-rebind.js";
+import { treeIndexFromList, buildTreeIndex, makeScopePredicate } from "../src/lib/tree-index.js";
+import { buildSnapshot } from "../src/lib/presence.js";
+import { makePairRecord, pairsView } from "../src/lib/store.js";
+
+const URL_A = "https://a.example/doc";
+
+function record(rid, bid, url, extra = {}) {
+  return makePairRecord(rid, { bookmarkId: bid, url, ...extra });
+}
+
+test("invariant 3: stale Edge id rebinds by URL under the same path", () => {
+  // Chromium renumbered: record's bookmark 12 is gone; the URL exists twice,
+  // once under the recorded path.
+  const tree = treeIndexFromList([
+    { id: "900", url: URL_A, path: ["Other favorites", "Elsewhere"] },
+    { id: "901", url: URL_A, path: ["Favorites bar", "Dev"] },
+  ]);
+  const records = { 7: record("7", "12", URL_A, { edgePathAtSync: ["Favorites bar", "Dev"] }) };
+  const pass = rebindPass({ records, treeIndex: tree });
+  assert.equal(pass.edgeRebinds.length, 1);
+  assert.equal(pass.edgeRebinds[0].to, "901", "prefers the copy under edgePathAtSync");
+  assert.equal(pass.edgeRebinds[0].samePath, true);
+  assert.equal(pass.records["7"].bookmarkId, "901");
+  assert.deepEqual(pass.records["7"].edgePathAtSync, ["Favorites bar", "Dev"]);
+  assert.deepEqual(pass.staleEdge, []);
+  assert.equal(pass.changes[0].type, "edge");
+  assert.equal(pass.changes[0].fromBookmarkId, "12");
+});
+
+test("stale Edge id with the URL moved elsewhere in the mirror rebinds there", () => {
+  const tree = treeIndexFromList([
+    { id: "905", url: `${URL_A}/`, path: ["Other favorites", "New"] },
+  ]);
+  const records = { 7: record("7", "12", URL_A, { edgePathAtSync: ["Favorites bar", "Dev"] }) };
+  const pass = rebindPass({ records, treeIndex: tree });
+  assert.equal(pass.records["7"].bookmarkId, "905");
+  assert.equal(pass.edgeRebinds[0].samePath, false);
+  assert.deepEqual(
+    pass.records["7"].edgePathAtSync,
+    ["Other favorites", "New"],
+    "placement updated"
+  );
+});
+
+test("bound elsewhere is not claimed; stale record stays stale (no delete)", () => {
+  const tree = treeIndexFromList([{ id: "901", url: URL_A, path: [] }]);
+  const records = {
+    7: record("7", "12", URL_A), // stale
+    8: record("8", "901", URL_A), // live pair owns the only copy
+  };
+  const pass = rebindPass({ records, treeIndex: tree });
+  assert.deepEqual(pass.edgeRebinds, []);
+  assert.deepEqual(pass.staleEdge, ["7"]);
+  assert.equal(pass.records["7"].bookmarkId, "12", "record untouched");
+  assert.equal(rebindStaleEdgeId(records["7"], tree, pairsView({ records })), null);
+});
+
+test("copies outside the synced scope are never rebound to", () => {
+  const roots = [
+    {
+      id: "0",
+      children: [
+        {
+          id: "2",
+          title: "Other favorites",
+          children: [
+            {
+              id: "50",
+              title: "Private",
+              children: [{ id: "51", url: URL_A, title: "a", parentId: "50" }],
+            },
+            {
+              id: "60",
+              title: "Raindrop",
+              children: [{ id: "61", url: URL_A, title: "a", parentId: "60" }],
+            },
+          ],
+        },
+      ],
+    },
+  ];
+  const overrides = { 50: { policy: "exclude" } };
+  const records = { 7: record("7", "12", URL_A) };
+
+  const noAllowlist = buildTreeIndex(roots, {
+    isInScope: makeScopePredicate({
+      overrides,
+      defaultPolicy: "sync-and-keep",
+      allowlistActive: false,
+    }),
+  });
+  assert.equal(noAllowlist.byId.get("51").inScope, false, "excluded folder");
+  assert.equal(noAllowlist.byId.get("61").inScope, false, "landing zone without allowlist");
+  assert.deepEqual(rebindPass({ records, treeIndex: noAllowlist }).staleEdge, ["7"]);
+
+  const withAllowlist = buildTreeIndex(roots, {
+    isInScope: makeScopePredicate({
+      overrides,
+      defaultPolicy: "sync-and-keep",
+      allowlistActive: true,
+    }),
+  });
+  assert.equal(withAllowlist.byId.get("61").inScope, true, "landing zone with allowlist");
+  assert.equal(rebindPass({ records, treeIndex: withAllowlist }).records["7"].bookmarkId, "61");
+});
+
+test("invariant 4: stale Raindrop id rebinds to the oldest surviving copy", () => {
+  const tree = treeIndexFromList([{ id: "101", url: URL_A }]);
+  // Raindrop 500 (the pair) was trashed; 300 and 400 carry the same URL.
+  const snapshot = buildSnapshot(`id,url\n400,${URL_A}\n300,${URL_A}\n`, { at: 1000 });
+  const records = { 500: record("500", "101", URL_A, { lastSeenRaindropAt: 900 }) };
+  const pass = rebindPass({ records, treeIndex: tree, snapshot });
+  assert.deepEqual(
+    pass.raindropRebinds.map((r) => [r.from, r.to]),
+    [["500", "300"]]
+  );
+  assert.equal(pass.records["300"].bookmarkId, "101", "record re-keyed; Edge bookmark kept");
+  assert.equal(pass.records["500"], undefined);
+  assert.deepEqual(pass.raindropCandidates, [], "not a delete candidate");
+});
+
+test("survivor bound to another live bookmark is not claimed; no survivor → candidate only", () => {
+  const tree = treeIndexFromList([
+    { id: "101", url: URL_A },
+    { id: "102", url: URL_A },
+  ]);
+  const snapshot = buildSnapshot(`id,url\n300,${URL_A}\n`, { at: 1000 });
+  const records = {
+    500: record("500", "101", URL_A, { lastSeenRaindropAt: 1 }),
+    300: record("300", "102", URL_A, { lastSeenRaindropAt: 1 }),
+    600: record("600", "101x", "https://gone.example/", { lastSeenRaindropAt: 1 }),
+  };
+  const pass = rebindPass({ records, treeIndex: tree, snapshot });
+  assert.deepEqual(pass.raindropRebinds, []);
+  assert.deepEqual(pass.raindropCandidates.sort(), ["500", "600"]);
+  // The pass is pure: it returns candidates, it never enqueues deletes.
+  assert.ok(pass.changes.every((c) => c.type !== "drop"));
+});
+
+test("renumber + fork shape merges into one live pair", () => {
+  // X (live) → trashed fork R1; dead Y → original R2 with the same URL.
+  const tree = treeIndexFromList([{ id: "X", url: URL_A }]);
+  const snapshot = buildSnapshot(`id,url\n2,${URL_A}\n`, { at: 1000 });
+  const records = {
+    1: record("1", "X", URL_A, { lastSeenRaindropAt: 1 }),
+    2: record("2", "Y", URL_A, { lastSeenRaindropAt: 1 }),
+  };
+  const pass = rebindPass({ records, treeIndex: tree, snapshot });
+  assert.equal(pass.records["2"].bookmarkId, "X");
+  assert.equal(pass.records["1"], undefined);
+  assert.equal(pass.raindropRebinds[0].replacedBookmarkId, "Y");
+});
+
+test("records paired after the export began are never judged absent", () => {
+  const tree = treeIndexFromList([{ id: "101", url: URL_A }]);
+  const snapshot = buildSnapshot("id,url\n", { at: 1000 });
+  const records = { 777: record("777", "101", URL_A, { lastSeenRaindropAt: 1001 }) };
+  const pass = rebindPass({ records, treeIndex: tree, snapshot });
+  assert.deepEqual(pass.raindropCandidates, []);
+});
+
+test("id-only records get their URL from the tree, the export, or a Trash hint", () => {
+  const tree = treeIndexFromList([{ id: "101", url: URL_A, path: ["Favorites bar"] }]);
+  const snapshot = buildSnapshot("id,url\n20,https://b.example/\n", { at: 1000 });
+  const records = {
+    10: makePairRecord("10", { bookmarkId: "101" }),
+    20: makePairRecord("20", { bookmarkId: "dead" }),
+    30: makePairRecord("30", { bookmarkId: "dead2" }),
+  };
+  const pass = rebindPass({
+    records,
+    treeIndex: tree,
+    snapshot,
+    urlHints: new Map([["30", "https://c.example/"]]),
+  });
+  assert.equal(pass.records["10"].url, URL_A);
+  assert.deepEqual(pass.records["10"].edgePathAtSync, ["Favorites bar"]);
+  assert.equal(pass.records["20"].url, "https://b.example/");
+  assert.equal(pass.records["30"].url, "https://c.example/");
+});
+
+test("rebind log lines cap at 20 plus a summary", () => {
+  const many = Array.from({ length: 25 }, (_, i) => ({ title: `t${i}`, to: String(i) }));
+  const lines = rebindLogLines({ edgeRebinds: many, raindropRebinds: [] });
+  assert.equal(lines.length, 21);
+  assert.equal(lines[0], "Rebound: t0 (Edge id changed)");
+  assert.match(lines[20], /Rebound 5 more pair\(s\)/);
+});

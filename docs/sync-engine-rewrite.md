@@ -176,20 +176,18 @@ should be one click.
 ## Known issues in code this rewrite deletes
 
 Found by review on 2026-09-28 and deliberately not fixed, because §4 removes
-the code they live in. If either shows up before §4 lands, fix it then.
+the code they live in. **Resolved by deletion in the `sync-engine-rewrite`
+change** (OpenSpec `openspec/changes/sync-engine-rewrite/`; rollout pending):
 
-- **Confirm-only catch-up can stall pulls.** `runConfirmCatchUp` reuses the
-  frozen `seenAcc`. Pairs created after that listing are candidates on every
-  wake; a GET finds them alive and in scope, so they are neither parked nor
-  added to `seenAcc`. Past ~80 of them (`SOFT_MAX_REQS_PER_WAKE`), catch-up
-  never settles and heartbeat stops re-listing, so remote changes only arrive
-  on **Pull now**. Symptom: Status stays in catch-up and "postponed N" does not
-  shrink. Minimal fix: add alive in-scope ids to `seenAcc` after the confirm.
-- **Check Trash can report "safe to empty" early.** Continue resumes at
-  `trashHygieneNextPage` and never re-scans page 0, where new trashes land. If
-  Trash shrank, the resumed page is past the end and reads as a complete scan,
-  and `pairedPending` from earlier clicks is dropped. Status copy only; nothing
-  is deleted because of it.
+- **Confirm-only catch-up can stall pulls.** Gone with `runConfirmCatchUp`
+  and `seenAcc`. Heartbeat no longer has a confirm-only mode; presence comes
+  from one export per quiet interval, and a finish whose due export did not
+  fit the wake (`presencePending`) completes on the next wake without
+  re-listing and without skipping cooldown forever.
+- **Check Trash can report "safe to empty" early.** Check Trash now rescans
+  from page 0 on every click (`trashHygieneNextPage` is gone), and paired ids
+  found by an earlier partial scan stay pending (`trashPendingIds`) until a
+  later scan enrolls them.
 
 ## Tests
 
@@ -205,11 +203,41 @@ tests, in priority order:
 
 ## Sequencing
 
-1. Circuit breaker (§5) — small, independent, ship first.
-2. Unconditional reclaim on create (§2) — small, removes the fork path.
-3. Export presence snapshot (§4) — medium; can coexist with confirm GETs
-   behind a flag while it proves out.
-4. Pair records + rebind rules (§1, §3) — the real change; do it once §4
-   exists so rebind has a cheap oracle.
-5. Delete the confirm-GET machinery and the parking logic.
-6. Pair health + Repair action in Status (§6).
+1. Circuit breaker (§5) — shipped in `03c265e` with the manual Repair pairs
+   dry-run.
+2. Unconditional reclaim on create (§2) — implemented. Every unpaired upload
+   looks up its URL in the presence snapshot (plus raindrops this engine
+   paired after that export began), falls back to one `searchRaindrops` when
+   the snapshot is stale and cannot be refreshed or predates the job's
+   `createAttemptedAt`, and binds instead of creating. Move conflict still
+   drops; a plain create in conflict creates. Import refreshes the snapshot
+   once before enqueuing.
+3. Export presence snapshot (§4) — implemented (`presence.js`). Not behind a
+   flag: the confirm-GET path was removed in the same change. `complete` is
+   false on a parse error, a truncated body, or a suspicious row count (below
+   half the last complete snapshot once that had ≥ 50 rows, or zero while
+   pairs exist); a second export at the same count confirms a real cleanup.
+   Durable form is ids only; URL consumers re-export after a worker restart.
+4. Pair records + rebind rules (§1, §3) — implemented (`store.js` v2 records,
+   `pair-rebind.js`, `pair-migration.js`). Delete evidence: `edgeRemoved`
+   ledger from `onRemoved` payloads, synced-scope survival check for
+   Edge→Raindrop; Trash or complete-snapshot absence plus a URL survival
+   check for Raindrop→Edge, re-run at drain time against a later export
+   (`signalSeq`). `presenceDeletesEnabled` (Status toggle) turns absence
+   deletes off without a code change.
+5. Delete the confirm-GET machinery and the parking logic — implemented in
+   the same change as 3 and 4.
+6. Pair health + Repair action in Status (§6) — implemented (`pair-health.js`;
+   Repair pairs runs the same rebind pass and reports Edge-side and
+   Raindrop-side rebinds separately from prunes).
+
+Tests run under `node --test` (`test/*.test.mjs`); invariants 1–4 and 6 have
+dedicated files (`evidence`, `reclaim`, `rebind`, `pairs`), invariant 5 is
+checklist 7.8.
+
+Items 2–6 are implemented in the `sync-engine-rewrite` change; rollout on the
+primary profile is pending. Rollout (take a Raindrop export and a copy of the
+Bookmarks file first, per `AGENTS.md`), then check: the one-line
+`Pair migration:` log entry, Status pair health with zero stale-id pairs and
+an unchanged breaker count after the first completed check, and that the
+pre-migration pair backup is dropped after the next completed check.

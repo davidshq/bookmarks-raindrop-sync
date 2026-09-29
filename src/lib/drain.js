@@ -27,10 +27,8 @@ import { buildCollectionIndex } from "./collections.js";
 import { handleClientError } from "./client-errors.js";
 import { processJob } from "./job-processors.js";
 import { migrateLegacyRaindropRoots } from "./migrate-roots.js";
-import {
-  gateDrainForBulkPrompt,
-  noteQueueDepthForBulkPrompt,
-} from "./queue-bulk-prompt.js";
+import { completePairMigration } from "./pair-migration.js";
+import { gateDrainForBulkPrompt, noteQueueDepthForBulkPrompt } from "./queue-bulk-prompt.js";
 import { createWakeBudget, finalizeWakeBudget } from "./wake-budget.js";
 
 let draining = false; // best-effort in-memory reentrancy guard (idempotent anyway)
@@ -124,6 +122,8 @@ async function drainLoop(budget) {
   } catch {
     // Logged inside ensureRootsMigrated; continue so queue still drains.
   }
+  // Fill id-only v1 pair records from the tree + export before any job reads them.
+  await completePairMigration({ client, budget });
 
   const dueJobs = await queue.due(Date.now());
   if (dueJobs.length === 0) {
@@ -175,6 +175,7 @@ async function drainLoop(budget) {
         overrides,
         cache,
         getIndex,
+        budget,
         countDelete: !released,
       });
       if (released) await consumeAllowedDeleteJob(job.id);
