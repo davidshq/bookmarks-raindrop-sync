@@ -201,7 +201,7 @@ async function finishPresenceAndDeletes({ client, budget, force, config }) {
       `Raindrop export looks incomplete (${got.snapshot.error || "unknown"}); absence-based deletes skipped.`
     );
   }
-  const trash = await listTrash(client, budget, "reconcile");
+  const trash = await listTrash(client, budget);
   const treeIndex = await loadTreeIndex();
   await applyDeleteEvidence({
     snapshot: got.snapshot,
@@ -215,20 +215,18 @@ async function finishPresenceAndDeletes({ client, budget, force, config }) {
 }
 
 /**
- * List Raindrop Trash (paged, from page 0). Delete-detection only — never
- * pull-create/update from Trash. Heartbeat shares leftover spendable
- * (≤ MAX_TRASH_PAGES_PER_TICK); Check Trash may use more of the wake.
- * @param {"reconcile"|"check-trash"} source
+ * Heartbeat Trash peek (paged, from page 0). Delete-detection only — never
+ * pull-create/update from Trash. Shares leftover spendable
+ * (≤ MAX_TRASH_PAGES_PER_TICK); Check Trash uses sweepTrash instead.
  * @returns {Promise<{ ids: Set<string>, links: Map<string, string>, scanComplete: boolean, pages: number }>}
  */
-async function listTrash(client, budget, source) {
+async function listTrash(client, budget) {
   const ids = new Set();
   const links = new Map();
-  const softPageCap =
-    source === "check-trash"
-      ? Math.max(MAX_TRASH_PAGES_PER_TICK, SOFT_MAX_REQS_PER_WAKE)
-      : MAX_TRASH_PAGES_PER_TICK;
-  const trashCap = Math.min(softPageCap, budget?.allowance?.() ?? softPageCap);
+  const trashCap = Math.min(
+    MAX_TRASH_PAGES_PER_TICK,
+    budget?.allowance?.() ?? MAX_TRASH_PAGES_PER_TICK
+  );
   let page = 0;
   let pages = 0;
   let scanComplete = false;
@@ -251,6 +249,76 @@ async function listTrash(client, budget, source) {
     }
     page++;
   }
+  return { ids, links, scanComplete, pages };
+}
+
+/** A Check Trash sweep that has not started (or restarted). */
+function freshTrashSweep() {
+  return { phase: "tail", page: 0, seen: [], count: null, clicks: 0 };
+}
+
+/**
+ * Check Trash listing. One click reads a bounded number of pages, so a Trash
+ * larger than that resumes on the next click (reconcile state `trashSweep`).
+ * The sweep is complete when:
+ *  - one click read the whole Trash, or
+ *  - the tail reached the end and a head rescan from page 0 found a page
+ *    with nothing new (soft-deletes since the sweep began land at the top).
+ * A Trash count lower than the last page reported means items left Trash
+ * and unread items may have slid onto pages already read: restart.
+ * @returns {Promise<{ ids: Set<string>, links: Map<string, string>, scanComplete: boolean, pages: number }>}
+ */
+async function sweepTrash(client, budget) {
+  const softPageCap = Math.max(MAX_TRASH_PAGES_PER_TICK, SOFT_MAX_REQS_PER_WAKE);
+  const cap = Math.min(softPageCap, budget?.allowance?.() ?? softPageCap);
+  const ids = new Set();
+  const links = new Map();
+  let sweep = (await getReconcileState()).trashSweep ?? freshTrashSweep();
+  let seen = new Set(sweep.seen);
+  sweep = { ...sweep, clicks: sweep.clicks + 1 };
+  let pages = 0;
+  let scanComplete = false;
+  while (pages < cap && (!budget || budget.canSpend(1))) {
+    const { items, count } = await client.listRaindrops(RAINDROP_TRASH_COLLECTION_ID, {
+      page: sweep.page,
+      perPage: RAINDROP_LIST_PER_PAGE,
+      nested: false,
+    });
+    pages++;
+    client.throwIfShouldPause();
+    let fresh = 0;
+    for (const item of items) {
+      const rid = String(item._id ?? item.id);
+      ids.add(rid); // enroll whatever this click saw, restart or not
+      if (item.link) links.set(rid, item.link);
+      if (!seen.has(rid)) {
+        seen.add(rid);
+        fresh++;
+      }
+    }
+    if (sweep.count != null && count < sweep.count) {
+      sweep = { ...freshTrashSweep(), clicks: sweep.clicks, count };
+      seen = new Set();
+      continue;
+    }
+    sweep.count = count;
+    const atEnd = isListPageDone(sweep.page, RAINDROP_LIST_PER_PAGE, items, count);
+    if (sweep.phase === "tail") {
+      if (atEnd && sweep.clicks === 1 && sweep.page + 1 === pages) {
+        scanComplete = true; // one uninterrupted read from page 0
+        break;
+      }
+      if (atEnd) {
+        sweep = { ...sweep, phase: "head", page: 0 };
+        continue;
+      }
+    } else if (atEnd || fresh === 0) {
+      scanComplete = true;
+      break;
+    }
+    sweep.page++;
+  }
+  await setReconcileState({ trashSweep: scanComplete ? null : { ...sweep, seen: [...seen] } });
   return { ids, links, scanComplete, pages };
 }
 
@@ -386,8 +454,9 @@ async function pruneTombstonesFromSnapshot(snapshot) {
 }
 
 /**
- * Check Trash (Options Status): list Trash from page 0, enroll paired deletes,
- * refresh the hygiene snapshot. Does not run a full reconcile listing.
+ * Check Trash (Options Status): continue the Trash sweep (sweepTrash), enroll
+ * paired deletes, refresh the hygiene snapshot. Does not run a full reconcile
+ * listing.
  * @param {{
  *   client: import("./raindrop.js").RaindropClient,
  *   budget?: import("./wake-budget.js").WakeBudget|null,
@@ -398,7 +467,7 @@ export async function runTrashHygienePeek({ client, budget }) {
   const config = await getConfig();
   const got = await ensurePresence({ client, budget, reason: "on-demand" });
   client.throwIfShouldPause();
-  const trash = await listTrash(client, budget, "check-trash");
+  const trash = await sweepTrash(client, budget);
   if (trash.pages > 0) {
     await applyDeleteEvidence({
       snapshot: got.snapshot,

@@ -3,9 +3,12 @@
 // Apply debt (queued delete-edge) is separate — Status pending / Raindrop→Edge
 // covers that. Safe-to-empty only needs a complete Trash peek with zero paired
 // ids still needing enroll (not tombstoned, no queued delete-edge).
-// Check Trash always rescans from page 0 (new soft-deletes land there); ids a
-// partial scan found stay pending until a later scan enrolls them. Emptying
-// Trash early only delays a delete: snapshot absence still finds it.
+// Check Trash sweeps Trash across clicks (reconcile-finish sweepTrash): each
+// click resumes where the last stopped, and the sweep completes only after a
+// head rescan finds nothing new. Ids a partial sweep found stay pending until
+// enrolled. Emptying Trash early loses the Trash signal: snapshot absence
+// still finds the delete only while absence deletes are enabled and the pair
+// migration is complete.
 // See docs/raindrop-delete-detection-options.md and OpenSpec trash-safe-status.
 
 import { setReconcileState } from "./store.js";
@@ -57,7 +60,7 @@ export function formatTrashSafeNotice(snapshot, state = deriveTrashSafeState(sna
   }
 }
 
-/** Button label for the trash hygiene control (every click rescans from page 0). */
+/** Button label for the trash hygiene control (each click continues the sweep). */
 export function trashSafeButtonLabel(_state) {
   return "Check Trash";
 }
