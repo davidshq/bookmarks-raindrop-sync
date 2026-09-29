@@ -31,7 +31,7 @@ import {
 } from "./constants.js";
 import { withLock } from "./mutex.js";
 import { appendArchiveEntry } from "./log-archive.js";
-import { urlMatchKeys } from "./url-match.js";
+import { primaryUrlKey } from "./url-match.js";
 
 async function read(key, fallback) {
   const got = await chrome.storage.local.get(key);
@@ -66,6 +66,57 @@ async function writeMany(obj) {
     await noteStorageWriteFailure(keys.join(","), err);
     throw err;
   }
+}
+
+/** Present, non-empty id (bookmark / folder ids are strings; "" is unset). */
+function hasId(id) {
+  return id != null && id !== "";
+}
+
+/** True when a pair record is bound to bookmark id `bid` (string). */
+function isBoundTo(rec, bid) {
+  return rec?.bookmarkId != null && String(rec.bookmarkId) === bid;
+}
+
+/** Rolling delete-breaker window has lapsed (or never started). */
+function breakerWindowExpired(startAt, now) {
+  return startAt == null || now - startAt >= DELETE_BREAKER_WINDOW_MS;
+}
+
+/**
+ * Locked read-modify-write of one key. `fn` mutates `value` in place (or
+ * returns a replacement object); returning `false` skips the write. Every
+ * writer of a map-valued key goes through this so drain and reconcile cannot
+ * interleave get→set and drop each other's update.
+ * @template T
+ * @param {string} key
+ * @param {T} fallback
+ * @param {(value: T) => T | false | void} fn
+ */
+async function mutateKey(key, fallback, fn) {
+  return withLock(async () => {
+    const value = await read(key, fallback);
+    const out = fn(value);
+    if (out === false) return;
+    await write(key, out && typeof out === "object" ? out : value);
+  });
+}
+
+/**
+ * Locked shallow patch of an object-valued key read through `get` (which
+ * applies defaults). Resolves to the merged value.
+ */
+async function patchKey(key, get, patch, normalize = (v) => v) {
+  return withLock(async () => {
+    const next = normalize({ ...(await get()), ...patch });
+    await write(key, next);
+    return next;
+  });
+}
+
+/** Whole-key replace, serialized with mutateKey writers of the same key. */
+async function replaceKey(key, value) {
+  return withLock(() => write(key, value));
 }
 
 async function noteStorageWriteFailure(keyLabel, err) {
@@ -164,9 +215,7 @@ export async function healStoredConfig() {
 }
 
 export async function setConfig(patch) {
-  const next = normalizeConfig({ ...(await getConfig()), ...patch });
-  await write(KEY.CONFIG, next);
-  return next;
+  return patchKey(KEY.CONFIG, getConfig, patch, normalizeConfig);
 }
 
 /** Raindrop-only collection allowlist (drafted with folder policies in Options). */
@@ -187,19 +236,19 @@ export async function getOverrides() {
 
 /** Replace the entire overrides map in one write (options Save). */
 export async function setOverrides(overrides) {
-  await write(KEY.OVERRIDES, overrides ?? {});
+  await replaceKey(KEY.OVERRIDES, overrides ?? {});
 }
 
 export async function setOverride(folderId, policy, path) {
-  const overrides = await getOverrides();
-  overrides[folderId] = { policy, path };
-  await write(KEY.OVERRIDES, overrides);
+  await mutateKey(KEY.OVERRIDES, {}, (overrides) => {
+    overrides[folderId] = { policy, path };
+  });
 }
 
 export async function clearOverride(folderId) {
-  const overrides = await getOverrides();
-  delete overrides[folderId];
-  await write(KEY.OVERRIDES, overrides);
+  await mutateKey(KEY.OVERRIDES, {}, (overrides) => {
+    delete overrides[folderId];
+  });
 }
 
 /* ---- bidirectional pairs: records keyed by raindrop id ---- */
@@ -239,11 +288,8 @@ export async function clearOverride(folderId) {
  * }} PairsView
  */
 
-/** Primary URL key stored on a record (strongest urlMatchKeys entry). */
-export function primaryUrlKey(url) {
-  if (!url) return null;
-  return urlMatchKeys(url)[0] ?? null;
-}
+/** Primary URL key stored on a record; defined beside urlMatchKeys. */
+export { primaryUrlKey };
 
 /**
  * Build a record. Missing fields stay null; `url` also sets `urlKey`.
@@ -417,7 +463,7 @@ export async function recordSynced(bookmarkId, raindropId, meta = {}) {
   const now = Date.now();
   return mutatePairs((records) => {
     for (const [r, rec] of Object.entries(records)) {
-      if (r !== rid && rec?.bookmarkId != null && String(rec.bookmarkId) === bid) {
+      if (r !== rid && isBoundTo(rec, bid)) {
         delete records[r];
       }
     }
@@ -440,7 +486,7 @@ export async function forgetSynced(bookmarkId) {
   const bid = String(bookmarkId);
   return mutatePairs((records) => {
     for (const [r, rec] of Object.entries(records)) {
-      if (rec?.bookmarkId != null && String(rec.bookmarkId) === bid) delete records[r];
+      if (isBoundTo(rec, bid)) delete records[r];
     }
   });
 }
@@ -501,8 +547,7 @@ export async function applyPairChanges(changes) {
   if (!changes?.length) return [];
   return mutatePairs((records) => {
     const applied = [];
-    const boundTo = (bid) =>
-      Object.values(records).find((r) => r?.bookmarkId != null && String(r.bookmarkId) === bid);
+    const boundTo = (bid) => Object.values(records).find((r) => isBoundTo(r, bid));
     for (const c of changes) {
       if (c.type === "edge" || c.type === "fill") {
         const cur = records[c.raindropId];
@@ -577,29 +622,22 @@ export async function getEdgeRemoved() {
  * @param {EdgeRemovedEntry[]} entries
  */
 export async function addEdgeRemoved(entries, now = Date.now()) {
-  return withLock(async () => {
-    const ledger = await read(KEY.EDGE_REMOVED, {});
+  await mutateKey(KEY.EDGE_REMOVED, {}, (ledger) => {
     pruneLedger(ledger, now);
     for (const e of entries) ledger[String(e.bookmarkId)] = { ...e, at: e.at ?? now };
-    await write(KEY.EDGE_REMOVED, ledger);
   });
 }
 
 export async function removeEdgeRemoved(bookmarkId) {
-  return withLock(async () => {
-    const ledger = await read(KEY.EDGE_REMOVED, {});
-    if (!(String(bookmarkId) in ledger)) return;
+  await mutateKey(KEY.EDGE_REMOVED, {}, (ledger) => {
+    if (!(String(bookmarkId) in ledger)) return false;
     delete ledger[String(bookmarkId)];
-    await write(KEY.EDGE_REMOVED, ledger);
   });
 }
 
 /** Drop ledger entries older than EDGE_REMOVED_TTL_MS. */
 export async function pruneEdgeRemoved(now = Date.now()) {
-  return withLock(async () => {
-    const ledger = await read(KEY.EDGE_REMOVED, {});
-    if (pruneLedger(ledger, now)) await write(KEY.EDGE_REMOVED, ledger);
-  });
+  await mutateKey(KEY.EDGE_REMOVED, {}, (ledger) => pruneLedger(ledger, now) && ledger);
 }
 
 function pruneLedger(ledger, now) {
@@ -635,9 +673,9 @@ export async function hasTombstone(raindropId) {
 }
 
 export async function addTombstone(raindropId, reason) {
-  const stones = await getTombstones();
-  stones[String(raindropId)] = { at: Date.now(), reason: reason || "delete" };
-  await write(KEY.TOMBSTONES, stones);
+  await mutateKey(KEY.TOMBSTONES, {}, (stones) => {
+    stones[String(raindropId)] = { at: Date.now(), reason: reason || "delete" };
+  });
 }
 
 /**
@@ -651,23 +689,24 @@ export async function clearPairWithTombstone(raindropId, reason) {
 }
 
 export async function clearTombstone(raindropId) {
-  const stones = await getTombstones();
-  delete stones[String(raindropId)];
-  await write(KEY.TOMBSTONES, stones);
+  await mutateKey(KEY.TOMBSTONES, {}, (stones) => {
+    delete stones[String(raindropId)];
+  });
 }
 
 /** Drop tombstones for raindrop ids confirmed absent after a reconcile pass. */
 export async function pruneTombstones(absentRaindropIds) {
-  const stones = await getTombstones();
-  let changed = false;
-  for (const id of absentRaindropIds) {
-    const key = String(id);
-    if (stones[key]) {
-      delete stones[key];
-      changed = true;
+  await mutateKey(KEY.TOMBSTONES, {}, (stones) => {
+    let changed = false;
+    for (const id of absentRaindropIds) {
+      const key = String(id);
+      if (stones[key]) {
+        delete stones[key];
+        changed = true;
+      }
     }
-  }
-  if (changed) await write(KEY.TOMBSTONES, stones);
+    return changed && stones;
+  });
 }
 
 /* ---- suppressions for extension-authored create/remove ---- */
@@ -783,18 +822,18 @@ export async function consumeRemoveSuppression(bookmarkId) {
 
 /** Suppress onCreated for this bookmark id. Not the URL — a second copy of the same link must still sync. */
 export async function suppressCreate(bookmarkId) {
-  if (bookmarkId == null || bookmarkId === "") return;
+  if (!hasId(bookmarkId)) return;
   return suppressKey("creates", String(bookmarkId));
 }
 
 export async function consumeCreateSuppression(bookmarkId) {
-  if (bookmarkId == null || bookmarkId === "") return false;
+  if (!hasId(bookmarkId)) return false;
   return consumeKey("creates", String(bookmarkId));
 }
 
 /** Suppress onMoved/onChanged echo when reconcile applies a Raindrop→Edge update. */
 export async function suppressChange(bookmarkId) {
-  if (!bookmarkId) return;
+  if (!hasId(bookmarkId)) return;
   return suppressKey("changes", String(bookmarkId));
 }
 
@@ -803,7 +842,7 @@ export async function suppressChange(bookmarkId) {
  * onChanged and onMoved may both fire for one pull-update; both must stay quiet.
  */
 export async function isChangeSuppressed(bookmarkId) {
-  if (!bookmarkId) return false;
+  if (!hasId(bookmarkId)) return false;
   return withLock(async () => {
     const suppress = await getSuppress();
     const now = Date.now();
@@ -855,9 +894,7 @@ export async function getReconcileState() {
 }
 
 export async function setReconcileState(patch) {
-  const next = { ...(await getReconcileState()), ...patch };
-  await write(KEY.RECONCILE, next);
-  return next;
+  return patchKey(KEY.RECONCILE, getReconcileState, patch);
 }
 
 /** Remove confirm-GET / catch-up / parking fields left by older versions. */
@@ -877,25 +914,25 @@ export async function getCollectionCache() {
 
 /** Replace the entire path→collectionId cache (used by roots migration). */
 export async function setCollectionCache(cache) {
-  await write(KEY.COLLECTION_CACHE, cache && typeof cache === "object" ? cache : {});
+  await replaceKey(KEY.COLLECTION_CACHE, cache && typeof cache === "object" ? cache : {});
 }
 
 export async function cacheCollection(path, collectionId) {
-  const cache = await getCollectionCache();
-  cache[path] = collectionId;
-  await write(KEY.COLLECTION_CACHE, cache);
+  await mutateKey(KEY.COLLECTION_CACHE, {}, (cache) => {
+    cache[path] = collectionId;
+  });
 }
 
 /** Drop one path→id entry after the live Raindrop index no longer has that id. */
 export async function uncacheCollection(path) {
-  const cache = await getCollectionCache();
-  if (!(path in cache)) return;
-  delete cache[path];
-  await write(KEY.COLLECTION_CACHE, cache);
+  await mutateKey(KEY.COLLECTION_CACHE, {}, (cache) => {
+    if (!(path in cache)) return false;
+    delete cache[path];
+  });
 }
 
 export async function clearCollectionCache() {
-  await write(KEY.COLLECTION_CACHE, {});
+  await replaceKey(KEY.COLLECTION_CACHE, {});
 }
 
 /**
@@ -905,12 +942,17 @@ export async function clearCollectionCache() {
  * @param {string} newTitle
  */
 export async function rewriteCollectionCacheForRename(collectionId, newTitle) {
-  const cache = await getCollectionCache();
-  const target = String(collectionId);
+  await mutateKey(KEY.COLLECTION_CACHE, {}, (cache) =>
+    renameCachePaths(cache, String(collectionId), newTitle)
+  );
+}
+
+/** @returns {Record<string, unknown> | false} rewritten cache, or false when untouched */
+function renameCachePaths(cache, target, newTitle) {
   const oldPaths = Object.entries(cache)
     .filter(([, id]) => String(id) === target)
     .map(([path]) => path);
-  if (!oldPaths.length) return;
+  if (!oldPaths.length) return false;
 
   const next = { ...cache };
   for (const oldPath of oldPaths) {
@@ -926,7 +968,7 @@ export async function rewriteCollectionCacheForRename(collectionId, newTitle) {
       }
     }
   }
-  await write(KEY.COLLECTION_CACHE, next);
+  return next;
 }
 
 /* ---- Edge folder id → Raindrop collection id (folder renames) ---- */
@@ -936,26 +978,26 @@ export async function getFolderCollections() {
 }
 
 export async function getFolderCollectionId(folderId) {
-  if (folderId == null || folderId === "") return null;
+  if (!hasId(folderId)) return null;
   const map = await getFolderCollections();
   const id = map[String(folderId)];
   return id != null ? id : null;
 }
 
 export async function recordFolderCollection(folderId, collectionId) {
-  if (folderId == null || folderId === "" || collectionId == null) return;
-  const map = await getFolderCollections();
-  map[String(folderId)] = collectionId;
-  await write(KEY.FOLDER_COLLECTIONS, map);
+  if (!hasId(folderId) || collectionId == null) return;
+  await mutateKey(KEY.FOLDER_COLLECTIONS, {}, (map) => {
+    map[String(folderId)] = collectionId;
+  });
 }
 
 export async function clearFolderCollection(folderId) {
-  if (folderId == null || folderId === "") return;
-  const map = await getFolderCollections();
+  if (!hasId(folderId)) return;
   const key = String(folderId);
-  if (!(key in map)) return;
-  delete map[key];
-  await write(KEY.FOLDER_COLLECTIONS, map);
+  await mutateKey(KEY.FOLDER_COLLECTIONS, {}, (map) => {
+    if (!(key in map)) return false;
+    delete map[key];
+  });
 }
 
 /* ---- status + log (surfaced in the UI) ---- */
@@ -1019,7 +1061,7 @@ export async function getStatus() {
 export async function getDeleteBreaker(now = Date.now()) {
   const status = await getStatus();
   const startAt = status.deleteWindowStartAt;
-  const expired = startAt == null || now - startAt >= DELETE_BREAKER_WINDOW_MS;
+  const expired = breakerWindowExpired(startAt, now);
   return {
     count: expired ? 0 : Number(status.deleteWindowCount) || 0,
     startAt: expired ? null : startAt,
@@ -1044,7 +1086,7 @@ export async function noteDeleteExecuted(now = Date.now()) {
   return withLock(async () => {
     const status = await getStatus();
     const startAt = status.deleteWindowStartAt;
-    const expired = startAt == null || now - startAt >= DELETE_BREAKER_WINDOW_MS;
+    const expired = breakerWindowExpired(startAt, now);
     await setStatusUnlocked({
       deleteWindowStartAt: expired ? now : startAt,
       deleteWindowCount: expired ? 1 : (Number(status.deleteWindowCount) || 0) + 1,

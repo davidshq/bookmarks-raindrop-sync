@@ -13,7 +13,7 @@
 // mode must not auto-exit and undo a saved opt-in (especially with
 // existing-only, where an empty allowlist skips all Raindrop-only creates).
 
-import { getById, walkCollectionAncestors, collectionPathFromRoot } from "./collections.js";
+import { getById, walkCollectionAncestors, isUnderRoot } from "./collections.js";
 import { RAINDROP_FOLDER_MODE } from "./constants.js";
 
 /**
@@ -34,7 +34,7 @@ export function isAllowlistActive(allowlist) {
  */
 export function isInScopedListing(collectionId, index, rootId, allowlist) {
   if (collectionId == null || !index?.byId) return false;
-  if (collectionPathFromRoot(index, collectionId, rootId).length) return true;
+  if (isUnderRoot(index, collectionId, rootId)) return true;
   return isCollectionAllowed(collectionId, index, rootId, allowlist);
 }
 

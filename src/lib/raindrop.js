@@ -18,7 +18,17 @@
 //
 // X-RateLimit-Reset is normalized once via #parseResetAt (epoch ms or seconds).
 
-import { RAINDROP_API, RATE_LIMIT_FALLBACK_MS, RATE_LIMIT_RESERVE } from "./constants.js";
+import {
+  RAINDROP_API,
+  RAINDROP_LIST_PER_PAGE,
+  RATE_LIMIT_FALLBACK_MS,
+  RATE_LIMIT_RESERVE,
+} from "./constants.js";
+
+/** Finite-ish number from a header / stored value, or null when absent or NaN. */
+export function numberOrNull(v) {
+  return v != null && !Number.isNaN(Number(v)) ? Number(v) : null;
+}
 
 export class AuthError extends Error {}
 export class RateLimitError extends Error {
@@ -138,12 +148,10 @@ export class RaindropClient {
    * @param {{ remaining?: number|null, resetAt?: number|null }} window
    */
   hydrateRateWindow(window) {
-    if (window?.remaining != null && !Number.isNaN(Number(window.remaining))) {
-      this._remaining = Number(window.remaining);
-    }
-    if (window?.resetAt != null && !Number.isNaN(Number(window.resetAt))) {
-      this._resetAt = Number(window.resetAt);
-    }
+    const remaining = numberOrNull(window?.remaining);
+    if (remaining != null) this._remaining = remaining;
+    const resetAt = numberOrNull(window?.resetAt);
+    if (resetAt != null) this._resetAt = resetAt;
   }
 
   /**
@@ -221,17 +229,14 @@ export class RaindropClient {
    * @returns {number|null}
    */
   #parseResetAt(res) {
-    const reset = res.headers.get("X-RateLimit-Reset");
-    if (reset == null || Number.isNaN(Number(reset))) return null;
-    const n = Number(reset);
+    const n = numberOrNull(res.headers.get("X-RateLimit-Reset"));
+    if (n == null) return null;
     return n > 1e12 ? n : n * 1000;
   }
 
   #noteRateHeaders(res) {
-    const remaining = res.headers.get("X-RateLimit-Remaining");
-    if (remaining != null && !Number.isNaN(Number(remaining))) {
-      this._remaining = Number(remaining);
-    }
+    const remaining = numberOrNull(res.headers.get("X-RateLimit-Remaining"));
+    if (remaining != null) this._remaining = remaining;
     const resetAt = this.#parseResetAt(res);
     if (resetAt != null) this._resetAt = resetAt;
   }
@@ -315,11 +320,11 @@ export class RaindropClient {
    */
   async listRaindrops(
     collectionId,
-    { page = 0, perPage = 50, nested = false, search = undefined } = {}
+    { page = 0, perPage = RAINDROP_LIST_PER_PAGE, nested = false, search = undefined } = {}
   ) {
     const params = new URLSearchParams({
       page: String(page),
-      perpage: String(Math.min(perPage, 50)),
+      perpage: String(Math.min(perPage, RAINDROP_LIST_PER_PAGE)),
     });
     if (nested) params.set("nested", "true");
     if (search != null && String(search).trim() !== "") {
@@ -338,7 +343,7 @@ export class RaindropClient {
    * @param {string} query
    * @param {{ perPage?: number }} [opts]
    */
-  async searchRaindrops(query, { perPage = 50 } = {}) {
+  async searchRaindrops(query, { perPage = RAINDROP_LIST_PER_PAGE } = {}) {
     return this.listRaindrops(0, { page: 0, perPage, search: query });
   }
 

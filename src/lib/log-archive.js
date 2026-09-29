@@ -76,19 +76,35 @@ function toArchiveRecord(entry, id) {
 }
 
 /**
+ * Open the archive, run `fn` against the object store in one transaction, and
+ * resolve with its result once the transaction completes. Requests issued in
+ * `fn` must be chained from their callbacks so the transaction does not
+ * auto-commit across an await.
+ * @template T
+ * @param {IDBTransactionMode} mode
+ * @param {(store: IDBObjectStore) => T | Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+async function withStore(mode, fn) {
+  const db = await openDb();
+  try {
+    const tx = db.transaction(STORE, mode);
+    const result = await fn(tx.objectStore(STORE));
+    await waitTx(tx);
+    return result;
+  } finally {
+    db.close();
+  }
+}
+
+/**
  * Store one activity line. If the newest row matches level and message, update
  * it (consecutive coalesce). Otherwise append, then prune oldest entries over
  * LOG_ARCHIVE_LIMIT.
- *
- * Cursor and follow-up requests stay inside the transaction callback so the
- * transaction does not auto-commit across an await.
  * @param {{ at: number, level: string, message: string, ats?: number[] }} entry
  */
 export async function appendArchiveEntry(entry) {
-  const db = await openDb();
-  try {
-    const tx = db.transaction(STORE, "readwrite");
-    const store = tx.objectStore(STORE);
+  await withStore("readwrite", (store) => {
     const cursorReq = store.openCursor(null, "prev");
     cursorReq.onsuccess = () => {
       const newest = cursorReq.result?.value;
@@ -113,23 +129,12 @@ export async function appendArchiveEntry(entry) {
         };
       };
     };
-    await waitTx(tx);
-  } finally {
-    db.close();
-  }
+  });
 }
 
 /** @returns {Promise<number>} */
 export async function countArchiveEntries() {
-  const db = await openDb();
-  try {
-    const tx = db.transaction(STORE, "readonly");
-    const count = await reqToPromise(tx.objectStore(STORE).count());
-    await waitTx(tx);
-    return count;
-  } finally {
-    db.close();
-  }
+  return withStore("readonly", (store) => reqToPromise(store.count()));
 }
 
 /**
@@ -137,30 +142,13 @@ export async function countArchiveEntries() {
  * @returns {Promise<Array<{ at: number, level: string, message: string, ats?: number[] }>>}
  */
 export async function exportArchiveEntries() {
-  const db = await openDb();
-  try {
-    const tx = db.transaction(STORE, "readonly");
-    /** @type {Array<{ at: number, level: string, message: string, ats?: number[], id?: number }>} */
-    const all = await reqToPromise(tx.objectStore(STORE).getAll());
-    await waitTx(tx);
-    return all.map(({ at, level, message, ats }) => {
-      const row = { at, level, message };
-      if (Array.isArray(ats) && ats.length > 0) row.ats = ats;
-      return row;
-    });
-  } finally {
-    db.close();
-  }
+  const all = await withStore("readonly", (store) => reqToPromise(store.getAll()));
+  return all.map((row) => toArchiveRecord(row));
 }
 
 /** Remove every archived entry. Recent storage.local log is untouched. */
 export async function clearArchive() {
-  const db = await openDb();
-  try {
-    const tx = db.transaction(STORE, "readwrite");
-    tx.objectStore(STORE).clear();
-    await waitTx(tx);
-  } finally {
-    db.close();
-  }
+  await withStore("readwrite", (store) => {
+    store.clear();
+  });
 }

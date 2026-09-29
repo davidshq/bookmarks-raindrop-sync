@@ -24,7 +24,7 @@ import { runTrashHygienePeek } from "./reconcile-finish.js";
 import { handleClientError } from "./client-errors.js";
 import { drain } from "./drain.js";
 import { isBulkDrainPausedNow } from "./queue-bulk-prompt.js";
-import { createWakeBudget, finalizeWakeBudget } from "./wake-budget.js";
+import { withWakeBudget } from "./wake-budget.js";
 import { buildTrashSafePayload } from "./trash-hygiene.js";
 import * as queue from "./queue.js";
 
@@ -46,17 +46,41 @@ export async function refreshReconcileSkipAfterBulkResume() {
   await clearReconcileSkip();
 }
 
+async function rateLimitedUntilNow() {
+  return (await getStatus()).rateLimitedUntil ?? null;
+}
+
+/** Stamp a reconcile skip line for Status, with current queue depth. */
+async function noteSkip(reason) {
+  await noteReconcileSkip(reason, { pending: await queue.size() });
+}
+
+/** Record a reconcile result's skip reason, or clear a stale one on a real run. */
+async function noteReconcileOutcome(result) {
+  if (result?.skipped && result.reason) await noteSkip(result.reason);
+  else if (!result?.skipped) await clearReconcileSkip();
+}
+
 /** Skip payload for Pull now / UI wait-and-resume. */
 async function rateLimitedSkipResult() {
-  await noteReconcileSkip("rate_limited", { pending: await queue.size() });
-  const { rateLimitedUntil } = await getStatus();
+  await noteSkip("rate_limited");
   return {
     enqueued: 0,
     pages: 0,
     done: false,
     skipped: true,
     reason: "rate_limited",
-    rateLimitedUntil: rateLimitedUntil ?? null,
+    rateLimitedUntil: await rateLimitedUntilNow(),
+  };
+}
+
+/** Check Trash answer while Raindrop is rate-limited: last known hygiene. */
+async function rateLimitedTrashResult() {
+  return {
+    ok: false,
+    reason: "rate_limited",
+    rateLimitedUntil: await rateLimitedUntilNow(),
+    trashSafe: buildTrashSafePayload(await getReconcileState()),
   };
 }
 
@@ -67,58 +91,48 @@ async function rateLimitedSkipResult() {
  * Returns `rateLimitedUntil` on rate_limited skips so the UI can wait and resume.
  */
 export async function reconcileNow() {
-  const budget = await createWakeBudget({ mode: "full" });
-  try {
-    if (await isRateLimited()) {
-      return await rateLimitedSkipResult();
-    }
-    const result = await reconcile({ force: true, budget });
-    if (result?.skipped && result.reason) {
-      await noteReconcileSkip(result.reason, { pending: await queue.size() });
-      if (result.reason === "rate_limited") {
-        const { rateLimitedUntil } = await getStatus();
-        return { ...result, rateLimitedUntil: rateLimitedUntil ?? null };
-      }
-    } else if (!result?.skipped) {
-      await clearReconcileSkip();
-    }
-    if (await isRateLimited()) {
-      // Skip drain under the pause. If listing already finished, keep done so
-      // Pull now can end this click instead of waiting and calling again.
-      if (result?.done) return result;
-      const { rateLimitedUntil } = await getStatus();
-      return {
-        ...(result ?? { enqueued: 0, pages: 0, done: false }),
-        skipped: true,
-        reason: "rate_limited",
-        rateLimitedUntil: rateLimitedUntil ?? null,
-      };
-    }
-    await drain({ budget });
-    return result;
-  } catch (err) {
-    if (await handleClientError(err)) {
-      if (err instanceof RateLimitError) {
+  return withWakeBudget(async (budget) => {
+    try {
+      if (await isRateLimited()) {
         return await rateLimitedSkipResult();
       }
+      const result = await reconcile({ force: true, budget });
+      await noteReconcileOutcome(result);
+      if (result?.skipped && result.reason === "rate_limited") {
+        return { ...result, rateLimitedUntil: await rateLimitedUntilNow() };
+      }
+      if (await isRateLimited()) {
+        // Skip drain under the pause. If listing already finished, keep done so
+        // Pull now can end this click instead of waiting and calling again.
+        if (result?.done) return result;
+        return {
+          ...(result ?? { enqueued: 0, pages: 0, done: false }),
+          skipped: true,
+          reason: "rate_limited",
+          rateLimitedUntil: await rateLimitedUntilNow(),
+        };
+      }
+      await drain({ budget });
+      return result;
+    } catch (err) {
+      if (await handleClientError(err)) {
+        if (err instanceof RateLimitError) {
+          return await rateLimitedSkipResult();
+        }
+        throw err;
+      }
+      await appendLog("error", `Pull failed: ${err.message}`);
       throw err;
     }
-    await appendLog("error", `Pull failed: ${err.message}`);
-    throw err;
-  } finally {
-    await finalizeWakeBudget(budget, { ranWork: budget.spent > 0 });
-  }
+  });
 }
 
 /** Full-wake drain (Options Drain now / message API). */
 export async function drainNow() {
-  const budget = await createWakeBudget({ mode: "full" });
-  try {
+  return withWakeBudget(async (budget) => {
     if (await isRateLimited()) return;
     await drain({ budget });
-  } finally {
-    await finalizeWakeBudget(budget, { ranWork: budget.spent > 0 });
-  }
+  });
 }
 
 /**
@@ -134,76 +148,58 @@ export async function checkTrashNow() {
       trashSafe: buildTrashSafePayload(null),
     };
   }
-  const budget = await createWakeBudget({ mode: "full" });
-  try {
-    if (await isRateLimited()) {
-      const { rateLimitedUntil } = await getStatus();
-      return {
-        ok: false,
-        reason: "rate_limited",
-        rateLimitedUntil: rateLimitedUntil ?? null,
-        trashSafe: buildTrashSafePayload(await getReconcileState()),
-      };
-    }
-    if (!config.token) {
-      return {
-        ok: false,
-        reason: "no_token",
-        trashSafe: buildTrashSafePayload(null),
-      };
-    }
-    const client = new RaindropClient(config.token);
-    budget.bindClient(client);
-    const peek = await runTrashHygienePeek({ client, budget });
-    if (!(await isRateLimited())) {
-      await drain({ budget });
-    }
-    const reconcile = await getReconcileState();
-    return {
-      ok: true,
-      scanComplete: peek.scanComplete,
-      pairedPending: peek.pairedPending,
-      trashSafe: buildTrashSafePayload(reconcile),
-      reconcile,
-    };
-  } catch (err) {
-    if (await handleClientError(err)) {
-      if (err instanceof RateLimitError) {
-        const { rateLimitedUntil } = await getStatus();
+  return withWakeBudget(async (budget) => {
+    try {
+      if (await isRateLimited()) return await rateLimitedTrashResult();
+      if (!config.token) {
         return {
           ok: false,
-          reason: "rate_limited",
-          rateLimitedUntil: rateLimitedUntil ?? null,
-          trashSafe: buildTrashSafePayload(await getReconcileState()),
+          reason: "no_token",
+          trashSafe: buildTrashSafePayload(null),
         };
       }
+      const client = new RaindropClient(config.token);
+      budget.bindClient(client);
+      const peek = await runTrashHygienePeek({ client, budget });
+      if (!(await isRateLimited())) {
+        await drain({ budget });
+      }
+      const reconcile = await getReconcileState();
+      return {
+        ok: true,
+        scanComplete: peek.scanComplete,
+        pairedPending: peek.pairedPending,
+        trashSafe: buildTrashSafePayload(reconcile),
+        reconcile,
+      };
+    } catch (err) {
+      if (await handleClientError(err)) {
+        if (err instanceof RateLimitError) return await rateLimitedTrashResult();
+        throw err;
+      }
+      await appendLog("error", `Check Trash failed: ${err.message}`);
       throw err;
     }
-    await appendLog("error", `Check Trash failed: ${err.message}`);
-    throw err;
-  } finally {
-    await finalizeWakeBudget(budget, { ranWork: budget.spent > 0 });
-  }
+  });
 }
 
 /** Heartbeat entry: drain queue, then reconcile when bidirectional. */
 export async function tick() {
-  const budget = await createWakeBudget({ mode: "full" });
-  try {
+  return withWakeBudget(async (budget) => {
     if (await isRateLimited()) {
       // rateLimitedUntil banner is primary; still stamp skip for Status copy.
-      await noteReconcileSkip("rate_limited", { pending: await queue.size() });
+      await noteSkip("rate_limited");
       return;
     }
     await drain({ budget });
     if (await isRateLimited()) {
-      await noteReconcileSkip("rate_limited", { pending: await queue.size() });
+      await noteSkip("rate_limited");
       return;
     }
     // Queue bulk prompt: skip Raindrop-heavy reconcile so we do not dig deeper
     // while Status awaits Match / Continue drip. Live enqueue still works.
     if (await isBulkDrainPausedNow()) {
-      await noteReconcileSkip("bulk_pause", { pending: await queue.size() });
+      await noteSkip("bulk_pause");
       return;
     }
     const config = await getConfig();
@@ -214,12 +210,7 @@ export async function tick() {
     }
     try {
       // Heartbeat uses cooldown; Options/popup use reconcileNow() (force: true).
-      const result = await reconcile({ force: false, budget });
-      if (result?.skipped && result.reason) {
-        await noteReconcileSkip(result.reason, { pending: await queue.size() });
-      } else if (!result?.skipped) {
-        await clearReconcileSkip();
-      }
+      await noteReconcileOutcome(await reconcile({ force: false, budget }));
       if (await isRateLimited()) return;
       await drain({ budget }); // process any jobs reconcile just enqueued
       if (!(await isRateLimited())) await clearRateLimit();
@@ -227,7 +218,5 @@ export async function tick() {
       if (await handleClientError(err)) return;
       await appendLog("error", `Pull failed: ${err.message}`);
     }
-  } finally {
-    await finalizeWakeBudget(budget, { ranWork: budget.spent > 0 });
-  }
+  });
 }

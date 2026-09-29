@@ -30,6 +30,7 @@ import {
   SOFT_MAX_REQS_PER_WAKE,
   isListPageDone,
   reconcileIntervalMs,
+  ABSOLUTE_ROOT_ID,
 } from "./constants.js";
 import { rootTitlesEqual } from "./bookmark-roots.js";
 import {
@@ -56,6 +57,7 @@ import {
   getNodeOrNull,
   getChildren,
   isFolderExcluded,
+  renamableFolder,
   resolveExistingMirrorParent,
   resolveMirrorPlacement,
   walkAncestorsFromFolder,
@@ -427,30 +429,12 @@ async function finishFolderRenamePull(index, config, overrides, rootId, topRoots
       continue;
     }
 
-    const node = await getNodeOrNull(folderId);
-    if (!node) {
-      await clearFolderCollection(folderId);
-      continue;
-    }
-    if (node.url || node.parentId === "0") continue;
-
     const wantTitle = col.title || "";
-    if ((node.title || "") === wantTitle) continue;
-    // Do not push canonical bar/other titles onto local Favorites/Other roots.
-    if (rootTitlesEqual(node.title, wantTitle)) continue;
-
-    if (await isFolderExcluded(folderId, node.parentId, overrides, config.defaultPolicy)) {
-      continue;
-    }
-
-    const added = await queue.enqueueJob({
-      id: `ref-${folderId}`,
-      kind: JOB.PULL_RENAME_FOLDER,
-      folderId: String(folderId),
-      collectionId: String(collectionId),
-      title: wantTitle,
-    });
-    if (added) enqueued++;
+    // Title match (incl. canonical bar/other vs local Favorites/Other) skips.
+    const gate = await renamableFolder(folderId, overrides, config.defaultPolicy, { wantTitle });
+    if (gate.gone) await clearFolderCollection(folderId);
+    if (!gate.node) continue;
+    if (await enqueuePullRenameFolder(folderId, collectionId, wantTitle)) enqueued++;
   }
 
   if (enqueued > 0) {
@@ -484,7 +468,7 @@ async function healUnmappedFolderCollections(index, rootId, config, overrides, t
     );
     if (exactLeaf) {
       const node = await getNodeOrNull(exactLeaf);
-      if (node && !node.url && node.parentId !== "0") {
+      if (node && !node.url && node.parentId !== ABSOLUTE_ROOT_ID) {
         await recordFolderCollection(exactLeaf, collectionId);
         mappedColIds.add(String(collectionId));
       }
@@ -500,7 +484,7 @@ async function healUnmappedFolderCollections(index, rootId, config, overrides, t
 
     const folders = (await getChildren(parentFolderId)).filter((c) => !c.url);
     const titled = folders.find((f) => (f.title || "") === wantTitle);
-    if (titled && titled.parentId !== "0") {
+    if (titled && titled.parentId !== ABSOLUTE_ROOT_ID) {
       await recordFolderCollection(titled.id, collectionId);
       mappedColIds.add(String(collectionId));
       continue;
@@ -508,7 +492,7 @@ async function healUnmappedFolderCollections(index, rootId, config, overrides, t
 
     const candidates = [];
     for (const f of folders) {
-      if (f.parentId === "0") continue;
+      if (f.parentId === ABSOLUTE_ROOT_ID) continue;
       if (rootTitlesEqual(f.title, wantTitle)) continue;
       const existing = map[String(f.id)] ?? (await getFolderCollectionId(f.id));
       if (existing != null) continue;
@@ -524,20 +508,22 @@ async function healUnmappedFolderCollections(index, rootId, config, overrides, t
 
     await recordFolderCollection(folder.id, collectionId);
     mappedColIds.add(String(collectionId));
-    if ((folder.title || "") === wantTitle) continue;
     if (rootTitlesEqual(folder.title, wantTitle)) continue;
-
-    const added = await queue.enqueueJob({
-      id: `ref-${folder.id}`,
-      kind: JOB.PULL_RENAME_FOLDER,
-      folderId: String(folder.id),
-      collectionId: String(collectionId),
-      title: wantTitle,
-    });
-    if (added) enqueued++;
+    if (await enqueuePullRenameFolder(folder.id, collectionId, wantTitle)) enqueued++;
   }
 
   return enqueued;
+}
+
+/** Queue a Raindrop→Edge folder title rename. @returns {Promise<boolean>} added */
+function enqueuePullRenameFolder(folderId, collectionId, title) {
+  return queue.enqueueJob({
+    id: `ref-${folderId}`,
+    kind: JOB.PULL_RENAME_FOLDER,
+    folderId: String(folderId),
+    collectionId: String(collectionId),
+    title,
+  });
 }
 
 /**

@@ -4,6 +4,7 @@
 // must agree on title/URL/parent drift and the create-path / exclude gates.
 // Both call computePullUpdatePlan so those decisions cannot diverge.
 
+import { ABSOLUTE_ROOT_ID } from "./constants.js";
 import { sameBookmarkUrl } from "./url-match.js";
 import { canCreateRaindropOnlyPath } from "./allowlist.js";
 import { ancestorIdsFromFolder, resolveExistingMirrorParent } from "./bookmarks.js";
@@ -60,7 +61,7 @@ export async function computePullUpdatePlan(opts) {
   const link = wantLink || "";
 
   // Current Edge location under exclude → hands-off (destination gated separately).
-  if (node.parentId && node.parentId !== "0") {
+  if (node.parentId && node.parentId !== ABSOLUTE_ROOT_ID) {
     const currentAncestors = await ancestorIdsFromFolder(node.parentId);
     if (isExcluded(currentAncestors, overrides, defaultPolicy)) {
       return {

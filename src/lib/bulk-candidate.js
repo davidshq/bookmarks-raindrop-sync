@@ -32,53 +32,6 @@ export async function countImportScope() {
 }
 
 /**
- * @param {{ unpaired: number, paired: number, edgeScanned: number }} scope
- * @returns {BulkCandidateAssessment}
- */
-export function assessFromScope(scope) {
-  const { unpaired, paired, edgeScanned } = scope;
-  const inScope = unpaired + paired;
-  const pairCoverage = inScope > 0 ? paired / inScope : 1;
-
-  if (unpaired >= BULK_UNPAIRED_IMPORT_THRESHOLD) {
-    return {
-      suggest: true,
-      reason: "large_unpaired",
-      unpaired,
-      paired,
-      edgeScanned,
-      pairCoverage,
-    };
-  }
-  if (
-    edgeScanned >= BULK_EDGE_COUNT_THRESHOLD &&
-    pairCoverage < BULK_PAIR_COVERAGE_THRESHOLD
-  ) {
-    return {
-      suggest: true,
-      reason: "low_pair_coverage",
-      unpaired,
-      paired,
-      edgeScanned,
-      pairCoverage,
-    };
-  }
-  return {
-    suggest: false,
-    reason: null,
-    unpaired,
-    paired,
-    edgeScanned,
-    pairCoverage,
-  };
-}
-
-/** @returns {Promise<BulkCandidateAssessment>} */
-export async function assessImportBulkCandidate() {
-  return assessFromScope(await countImportScope());
-}
-
-/**
  * Pull-only heuristic: large Edge tree with thin pairs (not Import's unpaired queue size).
  * @param {{ unpaired: number, paired: number, edgeScanned: number }} scope
  * @returns {BulkCandidateAssessment}
@@ -88,13 +41,28 @@ export function assessPullFromScope(scope) {
   const inScope = unpaired + paired;
   const pairCoverage = inScope > 0 ? paired / inScope : 1;
   const base = { unpaired, paired, edgeScanned, pairCoverage };
-  if (
-    edgeScanned >= BULK_EDGE_COUNT_THRESHOLD &&
-    pairCoverage < BULK_PAIR_COVERAGE_THRESHOLD
-  ) {
+  if (edgeScanned >= BULK_EDGE_COUNT_THRESHOLD && pairCoverage < BULK_PAIR_COVERAGE_THRESHOLD) {
     return { suggest: true, reason: "low_pair_coverage", ...base };
   }
   return { suggest: false, reason: null, ...base };
+}
+
+/**
+ * Import heuristic: a large unpaired queue, else the Pull coverage rule.
+ * @param {{ unpaired: number, paired: number, edgeScanned: number }} scope
+ * @returns {BulkCandidateAssessment}
+ */
+export function assessFromScope(scope) {
+  const pull = assessPullFromScope(scope);
+  if (scope.unpaired >= BULK_UNPAIRED_IMPORT_THRESHOLD) {
+    return { ...pull, suggest: true, reason: "large_unpaired" };
+  }
+  return pull;
+}
+
+/** @returns {Promise<BulkCandidateAssessment>} */
+export async function assessImportBulkCandidate() {
+  return assessFromScope(await countImportScope());
 }
 
 /**
@@ -105,14 +73,7 @@ export function assessPullFromScope(scope) {
 export async function assessPullBulkCandidate() {
   const config = await getConfig();
   if (config.syncMode !== SYNC_MODE.BIDIRECTIONAL) {
-    return {
-      suggest: false,
-      reason: null,
-      unpaired: 0,
-      paired: 0,
-      edgeScanned: 0,
-      pairCoverage: 1,
-    };
+    return assessPullFromScope({ unpaired: 0, paired: 0, edgeScanned: 0 });
   }
   return assessPullFromScope(await countImportScope());
 }
@@ -131,8 +92,7 @@ export function formatBulkCandidatePrompt(a, op = "import") {
       `Match from Raindrop export first so overlapping URLs are paired instead of re-uploaded?`
     );
   }
-  const coverage =
-    `Library looks large with low pair coverage (${a.paired} paired / ~${a.unpaired + a.paired} in-scope, ${pct}%).\n\n`;
+  const coverage = `Library looks large with low pair coverage (${a.paired} paired / ~${a.unpaired + a.paired} in-scope, ${pct}%).\n\n`;
   if (op === "pull") {
     return (
       coverage +
@@ -140,7 +100,6 @@ export function formatBulkCandidatePrompt(a, op = "import") {
     );
   }
   return (
-    coverage +
-    `Match from Raindrop export first so overlapping URLs are paired before continuing?`
+    coverage + `Match from Raindrop export first so overlapping URLs are paired before continuing?`
   );
 }

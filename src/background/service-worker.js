@@ -8,7 +8,7 @@
 // alive through fetch/storage. The heartbeat is (re)created on every SW
 // evaluation, not only onInstalled/onStartup.
 
-import { ALARM_NAME, HEARTBEAT_MINUTES, JOB, MSG, SYNC_MODE } from "../lib/constants.js";
+import { ALARM_NAME, HEARTBEAT_MINUTES, MSG, SYNC_MODE } from "../lib/constants.js";
 import {
   tick,
   drain,
@@ -74,6 +74,30 @@ async function migratePairs() {
   }
 }
 
+/**
+ * Run a dry-run planner; a Raindrop rate limit answers with the planner's
+ * empty plan instead of failing the message.
+ */
+async function planOrRateLimited(run, empty) {
+  try {
+    return await run();
+  } catch (err) {
+    if ((await handleClientError(err)) && err instanceof RateLimitError) {
+      return empty({ reason: "rate_limited" });
+    }
+    throw err;
+  }
+}
+
+/** Bulk-queue prompt fields shared by GET_STATUS and GET_BULK_PROMPT. */
+async function bulkPromptPayload(pending) {
+  return {
+    bulkPrompt: await noteQueueDepthForBulkPrompt(pending),
+    bulkEtaMinutes: estimateDrainEtaMinutes(pending),
+    bulkNotice: formatBulkQueueNotice(pending),
+  };
+}
+
 function logSwError(context, err) {
   const message = err?.message || String(err);
   console.error(`[ers] ${context}:`, err);
@@ -86,17 +110,14 @@ function logSwError(context, err) {
 ensureHeartbeat();
 void healStoredConfig();
 
+// Heartbeat and config heal already ran above on this evaluation.
 chrome.runtime.onInstalled.addListener(() => {
-  ensureHeartbeat();
   void migratePairs().catch((err) => logSwError("pair migration", err));
-  void healStoredConfig();
   void appendLog("info", "Extension installed; heartbeat scheduled.");
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  ensureHeartbeat();
   void migratePairs().catch((err) => logSwError("pair migration", err));
-  void healStoredConfig();
 });
 
 // Live capture: enqueue new bookmarks (URL nodes only) unless pull-suppressed.
@@ -155,7 +176,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           const config = await getConfig();
           const pendingByDirection = await queue.sizeByDirection();
           const pending = pendingByDirection.total;
-          const bulkPrompt = await noteQueueDepthForBulkPrompt(pending);
+          const bulk = await bulkPromptPayload(pending);
           const reconcile = await getReconcileState();
           const trashSafe =
             config.syncMode === SYNC_MODE.BIDIRECTIONAL ? buildTrashSafePayload(reconcile) : null;
@@ -169,28 +190,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             log: await getLog(),
             reconcile,
             syncMode: config.syncMode,
-            bulkPrompt,
-            bulkEtaMinutes: estimateDrainEtaMinutes(pending),
-            bulkNotice: formatBulkQueueNotice(pending),
+            ...bulk,
             trashSafe,
             pairHealth: await getPairHealth(),
             deleteBreaker: {
               ...(await getDeleteBreaker()),
-              queuedDeletes: (await queue.list()).filter((j) => {
-                const k = queue.jobKind(j);
-                return k === JOB.DELETE_EDGE || k === JOB.DELETE_RAINDROP;
-              }).length,
+              queuedDeletes: (await queue.list()).filter(queue.isDeleteJob).length,
             },
           });
           break;
         }
         case MSG.ALLOW_DELETES: {
-          const held = (await queue.list())
-            .filter((j) => {
-              const k = queue.jobKind(j);
-              return k === JOB.DELETE_EDGE || k === JOB.DELETE_RAINDROP;
-            })
-            .map((j) => String(j.id));
+          const held = (await queue.list()).filter(queue.isDeleteJob).map((j) => String(j.id));
           await resetDeleteBreaker({ allowJobIds: held });
           await appendLog(
             "info",
@@ -201,27 +212,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           break;
         }
         case MSG.DISCARD_DELETES: {
-          const dropped = await queue.removeWhere((j) => {
-            const k = queue.jobKind(j);
-            return k === JOB.DELETE_EDGE || k === JOB.DELETE_RAINDROP;
-          });
+          const dropped = await queue.removeWhere(queue.isDeleteJob);
           await resetDeleteBreaker();
           await appendLog("info", `Discarded ${dropped} queued delete job(s); pairs kept.`);
           sendResponse({ ok: true, dropped });
           break;
         }
         case MSG.REPAIR_PAIRS_PLAN: {
-          try {
-            sendResponse(await planRepairPairs());
-          } catch (err) {
-            if (await handleClientError(err)) {
-              if (err instanceof RateLimitError) {
-                sendResponse(emptyRepairPlan({ reason: "rate_limited" }));
-                break;
-              }
-            }
-            throw err;
-          }
+          sendResponse(await planOrRateLimited(planRepairPairs, emptyRepairPlan));
           break;
         }
         case MSG.REPAIR_PAIRS_APPLY: {
@@ -231,14 +229,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         }
         case MSG.GET_BULK_PROMPT: {
           const pending = await queue.size();
-          const bulkPrompt = await noteQueueDepthForBulkPrompt(pending);
-          sendResponse({
-            ok: true,
-            pending,
-            bulkPrompt,
-            bulkEtaMinutes: estimateDrainEtaMinutes(pending),
-            bulkNotice: formatBulkQueueNotice(pending),
-          });
+          sendResponse({ ok: true, pending, ...(await bulkPromptPayload(pending)) });
           break;
         }
         case MSG.CONTINUE_BULK_DRIP: {
@@ -265,20 +256,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           break;
         }
         case MSG.MATCH_EXISTING_PLAN: {
-          try {
-            const plan = await runMatchExistingDryRun();
-            // Do not send the full matched list in the status string path —
-            // Options keeps it for Apply. Cap is fine for typical libraries.
-            sendResponse(plan);
-          } catch (err) {
-            if (await handleClientError(err)) {
-              if (err instanceof RateLimitError) {
-                sendResponse(emptyPlan({ reason: "rate_limited" }));
-                break;
-              }
-            }
-            throw err;
-          }
+          // Options keeps the full matched list for Apply.
+          sendResponse(await planOrRateLimited(runMatchExistingDryRun, emptyPlan));
           break;
         }
         case MSG.MATCH_EXISTING_APPLY: {

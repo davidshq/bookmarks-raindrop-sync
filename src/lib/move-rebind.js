@@ -2,8 +2,9 @@
 // Claim rules match Match-existing (`classifyPairClaim`); pair-rebind.js uses
 // the same pick for stale Raindrop ids.
 
-import { urlMatchKind } from "./url-match.js";
+import { pickUrlMatches } from "./url-match.js";
 import { classifyPairClaim } from "./match-existing.js";
+import { compareIds } from "./tree-index.js";
 
 /**
  * Keep search hits that match `edgeUrl`: exact primary key first; a lone loose
@@ -14,18 +15,8 @@ import { classifyPairClaim } from "./match-existing.js";
  * @returns {{ _id: number|string, link?: string }[]}
  */
 export function filterUrlMatchingItems(edgeUrl, items) {
-  /** @type {{ item: { _id: number|string, link?: string }, kind: 'exact'|'loose' }[]} */
-  const classified = [];
-  for (const item of items || []) {
-    if (!item || item._id == null) continue;
-    const kind = urlMatchKind(edgeUrl, item.link || "");
-    if (kind) classified.push({ item, kind });
-  }
-  const exact = classified.filter((c) => c.kind === "exact").map((c) => c.item);
-  if (exact.length) return exact;
-  const loose = classified.filter((c) => c.kind === "loose").map((c) => c.item);
-  if (loose.length === 1) return loose;
-  return [];
+  const withIds = (items || []).filter((item) => item && item._id != null);
+  return pickUrlMatches(edgeUrl, withIds, (item) => item.link);
 }
 
 /**
@@ -57,25 +48,17 @@ export function pickMoveRebindCandidate(
   const items = matchingItems || [];
   if (!items.length) return { kind: "none" };
 
-  /** @type {{ rid: string }[]} */
-  const claimable = [];
-  for (const item of items) {
-    const rid = String(item._id);
-    const verdict = classifyPairClaim(bookmarkId, rid, pairs, liveIds, liveRaindropIds);
-    if (verdict === "conflict") continue;
-    claimable.push({ rid });
-  }
+  const claimable = items
+    .map((item) => String(item._id))
+    .filter(
+      (rid) => classifyPairClaim(bookmarkId, rid, pairs, liveIds, liveRaindropIds) !== "conflict"
+    );
 
   if (!claimable.length) return { kind: "conflict" };
 
-  claimable.sort((a, b) => {
-    const na = Number(a.rid);
-    const nb = Number(b.rid);
-    if (Number.isFinite(na) && Number.isFinite(nb) && na !== nb) return na - nb;
-    return a.rid < b.rid ? -1 : a.rid > b.rid ? 1 : 0;
-  });
+  claimable.sort(compareIds);
 
-  const rid = claimable[0].rid;
+  const rid = claimable[0];
   if (claimable.length === 1) return { kind: "unique", rid, extras: 0 };
   return { kind: "multi", rid, extras: claimable.length - 1 };
 }

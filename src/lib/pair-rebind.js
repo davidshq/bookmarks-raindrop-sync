@@ -15,7 +15,7 @@
 // over (records, tree index, snapshot) so engine, migration, Match and Repair
 // share one implementation.
 
-import { urlMatchKeys } from "./url-match.js";
+import { primaryUrlKey } from "./url-match.js";
 import { makePairRecord, pairsView } from "./store.js";
 import { pickMoveRebindCandidate } from "./move-rebind.js";
 import { treeEntriesForUrl, compareIds } from "./tree-index.js";
@@ -41,6 +41,19 @@ function samePath(a, b) {
 }
 
 /**
+ * In-scope live bookmarks for `url` that may carry raindrop `rid`: unpaired,
+ * or already paired to `rid`. Id order (treeEntriesForUrl sorts by id).
+ * @returns {TreeEntry[]}
+ */
+export function edgeSurvivorCandidates(treeIndex, url, rid, pairs) {
+  return treeEntriesForUrl(treeIndex, url).filter((entry) => {
+    if (!entry.inScope) return false;
+    const bound = pairs.byBookmark?.[entry.id];
+    return bound == null || String(bound) === rid;
+  });
+}
+
+/**
  * Find a live bookmark for a record whose bookmark id is gone from the tree.
  * @param {PairRecord} record
  * @param {TreeIndex} treeIndex
@@ -51,11 +64,7 @@ export function rebindStaleEdgeId(record, treeIndex, pairs) {
   const url = recordUrl(record);
   if (!url) return null;
   const rid = String(record.raindropId);
-  const candidates = treeEntriesForUrl(treeIndex, url).filter((entry) => {
-    if (!entry.inScope) return false;
-    const bound = pairs.byBookmark?.[entry.id];
-    return bound == null || String(bound) === rid;
-  });
+  const candidates = edgeSurvivorCandidates(treeIndex, url, rid, pairs);
   if (!candidates.length) return null;
   const underPath = candidates.filter((e) => samePath(e.path, record.edgePathAtSync));
   const pick = (underPath.length ? underPath : candidates).sort(compareIds)[0];
@@ -86,7 +95,7 @@ export function rebindStaleRaindropId(record, snapshot, pairs, liveBookmarkIds) 
 }
 
 /** Record fields refreshed from a live tree entry. */
-function placementFromEntry(entry) {
+export function placementFromEntry(entry) {
   return {
     bookmarkId: entry.id,
     edgeParentId: entry.parentId,
@@ -156,7 +165,7 @@ export function rebindPass({
       ...rec,
       ...(entry ? placementFromEntry(entry) : {}),
       url,
-      urlKey: urlMatchKeys(url)[0] ?? null,
+      urlKey: primaryUrlKey(url),
       title: rec.title ?? entry?.title ?? null,
       ...(entry ? { lastSeenEdgeAt: now } : {}),
     });

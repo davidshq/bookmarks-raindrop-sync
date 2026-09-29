@@ -1,7 +1,7 @@
 // Reconcile pull enqueue helpers (shared by root and outside-root listing).
 // Drift gates share computePullUpdatePlan with drain apply (pull-update.js).
 
-import { JOB, RAINDROP_FOLDER_MODE } from "./constants.js";
+import { JOB, RAINDROP_FOLDER_MODE, ABSOLUTE_ROOT_ID } from "./constants.js";
 import { hasTombstone, appendLog, recordFolderCollection } from "./store.js";
 import * as queue from "./queue.js";
 import { isExcluded } from "./policy.js";
@@ -156,7 +156,7 @@ export async function ensureAllowlistedOrMirrorAll(
       continue;
     }
     const leafId = await ensureMirrorFolderPath(relativeSegments, config.rootName, topRoots);
-    if (leafId && leafId !== "0") {
+    if (leafId && leafId !== ABSOLUTE_ROOT_ID) {
       try {
         const ancestors = await ancestorIdsFromFolder(leafId);
         await recordFolderCollectionsForPulledPath(

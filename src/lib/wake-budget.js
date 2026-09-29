@@ -12,6 +12,7 @@ import {
   SOFT_MAX_REQS_PER_WAKE,
 } from "./constants.js";
 import { getStatus, setStatus } from "./store.js";
+import { numberOrNull } from "./raindrop.js";
 
 /**
  * @typedef {"wake_cap"|"bootstrap"|null} ThrottleReason
@@ -78,11 +79,7 @@ export class WakeBudget {
    */
   noteRequest(client, n = 1) {
     this.spent += n;
-    if (client && typeof client.remaining === "number") {
-      this._headerRemaining = client.remaining;
-      if (typeof client.resetAt === "number") this._headerResetAt = client.resetAt;
-      this.seededFromBootstrap = false;
-    } else if (this._headerRemaining != null) {
+    if (!this.syncFromClient(client) && this._headerRemaining != null) {
       this._headerRemaining = Math.max(0, this._headerRemaining - n);
     }
     if (!this.canSpend(1) && this.selfCapReason == null) {
@@ -103,13 +100,16 @@ export class WakeBudget {
     }
   }
 
-  /** Sync headers without incrementing spent (e.g. after a call already counted). */
+  /**
+   * Sync headers without incrementing spent (e.g. after a call already counted).
+   * @returns {boolean} true when the client had a header reading
+   */
   syncFromClient(client) {
-    if (client && typeof client.remaining === "number") {
-      this._headerRemaining = client.remaining;
-      if (typeof client.resetAt === "number") this._headerResetAt = client.resetAt;
-      this.seededFromBootstrap = false;
-    }
+    if (!client || typeof client.remaining !== "number") return false;
+    this._headerRemaining = client.remaining;
+    if (typeof client.resetAt === "number") this._headerResetAt = client.resetAt;
+    this.seededFromBootstrap = false;
+    return true;
   }
 
   #inferSelfCap() {
@@ -151,14 +151,8 @@ export class WakeBudget {
  */
 export async function loadPersistedRateWindow(now = Date.now()) {
   const status = await getStatus();
-  const remaining =
-    status.rateRemaining != null && !Number.isNaN(Number(status.rateRemaining))
-      ? Number(status.rateRemaining)
-      : null;
-  const resetAt =
-    status.rateResetAt != null && !Number.isNaN(Number(status.rateResetAt))
-      ? Number(status.rateResetAt)
-      : null;
+  const remaining = numberOrNull(status.rateRemaining);
+  const resetAt = numberOrNull(status.rateResetAt);
   if (remaining == null || resetAt == null || resetAt <= now) {
     return { remaining: null, resetAt: null };
   }
@@ -176,6 +170,24 @@ export async function createWakeBudget({ mode = "full" } = {}) {
     headerRemaining: remaining,
     headerResetAt: resetAt,
   });
+}
+
+/**
+ * Run `fn` with a wake budget. A caller-supplied `budget` is used as-is (its
+ * owner finalizes it); otherwise a fresh one is created and finalized after.
+ * @template T
+ * @param {(budget: WakeBudget) => Promise<T>} fn
+ * @param {{ mode?: "full"|"short", budget?: WakeBudget|null }} [opts]
+ * @returns {Promise<T>}
+ */
+export async function withWakeBudget(fn, { mode = "full", budget = null } = {}) {
+  if (budget) return fn(budget);
+  const owned = await createWakeBudget({ mode });
+  try {
+    return await fn(owned);
+  } finally {
+    await finalizeWakeBudget(owned, { ranWork: owned.spent > 0 });
+  }
 }
 
 /**

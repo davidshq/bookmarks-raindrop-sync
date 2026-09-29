@@ -91,6 +91,48 @@ export function urlMatchKind(url, candidateUrl) {
 }
 
 /**
+ * Keep `items` whose URL matches `url`: every exact hit, else a lone loose
+ * (tracking-param) hit, else none. Callers must not rewrite `link` on a loose
+ * match.
+ * @template T
+ * @param {string} url
+ * @param {T[]} items
+ * @param {(item: T) => string|null|undefined} linkOf
+ * @returns {T[]}
+ */
+export function pickUrlMatches(url, items, linkOf) {
+  const exact = [];
+  const loose = [];
+  for (const item of items) {
+    const kind = urlMatchKind(url, linkOf(item) || "");
+    if (kind === "exact") exact.push(item);
+    else if (kind === "loose") loose.push(item);
+  }
+  if (exact.length) return exact;
+  return loose.length === 1 ? loose : [];
+}
+
+/**
+ * File `id` under every urlMatchKeys entry of `url` in a key → ids map.
+ * @param {Map<string, string[]>} byKey
+ * @param {string} url
+ * @param {string} id
+ */
+export function indexUrlKeys(byKey, url, id) {
+  for (const key of urlMatchKeys(url)) {
+    const list = byKey.get(key);
+    if (!list) byKey.set(key, [id]);
+    else if (!list.includes(id)) list.push(id);
+  }
+}
+
+/** Primary (strongest) urlMatchKeys entry for a URL, or null. */
+export function primaryUrlKey(url) {
+  if (!url) return null;
+  return urlMatchKeys(url)[0] ?? null;
+}
+
+/**
  * Resolve ids from a urlMatchKeys-indexed map for `url`.
  * Exact (primary) key wins. The tracking-stripped key is used only when it
  * maps to a single id; a lookup without tracking params likewise accepts a
@@ -99,12 +141,12 @@ export function urlMatchKind(url, candidateUrl) {
  *
  * @param {Map<string, string[]>|Record<string, string[]>} byUrlKey
  * @param {string} url
- * @param {(id: string) => string|null|undefined} primaryKeyOf
- *   Primary urlMatchKeys entry for each candidate (separates exact hits
- *   from tracking variants filed under the same key).
+ * @param {(id: string) => string|null|undefined} urlOf
+ *   Stored URL for each candidate id; its primary key separates exact hits
+ *   from tracking variants filed under the same key.
  * @returns {{ ids: string[], match: 'exact'|'loose'|'none' }}
  */
-export function resolveIndexedUrls(byUrlKey, url, primaryKeyOf) {
+export function resolveIndexedUrls(byUrlKey, url, urlOf) {
   const keys = urlMatchKeys(url);
   if (!keys.length || !byUrlKey) return { ids: [], match: "none" };
   const bucket = (key) => {
@@ -122,7 +164,7 @@ export function resolveIndexedUrls(byUrlKey, url, primaryKeyOf) {
     seenExact.add(s);
     underExact.push(s);
   }
-  const exactIds = underExact.filter((id) => primaryKeyOf(id) === exactKey);
+  const exactIds = underExact.filter((id) => primaryUrlKey(urlOf(id)) === exactKey);
   if (exactIds.length) return { ids: exactIds, match: "exact" };
 
   // Loose: tracking-stripped key when present; otherwise the exact key's other

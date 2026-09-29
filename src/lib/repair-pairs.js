@@ -33,9 +33,7 @@
 //   - reset the delete breaker and recompute pair health.
 // No Raindrop writes, no Edge writes.
 
-import { JOB } from "./constants.js";
 import {
-  getConfig,
   getPairs,
   getStoredPairs,
   rewritePairs,
@@ -45,14 +43,16 @@ import {
   resetDeleteBreaker,
   setPairHealth,
   appendLog,
-  isRateLimited,
   ensurePairsMigrated,
 } from "./store.js";
 import * as queue from "./queue.js";
 import { indexExportByUrl } from "./export-csv.js";
-import { planMatchFromExport, emptyPlan } from "./match-existing.js";
-import { RaindropClient, RateLimitError, AuthError } from "./raindrop.js";
-import { handleClientError } from "./client-errors.js";
+import {
+  planMatchFromExport,
+  emptyPlan,
+  fetchExportForPlan,
+  inScopeBookmarks,
+} from "./match-existing.js";
 import { adoptExportCsv, buildSnapshot, loadPresence } from "./presence.js";
 import { loadTreeIndex, treeIndexFromList } from "./tree-index.js";
 import { rebindPass } from "./pair-rebind.js";
@@ -150,10 +150,10 @@ export function planRepairFromInputs(csvText, edge, pairs, tombstones) {
 
   const keptView = { byBookmark: { ...kept }, byRaindrop: {} };
   for (const [bid, rid] of Object.entries(kept)) keptView.byRaindrop[rid] = bid;
-  const edgeBookmarks = [...treeIndex.byId.values()]
-    .filter((e) => e.inScope)
-    .map((e) => ({ id: e.id, url: e.url }));
-  const match = planMatchFromExport(csvText, edgeBookmarks, keptView);
+  const edgeBookmarks = inScopeBookmarks(treeIndex);
+  const match = planMatchFromExport(csvText, edgeBookmarks, keptView, {
+    liveBookmarkIds: treeIndex.byId.keys(),
+  });
   const urlByBid = new Map(edgeBookmarks.map((b) => [b.id, b.url]));
 
   const tombstonesAlive = Object.entries(tombstones || {})
@@ -186,24 +186,9 @@ export function planRepairFromInputs(csvText, edge, pairs, tombstones) {
 
 /** @returns {Promise<RepairPlan>} */
 export async function planRepairPairs() {
-  await ensurePairsMigrated();
-  if (await isRateLimited()) return emptyRepairPlan({ reason: "rate_limited" });
-  const config = await getConfig();
-  if (!config.token) return emptyRepairPlan({ ok: false, error: "No Raindrop token configured" });
-
-  const client = new RaindropClient(config.token);
-  let csv;
-  const exportStartedAt = Date.now();
-  try {
-    csv = await client.exportRaindropsCsv(0);
-    client.throwIfShouldPause();
-  } catch (err) {
-    if (await handleClientError(err)) {
-      if (err instanceof RateLimitError) return emptyRepairPlan({ reason: "rate_limited" });
-      if (err instanceof AuthError) return emptyRepairPlan({ ok: false, error: err.message });
-    }
-    throw err;
-  }
+  const fetched = await fetchExportForPlan(emptyRepairPlan);
+  if ("early" in fetched) return fetched.early;
+  const { csv, exportStartedAt } = fetched;
 
   const treeIndex = await loadTreeIndex();
   const pairs = await getPairs();
@@ -217,10 +202,7 @@ export async function planRepairPairs() {
     });
   }
   await adoptExportCsv(csv, exportStartedAt);
-  const queuedDeletes = (await queue.list()).filter((j) => {
-    const k = queue.jobKind(j);
-    return k === JOB.DELETE_EDGE || k === JOB.DELETE_RAINDROP;
-  }).length;
+  const queuedDeletes = (await queue.list()).filter(queue.isDeleteJob).length;
   await appendLog(
     "info",
     `Repair pairs dry-run: keep ${plan.keptLive}, rebind ${plan.edgeRebinds} Edge id(s) and ` +
@@ -275,10 +257,7 @@ export async function applyRepairPairs(plan) {
   const tombstonesCleared = (plan.tombstonesAlive || []).length;
   if (tombstonesCleared) await pruneTombstones(plan.tombstonesAlive);
 
-  const deletesDropped = await queue.removeWhere((j) => {
-    const k = queue.jobKind(j);
-    return k === JOB.DELETE_EDGE || k === JOB.DELETE_RAINDROP;
-  });
+  const deletesDropped = await queue.removeWhere(queue.isDeleteJob);
   await resetDeleteBreaker();
 
   const stored = await getStoredPairs();

@@ -16,13 +16,13 @@
 // Chromium renumbered bookmark ids).
 
 import { getConfig, getOverrides, getPairs, appendLog, setStatus, isRateLimited } from "./store.js";
-import { collectAllBookmarks } from "./bookmarks.js";
+import { loadTreeIndex } from "./tree-index.js";
 import { isExcluded } from "./policy.js";
 import { enqueueMany, size } from "./queue.js";
 import { RaindropClient } from "./raindrop.js";
 import { ensurePresence } from "./presence.js";
 import { handleClientError } from "./client-errors.js";
-import { createWakeBudget, finalizeWakeBudget } from "./wake-budget.js";
+import { withWakeBudget } from "./wake-budget.js";
 
 /**
  * Walk Edge bookmarks once: unpaired ids Import would enqueue + pair counts.
@@ -39,16 +39,16 @@ export async function scanImportScope() {
   const overrides = await getOverrides();
   const pairs = await getPairs();
   const synced = pairs.byBookmark || {};
-  const all = await collectAllBookmarks();
+  const all = [...(await loadTreeIndex()).byId.values()];
 
   const unpairedIds = [];
   let paired = 0;
-  for (const { node, ancestorIds } of all) {
+  for (const { id, ancestorIds } of all) {
     if (isExcluded(ancestorIds, overrides, config.defaultPolicy)) continue;
-    if (Object.prototype.hasOwnProperty.call(synced, node.id)) {
+    if (Object.prototype.hasOwnProperty.call(synced, id)) {
       paired++;
     } else {
-      unpairedIds.push(node.id);
+      unpairedIds.push(id);
     }
   }
   return {
@@ -66,24 +66,23 @@ export async function scanImportScope() {
 async function refreshPresenceForImport() {
   const config = await getConfig();
   if (!config.token || (await isRateLimited())) return;
-  const budget = await createWakeBudget({ mode: "full" });
-  const client = new RaindropClient(config.token);
-  budget.bindClient(client);
-  try {
-    const got = await ensurePresence({ client, budget, reason: "pull-now" });
-    if (!got.refreshed) {
-      await appendLog("warn", "Import: Raindrop export unavailable; uploads will search by URL.");
+  await withWakeBudget(async (budget) => {
+    const client = new RaindropClient(config.token);
+    budget.bindClient(client);
+    try {
+      const got = await ensurePresence({ client, budget, reason: "pull-now" });
+      if (!got.refreshed) {
+        await appendLog("warn", "Import: Raindrop export unavailable; uploads will search by URL.");
+      }
+    } catch (err) {
+      if (!(await handleClientError(err))) {
+        await appendLog(
+          "warn",
+          `Import: presence refresh failed (${err.message}); uploads will search by URL.`
+        );
+      }
     }
-  } catch (err) {
-    if (!(await handleClientError(err))) {
-      await appendLog(
-        "warn",
-        `Import: presence refresh failed (${err.message}); uploads will search by URL.`
-      );
-    }
-  } finally {
-    await finalizeWakeBudget(budget, { ranWork: budget.spent > 0 });
-  }
+  });
 }
 
 export async function startBackfill() {

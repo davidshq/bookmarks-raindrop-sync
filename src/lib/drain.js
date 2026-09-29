@@ -29,12 +29,9 @@ import { processJob } from "./job-processors.js";
 import { migrateLegacyRaindropRoots } from "./migrate-roots.js";
 import { completePairMigration } from "./pair-migration.js";
 import { gateDrainForBulkPrompt, noteQueueDepthForBulkPrompt } from "./queue-bulk-prompt.js";
-import { createWakeBudget, finalizeWakeBudget } from "./wake-budget.js";
+import { withWakeBudget } from "./wake-budget.js";
 
 let draining = false; // best-effort in-memory reentrancy guard (idempotent anyway)
-
-/** Job kinds that remove something on one side. */
-const DELETE_KINDS = new Set([JOB.DELETE_EDGE, JOB.DELETE_RAINDROP]);
 
 /**
  * Delete circuit breaker gate. True when delete jobs must stay queued this
@@ -80,20 +77,24 @@ async function ensureRootsMigrated(client) {
 export async function drain(opts = {}) {
   if (draining) return;
   draining = true;
-  const ownedBudget = !opts.budget;
-  const budget = opts.budget ?? (await createWakeBudget({ mode: "short" }));
   try {
-    await ensurePairsMigrated();
-    await drainLoop(budget);
-  } catch (err) {
-    await appendLog("error", `Drain crashed: ${err.message}`);
+    // Opportunistic drains own a short budget and persist the rate window too —
+    // otherwise live storms leave heartbeat seeding from a stale Remaining.
+    // Loop errors are logged here, before the budget is finalized, so a later
+    // storage failure while persisting the window cannot mask the real cause.
+    await withWakeBudget(
+      async (budget) => {
+        try {
+          await ensurePairsMigrated();
+          await drainLoop(budget);
+        } catch (err) {
+          await appendLog("error", `Drain crashed: ${err.message}`);
+        }
+      },
+      { mode: "short", budget: opts.budget }
+    );
   } finally {
     draining = false;
-    // Opportunistic drains must persist the rate window too — otherwise live
-    // storms leave heartbeat seeding from a stale Remaining.
-    if (ownedBudget) {
-      await finalizeWakeBudget(budget, { ranWork: budget.spent > 0 });
-    }
   }
 }
 
@@ -144,7 +145,7 @@ async function drainLoop(budget) {
   let processed = 0;
   let heldDeletes = 0;
   for (const job of dueJobs) {
-    const isDelete = DELETE_KINDS.has(queue.jobKind(job));
+    const isDelete = queue.isDeleteJob(job);
     // Jobs released by Allow run past the gate and do not count toward the window.
     const released = isDelete && (await getDeleteBreaker()).allowedJobIds.has(String(job.id));
     if (isDelete && !released && (await deletesHeld())) {

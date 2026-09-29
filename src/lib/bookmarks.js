@@ -22,8 +22,9 @@
 // restarts and survives renames/moves within the profile — which is exactly the
 // rename-survival property the design wanted from a GUID.
 
-import { findTopRootByAlias, rootRole } from "./bookmark-roots.js";
-import { OUTSIDE_ROOT_MIRROR_FOLDER } from "./constants.js";
+import { ABSOLUTE_ROOT_ID } from "./constants.js";
+import { findTopRootByAlias, rootRole, rootTitlesEqual } from "./bookmark-roots.js";
+import { isOutsideRootContainer } from "./collections.js";
 import { isExcluded } from "./policy.js";
 
 export async function getNode(id) {
@@ -84,7 +85,7 @@ export async function moveBookmark(id, { parentId, index } = {}) {
 
 /** Top-level user-visible roots under the invisible absolute root (id "0"). */
 export async function getTopRoots() {
-  return getChildren("0");
+  return getChildren(ABSOLUTE_ROOT_ID);
 }
 
 /**
@@ -160,10 +161,7 @@ export async function resolveMirrorPlacement(relativeSegments, rootName, topRoot
   // Sync-root mirror folder and outside-root Raindrop container both live under
   // the other-bookmarks root; match either prefix so we do not nest oddly.
   const firstLower = (first || "").toLowerCase();
-  if (
-    firstLower === (rootName || "").toLowerCase() ||
-    firstLower === OUTSIDE_ROOT_MIRROR_FOLDER.toLowerCase()
-  ) {
+  if (firstLower === (rootName || "").toLowerCase() || isOutsideRootContainer(first)) {
     return { startId: base.id, titles: relativeSegments };
   }
 
@@ -240,7 +238,7 @@ export async function walkAncestorsFromFolder(folderId, { soft = false } = {}) {
   const ancestorIds = [];
   const segments = [];
   let id = folderId;
-  while (id && id !== "0") {
+  while (id && id !== ABSOLUTE_ROOT_ID) {
     ancestorIds.push(id);
     try {
       const node = await getNode(id);
@@ -271,7 +269,8 @@ export async function ancestorIdsFromFolder(folderId) {
  * @returns {Promise<string[]>}
  */
 export async function folderPolicyAncestorIds(folderId, parentId) {
-  const parentAncestors = parentId && parentId !== "0" ? await ancestorIdsFromFolder(parentId) : [];
+  const parentAncestors =
+    parentId && parentId !== ABSOLUTE_ROOT_ID ? await ancestorIdsFromFolder(parentId) : [];
   return [String(folderId), ...parentAncestors];
 }
 
@@ -282,6 +281,26 @@ export async function folderPolicyAncestorIds(folderId, parentId) {
 export async function isFolderExcluded(folderId, parentId, overrides, defaultPolicy) {
   const ancestorIds = await folderPolicyAncestorIds(folderId, parentId);
   return isExcluded(ancestorIds, overrides, defaultPolicy);
+}
+
+/**
+ * Folder gate shared by push and pull renames. `gone`: the node no longer
+ * exists (caller drops its folder→collection mapping). `skip`: a URL node, a
+ * browser top root (local titles stay; Raindrop keeps canonical ones), or an
+ * excluded folder. Otherwise the live folder node.
+ * With `wantTitle` (pull renames), a folder already titled that way — including
+ * bar/other alias drift — is also `skip`, checked before the ancestor walk.
+ * @returns {Promise<{ gone: true } | { skip: true } | { node: chrome.bookmarks.BookmarkTreeNode }>}
+ */
+export async function renamableFolder(folderId, overrides, defaultPolicy, { wantTitle } = {}) {
+  const node = await getNodeOrNull(folderId);
+  if (!node) return { gone: true };
+  if (node.url || node.parentId === ABSOLUTE_ROOT_ID) return { skip: true };
+  if (wantTitle != null && rootTitlesEqual(node.title, wantTitle)) return { skip: true };
+  if (await isFolderExcluded(folderId, node.parentId, overrides, defaultPolicy)) {
+    return { skip: true };
+  }
+  return { node };
 }
 
 // Resolve a bookmark's location into:
@@ -295,7 +314,7 @@ export async function isFolderExcluded(folderId, parentId, overrides, defaultPol
 // Throws if an ancestor is missing so processUpload defers instead of
 // writing an incomplete Raindrop path.
 export async function resolveLocation(node) {
-  if (!node?.parentId || node.parentId === "0") {
+  if (!node?.parentId || node.parentId === ABSOLUTE_ROOT_ID) {
     return { segments: [], ancestorIds: [] };
   }
   return walkAncestorsFromFolder(node.parentId);
@@ -315,25 +334,5 @@ export async function collectUrlDescendantIds(folderId) {
     }
   };
   await walk(String(folderId));
-  return out;
-}
-
-// Collect every URL-bearing node in the tree (used by backfill), each tagged
-// with its resolved location so the caller can apply policy. `segments` and
-// `ancestorIds` describe the folders descended into, excluding the invisible
-// absolute root (id "0"). This mirrors resolveLocation()'s output shape.
-export async function collectAllBookmarks() {
-  const tree = await getTree();
-  const out = [];
-  const walk = (node, segments, ancestorIds) => {
-    for (const child of node.children ?? []) {
-      if (child.url) {
-        out.push({ node: child, segments, ancestorIds });
-      } else {
-        walk(child, [...segments, child.title], [child.id, ...ancestorIds]);
-      }
-    }
-  };
-  for (const root of tree) walk(root, [], []); // root is id "0": empty path
   return out;
 }

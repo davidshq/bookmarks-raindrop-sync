@@ -185,3 +185,38 @@ test("v1 backup dropped after the next completed finish", async () => {
   assert.equal(storage.has("pairsV1Backup"), false, "backup gone after a completed finish");
   assert.equal((await eng.store.getPairs()).byBookmark[bm.id], String(item._id));
 });
+
+test("Match existing skips bookmarks in excluded folders", async () => {
+  const { eng, mock, root } = await setupEngine();
+  const { POLICY } = eng.constants;
+  const priv = await edgeFolder("2", "Private");
+  await eng.store.setOverride(priv.id, POLICY.EXCLUDE, "Other favorites/Private");
+  const hidden = await edgeBookmark(priv.id, "hidden", "https://e.example/hidden");
+  const shown = await edgeBookmark("1", "shown", "https://e.example/shown");
+  mock._seedRich(root._id, { link: "https://e.example/hidden", title: "hidden" });
+  mock._seedRich(root._id, { link: "https://e.example/shown", title: "shown" });
+
+  const plan = await eng.matchExisting.planMatchExisting();
+  const matchedIds = plan.matched.map((m) => m.bookmarkId);
+  assert.ok(matchedIds.includes(shown.id), "in-scope bookmark matched");
+  assert.ok(!matchedIds.includes(hidden.id), "excluded-folder bookmark not matched");
+});
+
+test("Match existing treats a pair held by an excluded-folder bookmark as a conflict", async () => {
+  const { eng, mock, root } = await setupEngine();
+  const { POLICY } = eng.constants;
+  const priv = await edgeFolder("2", "Private");
+  await eng.store.setOverride(priv.id, POLICY.EXCLUDE, "Other favorites/Private");
+  const url = "https://e.example/shared";
+  const held = await edgeBookmark(priv.id, "held", url);
+  const other = await edgeBookmark("1", "other", url);
+  const item = mock._seedRich(root._id, { link: url, title: "shared" });
+  await eng.store.recordSynced(held.id, String(item._id), { url });
+
+  const plan = await eng.matchExisting.planMatchExisting();
+  assert.ok(
+    !plan.matched.some((m) => m.bookmarkId === other.id),
+    "live out-of-scope holder blocks the claim"
+  );
+  assert.equal(plan.conflicts, 1);
+});

@@ -45,6 +45,13 @@ export function jobKind(job) {
   return job.kind || JOB.UPLOAD;
 }
 
+/** Job kinds that remove something on one side (delete circuit breaker scope). */
+export const DELETE_JOB_KINDS = new Set([JOB.DELETE_EDGE, JOB.DELETE_RAINDROP]);
+
+export function isDeleteJob(job) {
+  return DELETE_JOB_KINDS.has(jobKind(job));
+}
+
 /** Raindrop→Edge jobs (pull creates/updates/renames, remote-delete → local delete). */
 const RAINDROP_TO_EDGE_KINDS = new Set([
   JOB.PULL_CREATE,
@@ -143,23 +150,28 @@ async function noteBulkPromptAfterMutation() {
   }
 }
 
+/** Fresh queue entry: upload by default, no attempts, due now. */
+function newJob(fields) {
+  return { kind: JOB.UPLOAD, ...fields, attempts: 0, nextAttemptAt: 0 };
+}
+
+/** Coalesce an activity hint onto a queued job: "move" wins, else first reason sticks. */
+function mergeReason(existing, reason) {
+  if (reason === "move") existing.reason = "move";
+  else if (reason && !existing.reason) existing.reason = reason;
+}
+
 export async function enqueueJob(job) {
   const added = await withLock(async () => {
     const jobs = await readQueue();
     const existing = jobs.find((j) => j.id === job.id);
     if (existing) {
       // Promote activity hint when a move coalesces with an earlier change.
-      if (job.reason === "move") existing.reason = "move";
-      else if (job.reason && !existing.reason) existing.reason = job.reason;
+      mergeReason(existing, job.reason);
       await writeQueue(jobs);
       return false;
     }
-    jobs.push({
-      attempts: 0,
-      nextAttemptAt: 0,
-      kind: JOB.UPLOAD,
-      ...job,
-    });
+    jobs.push({ attempts: 0, nextAttemptAt: 0, kind: JOB.UPLOAD, ...job });
     await writeQueue(jobs);
     return true;
   });
@@ -179,17 +191,10 @@ export async function enqueueMany(ids, { reason } = {}) {
     for (const id of ids) {
       const existing = byId.get(id);
       if (existing) {
-        if (reason === "move") existing.reason = "move";
-        else if (reason && !existing.reason) existing.reason = reason;
+        mergeReason(existing, reason);
         continue;
       }
-      const job = {
-        id,
-        kind: JOB.UPLOAD,
-        attempts: 0,
-        nextAttemptAt: 0,
-        ...(reason ? { reason } : {}),
-      };
+      const job = newJob({ id, ...(reason ? { reason } : {}) });
       jobs.push(job);
       byId.set(id, job);
       count++;
@@ -278,13 +283,7 @@ export async function defer(id, now, { lastError } = {}) {
 // Defer a job by an explicit delay (used for rate-limit Retry-After).
 // Does not increment attempts and never dead-letters.
 export async function deferUntil(id, until) {
-  return withLock(async () => {
-    const jobs = await readQueue();
-    const job = jobs.find((j) => j.id === id);
-    if (!job) return;
-    job.nextAttemptAt = until;
-    await writeQueue(jobs);
-  });
+  return patchJob(id, { nextAttemptAt: until });
 }
 
 /**
@@ -347,11 +346,7 @@ export async function retryDeadLetter() {
     let added = 0;
     for (const entry of dead) {
       const { lastError: _le, deadAt: _da, ...rest } = entry;
-      const job = {
-        ...rest,
-        attempts: 0,
-        nextAttemptAt: 0,
-      };
+      const job = newJob(rest);
       if (byId.has(job.id)) continue;
       jobs.push(job);
       byId.set(job.id, job);

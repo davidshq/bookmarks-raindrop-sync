@@ -11,6 +11,7 @@ import {
   LEGACY_ROOT_NAME,
 } from "./bookmark-roots.js";
 import {
+  applyCollectionTitleInIndex,
   buildCollectionIndex,
   findRootCollection,
   getByParent,
@@ -22,8 +23,6 @@ import {
   setCollectionCache,
   setConfig,
 } from "./store.js";
-
-const ROOT = "root";
 
 /** Legacy → canonical child titles under the sync root. */
 const CHILD_RENAMES = [
@@ -79,15 +78,9 @@ export async function migrateLegacyRaindropRoots(client) {
       );
     } else {
       await client.updateCollection(rootCol._id, { title: DEFAULT_ROOT_NAME });
-      rootCol.title = DEFAULT_ROOT_NAME;
+      applyCollectionTitleInIndex(index, rootCol._id, DEFAULT_ROOT_NAME);
       rootRenamed = true;
       renamed.push(`${LEGACY_ROOT_NAME}→${DEFAULT_ROOT_NAME}`);
-      // Refresh sibling map title key.
-      const siblings = getByParent(index, ROOT);
-      if (siblings) {
-        siblings.delete(LEGACY_ROOT_NAME.toLowerCase());
-        siblings.set(DEFAULT_ROOT_NAME.toLowerCase(), rootCol);
-      }
     }
   }
 
@@ -112,11 +105,7 @@ export async function migrateLegacyRaindropRoots(client) {
       }
       if ((oldCol.title || "") === to) continue;
       await client.updateCollection(oldCol._id, { title: to });
-      if (children) {
-        children.delete(from.toLowerCase());
-        oldCol.title = to;
-        children.set(to.toLowerCase(), oldCol);
-      }
+      applyCollectionTitleInIndex(index, oldCol._id, to);
       renamed.push(`${from}→${to}`);
     }
   }

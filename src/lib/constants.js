@@ -35,6 +35,9 @@ export const ALL_RAINDROP_FOLDER_MODES = [
   RAINDROP_FOLDER_MODE.MIRROR_ALL,
 ];
 
+/** Chromium's invisible absolute bookmark root; its children are the top roots. */
+export const ABSOLUTE_ROOT_ID = "0";
+
 // Durable queue job kinds. Legacy jobs without `kind` are treated as upload.
 export const JOB = {
   UPLOAD: "upload",

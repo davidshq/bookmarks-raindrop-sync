@@ -1,12 +1,12 @@
 // Bulk lane v1: Match existing — link Edge bookmarks to Raindrop export.csv by URL.
 // Dry-run then apply; no deletes, moves, or raindrop creates.
 
-import { collectAllBookmarks } from "./bookmarks.js";
 import { indexExportByUrl } from "./export-csv.js";
-import { resolveIndexedUrls, urlMatchKeys } from "./url-match.js";
+import { resolveIndexedUrls } from "./url-match.js";
 import { RaindropClient, RateLimitError, AuthError } from "./raindrop.js";
 import { handleClientError } from "./client-errors.js";
 import { adoptExportCsv } from "./presence.js";
+import { loadTreeIndex } from "./tree-index.js";
 import {
   getConfig,
   getPairs,
@@ -84,12 +84,17 @@ export function classifyPairClaim(bid, rid, pairs, liveIds, liveRaindropIds) {
  * @param {string} csvText
  * @param {{ id: string, url: string }[]} edgeBookmarks
  * @param {{ byBookmark: Record<string, string>, byRaindrop: Record<string, string> }} pairs
+ * @param {{ liveBookmarkIds?: Iterable<string> }} [opts] every live Edge id, when
+ *   `edgeBookmarks` is only the in-scope subset: a pair held by a live bookmark
+ *   outside scope is still a conflict, not a stale link.
  * @returns {Omit<MatchPlan, 'ok'|'error'|'reason'> & { ok: true }}
  */
-export function planMatchFromExport(csvText, edgeBookmarks, pairs) {
+export function planMatchFromExport(csvText, edgeBookmarks, pairs, { liveBookmarkIds } = {}) {
   const { byKey, raindropIds, raindropCount, urlById } = indexExportByUrl(csvText);
   /** Live Edge ids — stale pair map entries (Edge Sync rewrite) are not conflicts. */
-  const liveIds = new Set(edgeBookmarks.map((b) => String(b.id)));
+  const liveIds = new Set(
+    liveBookmarkIds ? [...liveBookmarkIds].map(String) : edgeBookmarks.map((b) => String(b.id))
+  );
   /** Live raindrop ids — a forward link to an id outside the export is a ghost, not a conflict. */
   const liveRaindropIds = new Set([...raindropIds].map(String));
 
@@ -100,10 +105,7 @@ export function planMatchFromExport(csvText, edgeBookmarks, pairs) {
 
   for (const bm of edgeBookmarks) {
     const bid = String(bm.id);
-    const { ids } = resolveIndexedUrls(byKey, bm.url, (rid) => {
-      const u = urlById.get(rid);
-      return u ? urlMatchKeys(u)[0] : null;
-    });
+    const { ids } = resolveIndexedUrls(byKey, bm.url, (rid) => urlById.get(rid));
     if (ids.length === 0) {
       edgeOnly++;
       continue;
@@ -181,48 +183,60 @@ export function planMatchFromExport(csvText, edgeBookmarks, pairs) {
 }
 
 /**
- * Dry-run: fetch export + scan Edge + return plan (matched list included for Apply).
- * @returns {Promise<MatchPlan>}
+ * Shared front half of Match and Repair dry-runs: migrate pairs, then fetch the
+ * full Raindrop export. Rate limit, missing token, and auth failures resolve to
+ * `{ early }` built by the caller's empty-plan factory.
+ * @template P
+ * @param {(fields: object) => P} empty
+ * @returns {Promise<{ early: P } | { csv: string, exportStartedAt: number }>}
  */
-export async function planMatchExisting() {
+export async function fetchExportForPlan(empty) {
   await ensurePairsMigrated();
-
-  if (await isRateLimited()) {
-    return emptyPlan({ reason: "rate_limited" });
-  }
-
+  if (await isRateLimited()) return { early: empty({ reason: "rate_limited" }) };
   const config = await getConfig();
   if (!config.token) {
-    return emptyPlan({ ok: false, error: "No Raindrop token configured" });
+    return { early: empty({ ok: false, error: "No Raindrop token configured" }) };
   }
 
   const client = new RaindropClient(config.token);
-  let csv;
   const exportStartedAt = Date.now();
   try {
-    csv = await client.exportRaindropsCsv(0);
+    const csv = await client.exportRaindropsCsv(0);
     client.throwIfShouldPause();
+    return { csv, exportStartedAt };
   } catch (err) {
     if (await handleClientError(err)) {
-      if (err instanceof RateLimitError) {
-        return emptyPlan({ reason: "rate_limited" });
-      }
-      if (err instanceof AuthError) {
-        return emptyPlan({ ok: false, error: err.message });
-      }
+      if (err instanceof RateLimitError) return { early: empty({ reason: "rate_limited" }) };
+      if (err instanceof AuthError) return { early: empty({ ok: false, error: err.message }) };
     }
     throw err;
   }
+}
+
+/** In-scope Edge bookmarks (same scope Repair re-matches against). */
+export function inScopeBookmarks(treeIndex) {
+  return [...treeIndex.byId.values()]
+    .filter((e) => e.inScope)
+    .map((e) => ({ id: e.id, url: e.url }));
+}
+
+/**
+ * Dry-run: fetch export + scan Edge + return plan (matched list included for Apply).
+ * Only in-scope bookmarks are matched: excluded folders and the landing zone
+ * never sync, so pairing them would only feed stale-pair repair later.
+ * @returns {Promise<MatchPlan>}
+ */
+export async function planMatchExisting() {
+  const fetched = await fetchExportForPlan(emptyPlan);
+  if ("early" in fetched) return fetched.early;
 
   // One export serves Match and the engine's presence snapshot.
-  await adoptExportCsv(csv, exportStartedAt);
-  const all = await collectAllBookmarks();
-  const edgeBookmarks = all.map(({ node }) => ({
-    id: String(node.id),
-    url: node.url,
-  }));
+  await adoptExportCsv(fetched.csv, fetched.exportStartedAt);
+  const treeIndex = await loadTreeIndex();
   const pairs = await getPairs();
-  return planMatchFromExport(csv, edgeBookmarks, pairs);
+  return planMatchFromExport(fetched.csv, inScopeBookmarks(treeIndex), pairs, {
+    liveBookmarkIds: treeIndex.byId.keys(),
+  });
 }
 
 /**
@@ -240,7 +254,7 @@ export async function applyMatchExisting(matched, { liveRaindropIds } = {}) {
   }
 
   const nodes = new Map(
-    (await collectAllBookmarks()).map(({ node, segments }) => [String(node.id), { node, segments }])
+    [...(await loadTreeIndex()).byId.values()].map((e) => [e.id, { node: e, segments: e.path }])
   );
   const liveIds = new Set(nodes.keys());
   const liveRids = liveRaindropIds ? new Set([...liveRaindropIds].map(String)) : undefined;

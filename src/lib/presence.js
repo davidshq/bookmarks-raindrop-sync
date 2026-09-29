@@ -29,7 +29,7 @@ import {
   PRESENCE_SHRINK_MIN_ROWS,
 } from "./constants.js";
 import { indexExportByUrl } from "./export-csv.js";
-import { urlMatchKeys, resolveIndexedUrls } from "./url-match.js";
+import { resolveIndexedUrls } from "./url-match.js";
 import { _read as read, _write as write } from "./store.js";
 import { AuthError, RateLimitError } from "./raindrop.js";
 
@@ -207,10 +207,7 @@ export function idsForUrl(snap, url) {
  */
 export function resolveIdsForUrl(snap, url) {
   if (!snap?.byUrlKey || !url) return { ids: [], match: "none" };
-  return resolveIndexedUrls(snap.byUrlKey, url, (id) => {
-    const u = snap.urlById?.get(id);
-    return u ? urlMatchKeys(u)[0] : null;
-  });
+  return resolveIndexedUrls(snap.byUrlKey, url, (id) => snap.urlById?.get(id));
 }
 
 /**
@@ -221,7 +218,11 @@ export function resolveIdsForUrl(snap, url) {
  * @returns {Promise<PresenceSnapshot>}
  */
 export async function adoptExportCsv(csvText, startedAt) {
-  const prev = await loadPresence();
+  return saveSnapshotFromExport(csvText, startedAt, await loadPresence());
+}
+
+/** Build the next snapshot from an export, chained onto `prev`, and persist it. */
+async function saveSnapshotFromExport(csvText, startedAt, prev) {
   const next = buildSnapshot(csvText, {
     at: startedAt,
     previousCompleteCount: prev?.lastCompleteCount || 0,
@@ -302,13 +303,6 @@ export async function ensurePresence({
     if (err instanceof AuthError || err instanceof RateLimitError) throw err;
     return { snapshot: snap, refreshed: false, due, unavailable: true, error: err?.message };
   }
-  const next = buildSnapshot(csv, {
-    at: startedAt,
-    previousCompleteCount: snap?.lastCompleteCount || 0,
-    previousSuspectCount: snap?.suspectCount ?? null,
-    expectNonEmpty: (await storedPairCount()) > 0,
-    seq: (snap?.seq || 0) + 1,
-  });
-  await savePresence(next);
+  const next = await saveSnapshotFromExport(csv, startedAt, snap);
   return { snapshot: next, refreshed: true, due };
 }

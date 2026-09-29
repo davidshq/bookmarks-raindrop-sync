@@ -6,7 +6,7 @@
 // export itself. URL counts use each URL's primary match key and only Edge
 // bookmarks in the synced scope.
 
-import { urlMatchKeys } from "./url-match.js";
+import { primaryUrlKey } from "./url-match.js";
 
 /**
  * @typedef {{
@@ -28,11 +28,6 @@ import { urlMatchKeys } from "./url-match.js";
  * Counts that need the snapshot are null when there is none; URL counts on the
  * Raindrop side are null when the snapshot has no URL index (restored ids only).
  */
-
-/** Primary key for a URL, or null. */
-function primaryKey(url) {
-  return url ? (urlMatchKeys(url)[0] ?? null) : null;
-}
 
 /**
  * @param {{
@@ -59,7 +54,7 @@ export function computePairHealth({ records, treeIndex, snapshot = null, now = D
   const edgeKeys = new Map();
   for (const entry of treeIndex.byId.values()) {
     if (!entry.inScope) continue;
-    const key = primaryKey(entry.url);
+    const key = primaryUrlKey(entry.url);
     if (key) edgeKeys.set(key, (edgeKeys.get(key) || 0) + 1);
   }
   let duplicateUrlGroupsEdge = 0;
@@ -73,7 +68,7 @@ export function computePairHealth({ records, treeIndex, snapshot = null, now = D
     /** @type {Map<string, number>} */
     const rdKeys = new Map();
     for (const url of snapshot.urlById.values()) {
-      const key = primaryKey(url);
+      const key = primaryUrlKey(url);
       if (key) rdKeys.set(key, (rdKeys.get(key) || 0) + 1);
     }
     edgeOnlyUrls = 0;

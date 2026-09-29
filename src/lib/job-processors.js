@@ -15,14 +15,7 @@
 //   delete-edge      Trash or snapshot absence, re-checked here against the
 //                    current snapshot; a surviving raindrop rebinds the pair.
 
-import {
-  POLICY,
-  JOB,
-  SYNC_MODE,
-  RAINDROP_FOLDER_MODE,
-  OUTSIDE_ROOT_MIRROR_FOLDER,
-} from "./constants.js";
-import { rootTitlesEqual } from "./bookmark-roots.js";
+import { POLICY, JOB, SYNC_MODE, RAINDROP_FOLDER_MODE, ABSOLUTE_ROOT_ID } from "./constants.js";
 import {
   getCollectionCache,
   cacheCollection,
@@ -71,7 +64,7 @@ import {
   mirrorPathExists,
   ancestorIdsFromFolder,
   walkAncestorsFromFolder,
-  isFolderExcluded,
+  renamableFolder,
 } from "./bookmarks.js";
 import { resolvePolicy, isExcluded } from "./policy.js";
 import { isNotFoundError, AuthError, RateLimitError } from "./raindrop.js";
@@ -79,20 +72,26 @@ import {
   ensureCollectionPath,
   findRootCollection,
   collectionIdFromRelative,
-  collectionPathFromRoot,
+  isUnderRoot,
   raindropUploadSegments,
   recordFolderCollectionsAlongPath,
   recordFolderCollectionsForPulledPath,
   applyCollectionTitleInIndex,
+  isOutsideRootContainer,
 } from "./collections.js";
 import { canCreateRaindropOnlyPath } from "./allowlist.js";
 import { computePullUpdatePlan } from "./pull-update.js";
 import { filterUrlMatchingItems, pickMoveRebindCandidate } from "./move-rebind.js";
-import { urlMatchKeys, urlMatchKind } from "./url-match.js";
+import { pickUrlMatches, primaryUrlKey, urlMatchKind } from "./url-match.js";
 import { PRESENCE_STALE_MS } from "./constants.js";
 import { ensurePresence, isUsableForUrls, resolveIdsForUrl } from "./presence.js";
-import { loadTreeIndex, treeEntriesForUrl } from "./tree-index.js";
-import { rebindStaleEdgeId, rebindStaleRaindropId } from "./pair-rebind.js";
+import { loadTreeIndex } from "./tree-index.js";
+import {
+  edgeSurvivorCandidates,
+  placementFromEntry,
+  rebindStaleEdgeId,
+  rebindStaleRaindropId,
+} from "./pair-rebind.js";
 
 /** Job kinds that run in one-way mode (Edge→Raindrop). */
 const ONE_WAY_KINDS = new Set([JOB.UPLOAD, JOB.RENAME_COLLECTION]);
@@ -173,12 +172,7 @@ async function pickClaimable(bookmarkId, rids, liveRaindropIds) {
  */
 async function tryReclaimRaindropByUrl(job, url, ctx) {
   const { client, budget } = ctx;
-  let snapshot = null;
-  try {
-    ({ snapshot } = await ensurePresence({ client, budget, reason: "on-demand" }));
-  } catch (err) {
-    if (err instanceof AuthError || err instanceof RateLimitError) throw err;
-  }
+  const snapshot = await ensurePresenceOrNull({ client, budget, reason: "on-demand" });
   const now = Date.now();
   const fresh =
     isUsableForUrls(snapshot, now) &&
@@ -188,7 +182,7 @@ async function tryReclaimRaindropByUrl(job, url, ctx) {
     // Raindrops this engine paired after the export began are live too; the
     // snapshot just cannot see them yet. Pair records carry the exact key only.
     const pairs = await getPairs();
-    const exactKey = urlMatchKeys(url)[0];
+    const exactKey = primaryUrlKey(url);
     const recent = (pairs.byUrlKey[exactKey] || []).filter((rid) => {
       const seen = pairs.records[rid]?.lastSeenRaindropAt;
       return seen != null && seen >= snapshot.at;
@@ -451,26 +445,13 @@ async function processRenameCollection(job, ctx) {
   const { client, config, overrides, cache, getIndex } = ctx;
   const folderId = job.folderId != null ? String(job.folderId) : String(job.id).replace(/^rc-/, "");
 
-  const node = await getNodeOrNull(folderId);
-  if (!node) {
-    await clearFolderCollection(folderId);
+  const gate = await renamableFolder(folderId, overrides, config.defaultPolicy);
+  if (!gate.node) {
+    if (gate.gone) await clearFolderCollection(folderId);
     await queue.remove(job.id);
     return;
   }
-  if (node.url) {
-    await queue.remove(job.id);
-    return;
-  }
-  // Browser top roots keep local titles; Raindrop stays on canonical bar/other.
-  if (node.parentId === "0") {
-    await queue.remove(job.id);
-    return;
-  }
-
-  if (await isFolderExcluded(folderId, node.parentId, overrides, config.defaultPolicy)) {
-    await queue.remove(job.id);
-    return;
-  }
+  const { node } = gate;
 
   const collectionId = await getFolderCollectionId(folderId);
   if (collectionId == null) {
@@ -566,6 +547,7 @@ async function processPullCreate(job, ctx) {
   }
 
   const parentId = await resolveEdgeParentForMirror(relative, config.rootName);
+  const placement = { getIndex, index, rootId, collectionId, relative, rootName: config.rootName };
 
   // Crash recovery: prior drain may have created the Edge bookmark without
   // recording the pair. Reclaim instead of creating a duplicate.
@@ -573,18 +555,7 @@ async function processPullCreate(job, ctx) {
     const orphan = await findUnpairedPullCreateOrphan(parentId, job.link, rid);
     if (orphan) {
       await suppressCreate(orphan.id);
-      await recordSynced(orphan.id, rid, await pulledMeta(orphan, job, collectionId));
-      await recordPulledFolderCollections({
-        getIndex,
-        index,
-        rootId,
-        collectionId,
-        relative,
-        rootName: config.rootName,
-        edgeLeafFolderId: orphan.parentId,
-      });
-      await appendLog("info", `Pulled: ${job.title || job.link}`);
-      await queue.remove(job.id);
+      await finishPulledBookmark(orphan, job, rid, placement);
       return;
     }
   }
@@ -609,19 +580,7 @@ async function processPullCreate(job, ctx) {
   }
   await suppressCreate(node.id);
   releaseExtensionCreate(node.id);
-  await recordSynced(node.id, rid, await pulledMeta(node, job, collectionId));
-  // Learn folder→collection so later Raindrop renames can pull-rename in place.
-  await recordPulledFolderCollections({
-    getIndex,
-    index,
-    rootId,
-    collectionId,
-    relative,
-    rootName: config.rootName,
-    edgeLeafFolderId: node.parentId,
-  });
-  await appendLog("info", `Pulled: ${job.title || job.link}`);
-  await queue.remove(job.id);
+  await finishPulledBookmark(node, job, rid, placement);
 }
 
 /**
@@ -642,6 +601,40 @@ async function pulledMeta(node, job, collectionId) {
 }
 
 /**
+ * Presence snapshot for a drain-time decision, or null when the export is
+ * unavailable. Auth and rate-limit errors still propagate to the drain gate.
+ */
+async function ensurePresenceOrNull(opts) {
+  try {
+    return (await ensurePresence(opts)).snapshot;
+  } catch (err) {
+    if (err instanceof AuthError || err instanceof RateLimitError) throw err;
+    return null;
+  }
+}
+
+/**
+ * Record a pulled Edge bookmark's pair and folder→collection mapping, then
+ * finish the job. Shared by the fresh create and the crash-orphan reclaim.
+ */
+async function finishPulledBookmark(node, job, rid, placement) {
+  const { getIndex, index, rootId, collectionId, relative, rootName } = placement;
+  await recordSynced(node.id, rid, await pulledMeta(node, job, collectionId));
+  // Learn folder→collection so later Raindrop renames can pull-rename in place.
+  await recordPulledFolderCollections({
+    getIndex,
+    index,
+    rootId,
+    collectionId,
+    relative,
+    rootName,
+    edgeLeafFolderId: node.parentId,
+  });
+  await appendLog("info", `Pulled: ${job.title || job.link}`);
+  await queue.remove(job.id);
+}
+
+/**
  * Find an Edge bookmark under parent matching link that is unpaired (or already
  * this raindrop) — left behind when pull-create was interrupted after createBookmark.
  * @param {string} parentId
@@ -650,23 +643,14 @@ async function pulledMeta(node, job, collectionId) {
  * @returns {Promise<{ id: string, parentId?: string, url?: string, title?: string }|null>}
  */
 async function findUnpairedPullCreateOrphan(parentId, link, raindropId) {
-  const children = await getChildren(parentId);
-  /** @type {{ id: string, parentId?: string, url?: string, title?: string }[]} */
-  const exact = [];
-  /** @type {{ id: string, parentId?: string, url?: string, title?: string }[]} */
-  const loose = [];
-  for (const child of children) {
-    if (!child?.url || !child.id) continue;
-    const kind = urlMatchKind(link, child.url);
-    if (!kind) continue;
+  const unclaimed = [];
+  for (const child of await getChildren(parentId)) {
+    if (!child?.url || !child.id || !urlMatchKind(link, child.url)) continue;
     const existingRid = await getRaindropId(child.id);
     if (existingRid != null && existingRid !== String(raindropId)) continue;
-    if (kind === "exact") exact.push(child);
-    else loose.push(child);
+    unclaimed.push(child);
   }
-  if (exact.length) return exact[0];
-  if (loose.length === 1) return loose[0];
-  return null;
+  return pickUrlMatches(link, unclaimed, (child) => child.url)[0] ?? null;
 }
 
 /**
@@ -682,7 +666,8 @@ async function recordPulledFolderCollections({
   rootName,
   edgeLeafFolderId,
 }) {
-  if (!edgeLeafFolderId || edgeLeafFolderId === "0" || !(relative || []).length) return;
+  if (!edgeLeafFolderId || edgeLeafFolderId === ABSOLUTE_ROOT_ID || !(relative || []).length)
+    return;
   try {
     const index = indexIn || (await getIndex());
     const root = rootIdIn != null ? { _id: rootIdIn } : findRootCollection(index, rootName);
@@ -702,12 +687,11 @@ async function recordPulledFolderCollections({
       recordFolderCollection
     );
     // Warm path cache so rename-heal can disambiguate siblings without a map.
-    const path =
-      rootId != null && collectionPathFromRoot(index, collectionId, rootId).length
-        ? [rootName, ...relative].join("/")
-        : (relative[0] || "").toLowerCase() === OUTSIDE_ROOT_MIRROR_FOLDER.toLowerCase()
-          ? relative.slice(1).join("/")
-          : relative.join("/");
+    const path = isUnderRoot(index, collectionId, rootId)
+      ? [rootName, ...relative].join("/")
+      : isOutsideRootContainer(relative[0])
+        ? relative.slice(1).join("/")
+        : relative.join("/");
     if (path) await cacheCollection(path, collectionId);
   } catch {
     // Pairing already done; rename pull can still no-op until a later upload maps.
@@ -850,27 +834,14 @@ async function processPullRenameFolder(job, ctx) {
     return;
   }
 
-  const node = await getNodeOrNull(folderId);
-  if (!node) {
-    await clearFolderCollection(folderId);
-    await queue.remove(job.id);
-    return;
-  }
-  if (node.url || node.parentId === "0") {
-    await queue.remove(job.id);
-    return;
-  }
-
   // Alias-only drift (Favorites bar ↔ Bookmarks bar) must not rename local roots.
-  if (rootTitlesEqual(node.title, wantTitle)) {
+  const gate = await renamableFolder(folderId, overrides, config.defaultPolicy, { wantTitle });
+  if (!gate.node) {
+    if (gate.gone) await clearFolderCollection(folderId);
     await queue.remove(job.id);
     return;
   }
-
-  if (await isFolderExcluded(folderId, node.parentId, overrides, config.defaultPolicy)) {
-    await queue.remove(job.id);
-    return;
-  }
+  const { node } = gate;
 
   // Mapping must still point at this collection.
   const mapped = await getFolderCollectionId(folderId);
@@ -896,11 +867,9 @@ async function processPullRenameFolder(job, ctx) {
 async function hasPendingDeleteForRaindrop(rid) {
   const target = String(rid);
   const jobs = await queue.list();
-  return jobs.some((j) => {
-    const kind = queue.jobKind(j);
-    if (kind !== JOB.DELETE_RAINDROP && kind !== JOB.DELETE_EDGE) return false;
-    return j.raindropId != null && String(j.raindropId) === target;
-  });
+  return jobs.some(
+    (j) => queue.isDeleteJob(j) && j.raindropId != null && String(j.raindropId) === target
+  );
 }
 
 /**
@@ -945,11 +914,10 @@ async function processDeleteRaindrop(job, ctx) {
 
   const treeIndex = await loadTreeIndex();
   const pairs = await getPairs();
-  const survivor = treeEntriesForUrl(treeIndex, url).find((e) => {
-    if (!e.inScope || e.id === removedBid) return false;
-    const bound = pairs.byBookmark[e.id];
-    return bound == null || String(bound) === rid;
-  });
+  // Lowest id wins here; rebind prefers the recorded path (pair-rebind.js).
+  const survivor = edgeSurvivorCandidates(treeIndex, url, rid, pairs).find(
+    (e) => e.id !== removedBid
+  );
   if (survivor) {
     if (record) {
       await applyPairChanges([
@@ -959,9 +927,7 @@ async function processDeleteRaindrop(job, ctx) {
           fromBookmarkId: record.bookmarkId,
           record: {
             ...record,
-            bookmarkId: survivor.id,
-            edgeParentId: survivor.parentId,
-            edgePathAtSync: survivor.path,
+            ...placementFromEntry(survivor),
             lastSeenEdgeAt: Date.now(),
           },
         },
@@ -1024,12 +990,12 @@ async function processDeleteEdge(job, ctx) {
   // look), not the one that produced the signal. One export serves a batch.
   // Jobs from older versions have no signalSeq: any usable snapshot will do.
   const afterSeq = job.signalSeq ?? null;
-  let snapshot = null;
-  try {
-    ({ snapshot } = await ensurePresence({ client, budget, reason: "on-demand", afterSeq }));
-  } catch (err) {
-    if (err instanceof AuthError || err instanceof RateLimitError) throw err;
-  }
+  const snapshot = await ensurePresenceOrNull({
+    client,
+    budget,
+    reason: "on-demand",
+    afterSeq,
+  });
   if (!isUsableForUrls(snapshot) || (afterSeq != null && (snapshot.seq || 0) <= afterSeq)) {
     // Needs a fresh URL-indexed snapshot; defer rather than guess.
     throw new Error(`Presence snapshot unavailable; local delete of ${label} deferred`);
@@ -1113,7 +1079,7 @@ async function pruneIfEmpty(folderId, config, overrides) {
     } catch {
       return;
     }
-    if (!folder || folder.parentId === "0") return;
+    if (!folder || folder.parentId === ABSOLUTE_ROOT_ID) return;
     if (overrides[id]?.policy === POLICY.EXCLUDE) return;
     const children = await getChildren(id);
     if (children.length > 0) return;

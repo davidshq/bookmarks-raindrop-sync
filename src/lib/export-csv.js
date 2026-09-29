@@ -1,6 +1,6 @@
 // Parse Raindrop export.csv (id + url presence; no collection path column).
 
-import { urlMatchKeys } from "./url-match.js";
+import { indexUrlKeys } from "./url-match.js";
 
 /**
  * Minimal RFC4180 CSV parse (quoted fields, "" escapes, BOM strip).
@@ -117,11 +117,7 @@ export function indexExportByUrl(csvText) {
     const rid = String(id);
     raindropIds.add(rid);
     urlById.set(rid, url);
-    for (const key of urlMatchKeys(url)) {
-      const list = byKey.get(key) || [];
-      if (!list.includes(rid)) list.push(rid);
-      byKey.set(key, list);
-    }
+    indexUrlKeys(byKey, url, rid);
   }
   return { byKey, raindropIds, raindropCount: raindropIds.size, urlById };
 }

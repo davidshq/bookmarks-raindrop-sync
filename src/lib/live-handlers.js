@@ -1,7 +1,7 @@
 // Live Edge bookmark listeners: enqueue durable jobs and signal drain.
 // Does not call the Raindrop API directly.
 
-import { JOB, SYNC_MODE } from "./constants.js";
+import { JOB, SYNC_MODE, ABSOLUTE_ROOT_ID } from "./constants.js";
 import {
   getConfig,
   getOverrides,
@@ -233,7 +233,7 @@ export async function handleBookmarkChanged(id, changeInfo) {
   // Folder title change → in-place Raindrop collection rename when mapped.
   // Never rename Raindrop from browser top roots (parent "0") — their Raindrop
   // titles stay canonical (Bookmarks bar / Other bookmarks).
-  if (node.parentId === "0") return;
+  if (node.parentId === ABSOLUTE_ROOT_ID) return;
 
   const collectionId = await getFolderCollectionId(id);
   if (collectionId == null) return;

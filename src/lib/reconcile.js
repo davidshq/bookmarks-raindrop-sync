@@ -45,16 +45,18 @@ import { getTopRoots, mirrorPathExists } from "./bookmarks.js";
 import {
   buildCollectionIndex,
   findRootCollection,
-  collectionPathFromRoot,
+  isUnderRoot,
   getById,
   mirrorRelativeSegments,
+  underRootRelativeSegments,
+  walkCollectionAncestors,
 } from "./collections.js";
 import { isAllowlistActive, pruneAllowlist } from "./allowlist.js";
 import { RaindropClient } from "./raindrop.js";
 import { maybeEnqueuePullCreate } from "./reconcile-enqueue.js";
 import { finishReconcileCycle, finishPendingPresence } from "./reconcile-finish.js";
 import { completePairMigration } from "./pair-migration.js";
-import { createWakeBudget, finalizeWakeBudget } from "./wake-budget.js";
+import { withWakeBudget } from "./wake-budget.js";
 
 /** Job kinds that hit the Raindrop API (compete with listing for rate budget). */
 const RAINDROP_BOUND_KINDS = new Set([
@@ -98,15 +100,12 @@ export async function reconcile({ force = true, budget } = {}) {
     return { enqueued: 0, pages: 0, done: false, skipped: true, reason: "rate_limited" };
   }
   reconciling = true;
-  const ownedBudget = !budget;
-  const wakeBudget = budget ?? (await createWakeBudget({ mode: "full" }));
   try {
-    return await reconcileOnce({ force, budget: wakeBudget });
+    return await withWakeBudget((wakeBudget) => reconcileOnce({ force, budget: wakeBudget }), {
+      budget,
+    });
   } finally {
     reconciling = false;
-    if (ownedBudget) {
-      await finalizeWakeBudget(wakeBudget, { ranWork: wakeBudget.spent > 0 });
-    }
   }
 }
 
@@ -218,27 +217,10 @@ async function reconcileOnce({ force, budget }) {
       pairs,
     };
 
-    // Resume outside-root phase if a prior tick finished the root listing.
-    if (outsideCursor) {
-      const outside = await continueOutsideRoot(
-        client,
-        outsideCursor,
-        pullCtx,
-        pageCap() - pages,
-        budget
-      );
-      enqueued += outside.enqueued;
-      pages += outside.pages;
-      if (!outside.done) {
-        return checkpointOutsidePending({
-          outsideCursor: outside.cursor,
-          enqueued,
-          pages,
-        });
-      }
-      outsideCursor = null;
-      await setReconcileState({ outsideCursor: null });
-    } else {
+    // Sync-root listing first, unless a prior tick already finished it and
+    // checkpointed the outside-root phase.
+    if (!outsideCursor) {
+      let rootDone = false;
       while (pages < pageCap() && budget.canSpend(1)) {
         const { items, count } = await client.listRaindrops(root._id, {
           page,
@@ -249,69 +231,51 @@ async function reconcileOnce({ force, budget }) {
         client.throwIfShouldPause();
 
         for (const item of items) {
-          enqueued += await maybeEnqueuePullCreate(item, pullCtx, (colId) => {
-            const fullPath = collectionPathFromRoot(index, colId, root._id);
-            if (!fullPath.length) return null;
-            return fullPath.slice(1);
-          });
+          enqueued += await maybeEnqueuePullCreate(item, pullCtx, (colId) =>
+            underRootRelativeSegments(index, colId, root._id)
+          );
         }
 
         if (isListPageDone(page, RAINDROP_LIST_PER_PAGE, items, count)) {
-          // Root listing done — start outside-root with remaining page budget.
-          if (isAllowlistActive(allowlist)) {
-            const started = startOutsideCursor(allowlist, index, root._id);
-            if (started) {
-              const remaining = Math.max(0, pageCap() - pages);
-              const outside = await continueOutsideRoot(
-                client,
-                started,
-                pullCtx,
-                remaining,
-                budget
-              );
-              enqueued += outside.enqueued;
-              pages += outside.pages;
-              if (!outside.done) {
-                return checkpointOutsidePending({
-                  outsideCursor: outside.cursor,
-                  enqueued,
-                  pages,
-                });
-              }
-            }
-          }
-
-          return finishReconcileCycle({
-            client,
-            budget,
-            force,
-            index,
-            rootId: root._id,
-            config,
-            overrides,
-            topRoots,
-            folderMode,
-            allowlist,
-            enqueued,
-            pages,
-          });
+          rootDone = true;
+          break;
         }
-
         page++;
         await setReconcileState({ cursorPage: page, outsideCursor: null, running: true });
       }
 
-      await setReconcileState({ running: false, cursorPage: page, lastRunAt: Date.now() });
-      if (enqueued > 0) {
-        await appendLog(
-          "info",
-          `Pull queued ${enqueued} Raindrop change(s); still paging sync-root listing.`
-        );
+      if (!rootDone) {
+        await setReconcileState({ running: false, cursorPage: page, lastRunAt: Date.now() });
+        if (enqueued > 0) {
+          await appendLog(
+            "info",
+            `Pull queued ${enqueued} Raindrop change(s); still paging sync-root listing.`
+          );
+        }
+        return { enqueued, pages, done: false };
       }
-      return { enqueued, pages, done: false };
+      // Root listing done — start outside-root with remaining page budget.
+      if (isAllowlistActive(allowlist)) {
+        outsideCursor = startOutsideCursor(allowlist, index, root._id);
+      }
     }
 
-    // outsideCursor path finished above → presence, deletes + ensure.
+    if (outsideCursor) {
+      const remaining = Math.max(0, pageCap() - pages);
+      const outside = await continueOutsideRoot(client, outsideCursor, pullCtx, remaining, budget);
+      enqueued += outside.enqueued;
+      pages += outside.pages;
+      if (!outside.done) {
+        return checkpointOutsidePending({
+          outsideCursor: outside.cursor,
+          enqueued,
+          pages,
+        });
+      }
+      await setReconcileState({ outsideCursor: null });
+    }
+
+    // Both listings finished → presence, deletes + ensure.
     return finishReconcileCycle({
       client,
       budget,
@@ -345,19 +309,17 @@ export function outsideRootListIds(allowlist, index, rootId) {
   const candidates = [];
   for (const id of Object.keys(allowlist)) {
     if (!getById(index, id)) continue;
-    if (collectionPathFromRoot(index, id, rootId).length) continue;
+    if (isUnderRoot(index, id, rootId)) continue;
     candidates.push(String(id));
   }
   const idSet = new Set(candidates);
   return candidates.filter((id) => {
-    let current = getById(index, id);
-    for (;;) {
-      const parentId = current?.parent?.$id;
-      if (parentId == null) return true;
-      if (idSet.has(String(parentId))) return false;
-      current = getById(index, parentId);
-      if (!current) return true;
-    }
+    let nested = false;
+    walkCollectionAncestors(index, id, (col) => {
+      nested = String(col._id) !== id && idSet.has(String(col._id));
+      return nested ? "stop" : "continue";
+    });
+    return !nested;
   });
 }
 

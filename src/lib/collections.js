@@ -19,6 +19,40 @@ import { OUTSIDE_ROOT_MIRROR_FOLDER } from "./constants.js";
 
 const ROOT = "root"; // sentinel parent key for top-level collections
 
+/** Sibling-map key: collection titles match case-insensitively. */
+export function titleKey(title) {
+  return (title || "").toLowerCase();
+}
+
+/** True when a path segment is the outside-root "Raindrop" container folder. */
+export function isOutsideRootContainer(title) {
+  return titleKey(title) === titleKey(OUTSIDE_ROOT_MIRROR_FOLDER);
+}
+
+function parentKeyOf(col) {
+  return col.parent?.$id != null ? col.parent.$id : ROOT;
+}
+
+/** File `col` under its parent's sibling map and both id key forms. */
+function indexCollection(byParent, byId, col, parentId = parentKeyOf(col)) {
+  if (!byParent.has(parentId)) byParent.set(parentId, new Map());
+  byParent.get(parentId).set(titleKey(col.title), col);
+  if (byId) {
+    byId.set(col._id, col);
+    byId.set(String(col._id), col);
+  }
+}
+
+/** Each collection once (the index stores numeric and string id keys). */
+function* uniqueCollections(index) {
+  const seen = new Set();
+  for (const col of index.byId.values()) {
+    if (!col || seen.has(col._id)) continue;
+    seen.add(col._id);
+    yield col;
+  }
+}
+
 /**
  * Lookup a collection by id, tolerating number vs string keys (index stores both).
  * @param {{ byId?: Map }|null|undefined} index
@@ -51,22 +85,14 @@ export async function buildCollectionIndex(client) {
   ]);
   const byParent = new Map();
   const byId = new Map();
-  const add = (col) => {
-    const parentId = col.parent && col.parent.$id ? col.parent.$id : ROOT;
-    if (!byParent.has(parentId)) byParent.set(parentId, new Map());
-    byParent.get(parentId).set((col.title || "").toLowerCase(), col);
-    byId.set(col._id, col);
-    byId.set(String(col._id), col);
-  };
-  roots.forEach(add);
-  children.forEach(add);
+  for (const col of [...roots, ...children]) indexCollection(byParent, byId, col);
   return { byParent, byId };
 }
 
 /** Find a root-level collection by title (case-insensitive). */
 export function findRootCollection(index, title) {
   const siblings = getByParent(index, ROOT);
-  return siblings?.get((title || "").toLowerCase()) ?? null;
+  return siblings?.get(titleKey(title)) ?? null;
 }
 
 /**
@@ -127,11 +153,8 @@ export function collectionIdAlive(index, id) {
  */
 export function collectionsUnderRoot(index, rootId) {
   if (!index?.byId) return [];
-  const seen = new Set();
   const out = [];
-  for (const col of index.byId.values()) {
-    if (!col || seen.has(col._id)) continue;
-    seen.add(col._id);
+  for (const col of uniqueCollections(index)) {
     const full = collectionPathFromRoot(index, col._id, rootId);
     if (!full.length) continue;
     out.push({ collectionId: col._id, relativeSegments: full.slice(1) });
@@ -153,6 +176,21 @@ export function collectionAbsolutePath(index, collectionId) {
 }
 
 /**
+ * Segments of `colId` below the sync root (root title stripped), or null when
+ * the collection is not under the root.
+ * @returns {string[]|null}
+ */
+export function underRootRelativeSegments(index, colId, rootId) {
+  const fullPath = collectionPathFromRoot(index, colId, rootId);
+  return fullPath.length ? fullPath.slice(1) : null;
+}
+
+/** True when `collectionId` is the sync root or nested under it. */
+export function isUnderRoot(index, collectionId, rootId) {
+  return rootId != null && collectionPathFromRoot(index, collectionId, rootId).length > 0;
+}
+
+/**
  * True when Edge segments are the outside-root landing zone:
  * Other bookmarks|favorites / Raindrop / …
  * Uses rootRole so bare "Other" is not treated as a top root.
@@ -160,11 +198,7 @@ export function collectionAbsolutePath(index, collectionId) {
  */
 export function isOutsideRootLandingSegments(edgeSegments) {
   const segs = edgeSegments || [];
-  return (
-    segs.length >= 2 &&
-    rootRole(segs[0]) === "other" &&
-    (segs[1] || "").toLowerCase() === OUTSIDE_ROOT_MIRROR_FOLDER.toLowerCase()
-  );
+  return segs.length >= 2 && rootRole(segs[0]) === "other" && isOutsideRootContainer(segs[1]);
 }
 
 /**
@@ -176,8 +210,8 @@ export function isOutsideRootLandingSegments(edgeSegments) {
  * @returns {string[]|null} null if collection unknown
  */
 export function mirrorRelativeSegments(index, collectionId, syncRootId) {
-  const under = collectionPathFromRoot(index, collectionId, syncRootId);
-  if (under.length) return under.slice(1);
+  const under = underRootRelativeSegments(index, collectionId, syncRootId);
+  if (under) return under;
   const absolute = collectionAbsolutePath(index, collectionId);
   if (!absolute.length) return null;
   return [OUTSIDE_ROOT_MIRROR_FOLDER, ...absolute];
@@ -214,16 +248,12 @@ export function raindropUploadSegments(edgeSegments, rootName) {
  */
 export function collectionsForAllowlistPicker(index, syncRootId) {
   if (!index?.byId) return [];
-  const seen = new Set();
   const out = [];
-  for (const col of index.byId.values()) {
-    if (!col || seen.has(col._id)) continue;
-    seen.add(col._id);
+  for (const col of uniqueCollections(index)) {
     if (syncRootId != null && String(col._id) === String(syncRootId)) continue;
     const relative = mirrorRelativeSegments(index, col._id, syncRootId);
     if (!relative) continue;
-    const underSyncRoot =
-      syncRootId != null && collectionPathFromRoot(index, col._id, syncRootId).length > 0;
+    const underSyncRoot = isUnderRoot(index, col._id, syncRootId);
     out.push({ collectionId: col._id, relativeSegments: relative, underSyncRoot });
   }
   return out;
@@ -239,7 +269,7 @@ export function collectionIdFromRelative(index, rootId, relativeSegments) {
   let col = getById(index, rootId);
   for (const title of relativeSegments || []) {
     const siblings = getByParent(index, parentId);
-    col = siblings?.get((title || "").toLowerCase()) ?? null;
+    col = siblings?.get(titleKey(title)) ?? null;
     if (!col) return null;
     parentId = col._id;
   }
@@ -278,15 +308,10 @@ export async function ensureCollectionPath(client, index, fullSegments, cache, p
     // Prefer getByParent when index has byId/byParent shape; fall back for
     // legacy callers that pass a bare byParent Map as `index`.
     const siblings = index.byParent != null ? getByParent(index, parentId) : byParent.get(parentId);
-    let col = siblings && siblings.get(title.toLowerCase());
+    let col = siblings && siblings.get(titleKey(title));
     if (!col) {
       col = await client.createCollection(title, parentId === ROOT ? null : parentId);
-      if (!byParent.has(parentId)) byParent.set(parentId, new Map());
-      byParent.get(parentId).set(title.toLowerCase(), col);
-      if (index.byId) {
-        index.byId.set(col._id, col);
-        index.byId.set(String(col._id), col);
-      }
+      indexCollection(byParent, index.byId, col, parentId);
     }
 
     collectionId = col._id;
@@ -369,7 +394,7 @@ export async function recordFolderCollectionsForPulledPath(
   if (!relative.length || !edgeIds.length) return;
 
   // Under sync root: zip relative segments to collections between leaf and root.
-  if (rootId != null && collectionPathFromRoot(index, collectionId, rootId).length) {
+  if (isUnderRoot(index, collectionId, rootId)) {
     const colIds = [];
     const result = walkCollectionAncestors(index, collectionId, (col) => {
       if (String(col._id) === String(rootId)) return "stop";
@@ -386,7 +411,7 @@ export async function recordFolderCollectionsForPulledPath(
   }
 
   // Outside sync root: relative is [Raindrop, ...absolute]; map absolute only.
-  if ((relative[0] || "").toLowerCase() !== OUTSIDE_ROOT_MIRROR_FOLDER.toLowerCase()) {
+  if (!isOutsideRootContainer(relative[0])) {
     return;
   }
   const colIds = [];
@@ -409,12 +434,11 @@ export async function recordFolderCollectionsForPulledPath(
 export function applyCollectionTitleInIndex(index, collectionId, newTitle) {
   const col = getById(index, collectionId);
   if (!col) return;
-  const parentId = col.parent && col.parent.$id != null ? col.parent.$id : ROOT;
-  const siblings = getByParent(index, parentId);
+  const siblings = getByParent(index, parentKeyOf(col));
   if (siblings) {
-    siblings.delete((col.title || "").toLowerCase());
+    siblings.delete(titleKey(col.title));
     col.title = newTitle;
-    siblings.set((newTitle || "").toLowerCase(), col);
+    siblings.set(titleKey(newTitle), col);
   } else {
     col.title = newTitle;
   }

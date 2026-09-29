@@ -7,7 +7,7 @@
 // allowlist is active. A copy outside that scope does not keep a raindrop
 // alive and is never rebound to.
 
-import { urlMatchKeys, resolveIndexedUrls } from "./url-match.js";
+import { indexUrlKeys, resolveIndexedUrls } from "./url-match.js";
 import { isExcluded } from "./policy.js";
 import { isOutsideRootLandingSegments } from "./collections.js";
 import { isAllowlistActive } from "./allowlist.js";
@@ -71,11 +71,7 @@ export function buildTreeIndex(roots, { isInScope = () => true } = {}) {
         };
         entry.inScope = !!isInScope(entry);
         byId.set(entry.id, entry);
-        for (const key of urlMatchKeys(entry.url)) {
-          const list = byUrlKey.get(key) || [];
-          list.push(entry.id);
-          byUrlKey.set(key, list);
-        }
+        indexUrlKeys(byUrlKey, entry.url, entry.id);
       } else {
         walk(child, [...path, child.title || ""], [String(child.id), ...ancestorIds]);
       }
@@ -105,11 +101,7 @@ export function treeIndexFromList(list) {
       inScope: b.inScope !== false,
     };
     byId.set(entry.id, entry);
-    for (const key of urlMatchKeys(entry.url)) {
-      const ids = byUrlKey.get(key) || [];
-      ids.push(entry.id);
-      byUrlKey.set(key, ids);
-    }
+    indexUrlKeys(byUrlKey, entry.url, entry.id);
   }
   return { byId, byUrlKey };
 }
@@ -122,10 +114,7 @@ export function treeIndexFromList(list) {
  */
 export function treeEntriesForUrl(treeIndex, url) {
   if (!url || !treeIndex) return [];
-  const { ids } = resolveIndexedUrls(treeIndex.byUrlKey, url, (id) => {
-    const entry = treeIndex.byId.get(id);
-    return entry?.url ? urlMatchKeys(entry.url)[0] : null;
-  });
+  const { ids } = resolveIndexedUrls(treeIndex.byUrlKey, url, (id) => treeIndex.byId.get(id)?.url);
   const out = [];
   for (const id of ids) {
     const entry = treeIndex.byId.get(id);
