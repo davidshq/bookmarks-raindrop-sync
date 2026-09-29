@@ -154,4 +154,7 @@ test("repairPlanIsNoop: any match, rebind, prune or live tombstone is work", () 
   assert.equal(repairPlanIsNoop(repairPlan({ raindropRebinds: 1 })), false);
   assert.equal(repairPlanIsNoop(repairPlan({ pruneRaindropDead: 1 })), false);
   assert.equal(repairPlanIsNoop(repairPlan({ tombstonesAlive: ["x"] })), false);
+  const shrink = repairPlan({ presenceShrink: { count: 10, lastCompleteCount: 100 } });
+  assert.equal(repairPlanIsNoop(shrink), false, "accepting a shrunk export is work");
+  assert.match(formatRepairPlanSummary(shrink), /accepts 10 as the new count/);
 });

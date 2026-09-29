@@ -53,7 +53,7 @@ import {
   fetchExportForPlan,
   inScopeBookmarks,
 } from "./match-existing.js";
-import { adoptExportCsv, buildSnapshot, loadPresence } from "./presence.js";
+import { adoptExportCsv, acceptSuspectPresence, buildSnapshot, loadPresence } from "./presence.js";
 import { loadTreeIndex, treeIndexFromList } from "./tree-index.js";
 import { rebindPass, isPairBookmarkLive } from "./pair-rebind.js";
 import { computePairHealth } from "./pair-health.js";
@@ -83,6 +83,8 @@ import { computePairHealth } from "./pair-health.js";
  *   keptPairs?: Record<string, string>,
  *   keptRecords?: Record<string, import("./store.js").PairRecord>,
  *   pairsSnapshot?: Record<string, string>,
+ *   presenceSeq?: number,
+ *   presenceShrink?: { count: number, lastCompleteCount: number }|null,
  * }} RepairPlan
  */
 
@@ -215,7 +217,15 @@ export async function planRepairPairs() {
       error: "Raindrop export returned no items; refusing to prune every pair. Try again later.",
     });
   }
-  await adoptExportCsv(csv, exportStartedAt);
+  const presence = await adoptExportCsv(csv, exportStartedAt);
+  if (presence.suspectCount != null) {
+    await appendLog(
+      "warn",
+      `Repair pairs dry-run: the export has ${presence.count} raindrop(s), under half of the ` +
+        `last complete ${presence.lastCompleteCount}. Applying accepts ${presence.count} as the ` +
+        "new baseline for absence-based deletes."
+    );
+  }
   const queuedDeletes = (await queue.list()).filter(queue.isDeleteJob).length;
   await appendLog(
     "info",
@@ -225,7 +235,11 @@ export async function planRepairPairs() {
       `(${plan.pruneEdgeDead} Edge-dead, ${plan.pruneRaindropDead} Raindrop-dead, ${plan.pruneBothDead} both), ` +
       `clear ${plan.tombstonesAlive.length} alive tombstone(s), drop ${queuedDeletes} queued delete(s).`
   );
-  return { ok: true, ...plan, queuedDeletes };
+  const presenceShrink =
+    presence.suspectCount != null
+      ? { count: presence.count, lastCompleteCount: presence.lastCompleteCount }
+      : null;
+  return { ok: true, ...plan, queuedDeletes, presenceSeq: presence.seq, presenceShrink };
 }
 
 /**
@@ -267,6 +281,15 @@ export async function applyRepairPairs(plan) {
     seed,
   }));
   const reboundTotal = rebound + (plan.edgeRebinds || 0) + (plan.raindropRebinds || 0);
+
+  // The user reviewed this export's count in the dry-run: a suspicious shrink
+  // becomes the new baseline (a repeat export alone never does).
+  if (plan.presenceSeq != null && (await acceptSuspectPresence(plan.presenceSeq))) {
+    await appendLog(
+      "info",
+      `Repair pairs: accepted the export of ${plan.raindropCount} raindrop(s) as the new baseline.`
+    );
+  }
 
   const tombstonesCleared = (plan.tombstonesAlive || []).length;
   if (tombstonesCleared) await pruneTombstones(plan.tombstonesAlive);

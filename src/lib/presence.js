@@ -57,32 +57,20 @@ import { AuthError, RateLimitError } from "./raindrop.js";
 /** @type {PresenceSnapshot|null} */
 let memory = null;
 
-/** Two exports agree on a row count (1% or one row of slack). */
-function sameCount(a, b) {
-  return a != null && b != null && Math.abs(a - b) <= Math.max(1, Math.round(0.01 * a));
-}
-
 /**
  * Build a snapshot from export CSV text. Never throws.
  * `complete` is false on a parse error, and on a suspicious count: fewer than
  * half the rows of the last complete snapshot (when that had at least
- * PRESENCE_SHRINK_MIN_ROWS), or zero rows while pairs exist. A suspicious
- * count becomes complete once the next export agrees with it
- * (`previousSuspectCount`), so a real cleanup is accepted on a second look
- * instead of blocking deletes forever.
+ * PRESENCE_SHRINK_MIN_ROWS), or zero rows while pairs exist. Another export
+ * agreeing with a suspicious count is not proof (a failure mode can repeat):
+ * only a Repair apply accepts it ({@link acceptSuspectPresence}).
  * @param {string} csvText
- * @param {{ at?: number, previousCompleteCount?: number, previousSuspectCount?: number|null, expectNonEmpty?: boolean, seq?: number }} [opts]
+ * @param {{ at?: number, previousCompleteCount?: number, expectNonEmpty?: boolean, seq?: number }} [opts]
  * @returns {PresenceSnapshot}
  */
 export function buildSnapshot(
   csvText,
-  {
-    at = Date.now(),
-    previousCompleteCount = 0,
-    previousSuspectCount = null,
-    expectNonEmpty = false,
-    seq = 1,
-  } = {}
+  { at = Date.now(), previousCompleteCount = 0, expectNonEmpty = false, seq = 1 } = {}
 ) {
   let parsed;
   try {
@@ -107,12 +95,13 @@ export function buildSnapshot(
     previousCompleteCount >= PRESENCE_SHRINK_MIN_ROWS &&
     count < previousCompleteCount * PRESENCE_MIN_COMPLETE_FRACTION
   ) {
-    error = `export shrank to ${count} from ${previousCompleteCount}`;
+    error =
+      `export shrank to ${count} from ${previousCompleteCount} ` +
+      "(if you really deleted them, run Repair pairs and apply to accept the new count)";
   } else if (count === 0 && expectNonEmpty) {
     error = "export returned no raindrops while pairs exist";
   }
-  const confirmed = error != null && sameCount(count, previousSuspectCount);
-  const complete = error == null || confirmed;
+  const complete = error == null;
   return {
     at,
     ids: parsed.raindropIds,
@@ -124,7 +113,7 @@ export function buildSnapshot(
     lastCompleteCount: complete ? count : previousCompleteCount,
     seq,
     suspectCount: complete ? null : count,
-    ...(error && !confirmed ? { error } : {}),
+    ...(error ? { error } : {}),
   };
 }
 
@@ -172,6 +161,28 @@ export async function loadPresence() {
 export async function savePresence(snap) {
   memory = snap;
   await write(KEY.PRESENCE, toStored(snap));
+}
+
+/**
+ * Accept a suspicious snapshot as the new complete baseline. Only for the
+ * export whose count the user reviewed in a Repair dry-run (`seq`), and never
+ * a parse failure or an empty export.
+ * @param {number} seq
+ * @returns {Promise<boolean>} whether the snapshot changed
+ */
+export async function acceptSuspectPresence(seq) {
+  const snap = await loadPresence();
+  if (!snap || snap.complete || snap.seq !== seq || snap.suspectCount == null || !snap.count) {
+    return false;
+  }
+  const { error: _error, ...rest } = snap;
+  await savePresence({
+    ...rest,
+    complete: true,
+    lastCompleteCount: snap.count,
+    suspectCount: null,
+  });
+  return true;
 }
 
 /** Forget the in-memory snapshot (tests; simulates a worker restart). */
@@ -226,7 +237,6 @@ async function saveSnapshotFromExport(csvText, startedAt, prev) {
   const next = buildSnapshot(csvText, {
     at: startedAt,
     previousCompleteCount: prev?.lastCompleteCount || 0,
-    previousSuspectCount: prev?.suspectCount ?? null,
     expectNonEmpty: (await storedPairCount()) > 0,
     seq: (prev?.seq || 0) + 1,
   });

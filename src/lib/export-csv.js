@@ -94,10 +94,11 @@ export function indexExportByUrl(csvText) {
   const raindropIds = new Set();
   /** @type {Map<string, string>} */
   const urlById = new Map();
-  if (rows.length < 2) {
+  if (!rows.length) {
     return { byKey, raindropIds, raindropCount: 0, urlById };
   }
 
+  // Header first: a one-line error page must not pass as an empty export.
   const header = rows[0].map((h) =>
     String(h || "")
       .trim()

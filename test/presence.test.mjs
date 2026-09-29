@@ -14,6 +14,7 @@ import {
   isUsableForUrls,
   idsForUrl,
   adoptExportCsv,
+  acceptSuspectPresence,
 } from "../src/lib/presence.js";
 import {
   PRESENCE_STALE_MS,
@@ -80,28 +81,61 @@ test("malformed export is not complete", () => {
   assert.equal(truncated.complete, false, "body ending inside a quote is a truncated response");
 });
 
-test("export shrinking below half is not complete until a second export agrees", () => {
+test("export shrinking below half stays incomplete, however many exports agree", () => {
   const prev = PRESENCE_SHRINK_MIN_ROWS * 2;
   const rows = ["id,url", ...Array.from({ length: 10 }, (_, i) => `${i},https://s.example/${i}`)];
   const shrunk = buildSnapshot(rows.join("\n"), { previousCompleteCount: prev });
   assert.equal(shrunk.complete, false, "10 rows after 100 is suspicious");
   assert.equal(shrunk.lastCompleteCount, prev, "last complete count kept");
   assert.equal(shrunk.suspectCount, 10);
+  assert.match(shrunk.error, /Repair pairs/, "error says how to accept a real cleanup");
 
-  const confirmed = buildSnapshot(rows.join("\n"), {
+  const again = buildSnapshot(rows.join("\n"), {
     previousCompleteCount: prev,
     previousSuspectCount: shrunk.suspectCount,
   });
-  assert.equal(confirmed.complete, true, "a second export at the same count confirms the cleanup");
-  assert.equal(confirmed.lastCompleteCount, 10);
+  assert.equal(again.complete, false, "an agreeing second export is not proof");
+  assert.equal(again.lastCompleteCount, prev);
 
   // Tiny libraries swing by half on ordinary edits: no shrink rule.
   const small = buildSnapshot("id,url\n1,https://s.example/1\n", { previousCompleteCount: 3 });
   assert.equal(small.complete, true);
 
-  // Empty export while pairs exist is suspicious.
-  assert.equal(buildSnapshot("id,url\n", { expectNonEmpty: true }).complete, false);
+  // Empty export while pairs exist is suspicious, and stays so on a repeat.
+  const empty = buildSnapshot("id,url\n", { expectNonEmpty: true });
+  assert.equal(empty.complete, false);
+  assert.equal(
+    buildSnapshot("id,url\n", { expectNonEmpty: true, previousSuspectCount: empty.suspectCount })
+      .complete,
+    false
+  );
   assert.equal(buildSnapshot("id,url\n", { expectNonEmpty: false }).complete, true);
+});
+
+test("a one-line body without the id/url header is not an empty export", () => {
+  for (const body of ["Service Unavailable", "<html><body>error</body></html>"]) {
+    const snap = buildSnapshot(body, { expectNonEmpty: false });
+    assert.equal(snap.complete, false, body);
+    assert.match(snap.error, /id\/url/);
+  }
+});
+
+test("accepting a suspect snapshot makes it the new complete baseline (Repair apply)", async () => {
+  const prev = PRESENCE_SHRINK_MIN_ROWS * 2;
+  const rows = ["id,url", ...Array.from({ length: 10 }, (_, i) => `${i},https://s.example/${i}`)];
+  const full = ["id,url", ...Array.from({ length: prev }, (_, i) => `${i},https://s.example/${i}`)];
+  await adoptExportCsv(full.join("\n"), Date.now());
+  const shrunk = await adoptExportCsv(rows.join("\n"), Date.now());
+  assert.equal(shrunk.complete, false);
+
+  assert.equal(await acceptSuspectPresence(shrunk.seq - 1), false, "other export: no change");
+  assert.equal((await loadPresence()).complete, false);
+  assert.equal(await acceptSuspectPresence(shrunk.seq), true);
+  resetPresenceMemory();
+  const restored = await loadPresence();
+  assert.equal(restored.complete, true, "persisted");
+  assert.equal(restored.lastCompleteCount, 10);
+  assert.equal(restored.suspectCount, null);
 });
 
 test("worker restart restores ids without a new export", async () => {

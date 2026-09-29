@@ -3,7 +3,14 @@
 
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { setupEngine, edgeBookmark, edgeFolder, jobsOfKind, storage } from "./helpers/engine.mjs";
+import {
+  setupEngine,
+  edgeBookmark,
+  edgeFolder,
+  jobsOfKind,
+  storage,
+  warmPresence,
+} from "./helpers/engine.mjs";
 
 test("record written on sync carries url, placement and timestamps", async () => {
   const { eng, root } = await setupEngine();
@@ -266,4 +273,24 @@ test("Repair prunes a pair whose id now holds another bookmark", async () => {
   );
   assert.equal(plan.keptPairs["12"], undefined, "reused id is not kept");
   assert.equal(plan.pruneEdgeDead, 1);
+});
+
+test("Repair apply accepts a shrunk export as the new presence baseline", async () => {
+  const { eng, mock } = await setupEngine();
+  const csv = (n) =>
+    "id,title,url\n" +
+    Array.from({ length: n }, (_, i) => `${i + 1},t,https://r.example/${i}`).join("\n");
+  mock.exportRaindropsCsv = async () => csv(100);
+  await warmPresence(eng);
+  mock.exportRaindropsCsv = async () => csv(10); // the user really deleted 90
+  await warmPresence(eng);
+  assert.equal((await eng.presence.loadPresence()).complete, false, "shrink is suspect");
+
+  const plan = await eng.repairPairs.planRepairPairs();
+  assert.equal((await eng.presence.loadPresence()).complete, false, "dry-run accepts nothing");
+  const res = await eng.repairPairs.applyRepairPairs(plan);
+  assert.ok(res.ok);
+  const snap = await eng.presence.loadPresence();
+  assert.equal(snap.complete, true, "apply accepts the export the user reviewed");
+  assert.equal(snap.lastCompleteCount, 10);
 });

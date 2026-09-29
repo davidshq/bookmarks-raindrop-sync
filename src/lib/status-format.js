@@ -102,7 +102,12 @@ export function formatRepairPlanSummary(plan) {
     `${plan.pruneBothDead} both). Ambiguous ${plan.ambiguous}, conflicts ${plan.conflicts}, ` +
     `Edge-only ${plan.edgeOnly}, Raindrop-only ${plan.raindropOnly}. ` +
     `Clear ${plan.tombstonesAlive.length} of ${plan.tombstonesTotal} tombstone(s) (raindrop alive), ` +
-    `drop ${plan.queuedDeletes} queued delete(s).`
+    `drop ${plan.queuedDeletes} queued delete(s).` +
+    (plan.presenceShrink
+      ? ` The export has ${plan.presenceShrink.count} raindrop(s), under half of the last ` +
+        `${plan.presenceShrink.lastCompleteCount}; applying accepts ${plan.presenceShrink.count} ` +
+        "as the new count."
+      : "")
   );
 }
 
@@ -116,6 +121,7 @@ export function repairPlanIsNoop(plan) {
     plan.matched.length === 0 &&
     repairRebindCount(plan) === 0 &&
     repairPruneCount(plan) === 0 &&
-    plan.tombstonesAlive.length === 0
+    plan.tombstonesAlive.length === 0 &&
+    !plan.presenceShrink
   );
 }
