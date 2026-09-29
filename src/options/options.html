@@ -3,14 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <title>Bookmarks ↔ Raindrop Sync — Options</title>
+    <link rel="stylesheet" href="../ui/base.css" />
     <link rel="stylesheet" href="options.css" />
   </head>
   <body>
     <main>
       <h1>Bookmarks ↔ Raindrop Sync</h1>
       <p class="lede">
-        Sync browser bookmarks with Raindrop.io, mirroring your folder shape. Choose how traffic flows;
-        one-way mode also asks what to do with the local copy after upload.
+        Sync browser bookmarks with Raindrop.io, mirroring your folder shape. Choose how traffic
+        flows; one-way mode also asks what to do with the local copy after upload.
       </p>
 
       <nav class="tabs" role="tablist" aria-label="Options">
@@ -100,14 +101,18 @@
           <p id="deleteBreakerText"></p>
           <div class="row">
             <button id="allowDeletes" type="button">Allow these deletes</button>
-            <button id="discardDeletes" type="button" class="secondary">Discard pending deletes</button>
+            <button id="discardDeletes" type="button" class="secondary">
+              Discard pending deletes
+            </button>
             <span id="deleteBreakerStatus" class="hint" role="status"></span>
           </div>
         </div>
         <div id="pairHealthRow" class="hidden">
           <p id="pairHealthLine" class="status-line muted" role="status"></p>
           <div class="row">
-            <button id="pairHealthRepair" type="button" class="secondary hidden">Repair pairs</button>
+            <button id="pairHealthRepair" type="button" class="secondary hidden">
+              Repair pairs
+            </button>
             <span id="pairHealthRepairStatus" class="hint" role="status"></span>
           </div>
           <label class="checkbox">
@@ -170,17 +175,18 @@
           </select>
         </label>
         <p id="oneWayModeHelp" class="field-help hint">
-          Uploads browser bookmarks → Raindrop only. Below, choose whether to keep a local copy after a
-          confirmed upload, or offload (delete locally).
+          Uploads browser bookmarks → Raindrop only. Below, choose whether to keep a local copy
+          after a confirmed upload, or offload (delete locally).
         </p>
         <p id="bidirectionalModeHelp" class="field-help hint hidden">
-          Keeps bookmarks in <em>both</em> the browser and Raindrop: pulls Raindrop → browser under your root,
-          and propagates <strong>user</strong> deletes both ways. Raindrop-only metadata (tags,
-          notes, highlights) is never overwritten from the browser.
+          Keeps bookmarks in <em>both</em> the browser and Raindrop: pulls Raindrop → browser under
+          your root, and propagates <strong>user</strong> deletes both ways. Raindrop-only metadata
+          (tags, notes, highlights) is never overwritten from the browser.
         </p>
         <p id="bidirectionalWarn" class="banner warn hidden">
-          Deleting a bookmark in the browser or Raindrop removes the paired item in the other system. To
-          offload a specific folder (upload then remove locally only), set that folder’s policy to
+          Deleting a bookmark in the browser or Raindrop removes the paired item in the other
+          system. To offload a specific folder (upload then remove locally only), set that folder’s
+          policy to
           <strong>Offload (delete locally)</strong> under Folder policies — that cleanup does not
           delete Raindrop.
         </p>
@@ -196,8 +202,8 @@
           </label>
           <ul id="defaultPolicyHelp" class="policy-help hint">
             <li>
-              <strong>Delete locally</strong> — After a confirmed upload, remove the local
-              bookmark. Raindrop keeps the copy. This is the default for one-way offload.
+              <strong>Delete locally</strong> — After a confirmed upload, remove the local bookmark.
+              Raindrop keeps the copy. This is the default for one-way offload.
             </li>
             <li>
               <strong>Keep locally</strong> — Leave the browser bookmark after upload (mirror, don’t
@@ -229,10 +235,10 @@
             </select>
           </label>
           <p id="reconcileIntervalHelp" class="field-help hint">
-            How often to start a full Raindrop check and refresh the Raindrop export that tells
-            the extension which raindrops still exist. Each heartbeat prefers draining the sync
-            queue, then uses leftover Raindrop budget for Trash / list work — queued jobs
-            do not hard-block listing. Use <strong>Pull now</strong> for an immediate full check.
+            How often to start a full Raindrop check and refresh the Raindrop export that tells the
+            extension which raindrops still exist. Each heartbeat prefers draining the sync queue,
+            then uses leftover Raindrop budget for Trash / list work — queued jobs do not hard-block
+            listing. Use <strong>Pull now</strong> for an immediate full check.
           </p>
           <label>
             Raindrop → browser folders
@@ -243,8 +249,8 @@
             </select>
           </label>
           <p id="folderModeHelpExisting" class="field-help hint">
-            Pull bookmarks only into folder paths that already exist in the browser, unless you opt in
-            Raindrop-only collections under Folder policies. Unchecked Raindrop-only paths are
+            Pull bookmarks only into folder paths that already exist in the browser, unless you opt
+            in Raindrop-only collections under Folder policies. Unchecked Raindrop-only paths are
             skipped (no catch-all).
           </p>
           <p id="folderModeHelpCreate" class="field-help hint hidden">
@@ -253,9 +259,9 @@
             any Raindrop-only collection is checked, only checked ones sync.
           </p>
           <p id="folderModeHelpMirror" class="field-help hint hidden">
-            Like create-as-needed, and also create browser folders for empty Raindrop collections under
-            your root—unless a Raindrop-only allowlist is set under Folder policies, which then
-            limits sync to checked collections.
+            Like create-as-needed, and also create browser folders for empty Raindrop collections
+            under your root—unless a Raindrop-only allowlist is set under Folder policies, which
+            then limits sync to checked collections.
           </p>
         </div>
 
@@ -296,9 +302,9 @@
           <div class="manual-action">
             <p class="action-title">Sync to Raindrop</p>
             <p class="hint action-help">
-              Uploads bookmarks already in the browser that are not synced yet, and skips folders set to
-              Exclude. Large or thinly paired libraries are detected and you may be asked to Match from
-              Raindrop export first. Does not pull from Raindrop.
+              Uploads bookmarks already in the browser that are not synced yet, and skips folders
+              set to Exclude. Large or thinly paired libraries are detected and you may be asked to
+              Match from Raindrop export first. Does not pull from Raindrop.
             </p>
             <p class="status-line muted">Last push: <span id="lastPush">—</span></p>
             <div class="row">
@@ -309,9 +315,10 @@
           <div id="pullAction" class="manual-action hidden">
             <p class="action-title">Pull from Raindrop</p>
             <p class="hint action-help">
-              Brings new and changed Raindrop bookmarks into the browser, and removes local bookmarks whose
-              Raindrop copy is gone. Quiet-time pulls also run on your interval. Large libraries with low
-              pair coverage may prompt to Match from export first. Does not upload existing browser bookmarks.
+              Brings new and changed Raindrop bookmarks into the browser, and removes local
+              bookmarks whose Raindrop copy is gone. Quiet-time pulls also run on your interval.
+              Large libraries with low pair coverage may prompt to Match from export first. Does not
+              upload existing browser bookmarks.
             </p>
             <p id="reconcileLine" class="status-line muted">
               Last pull: <span id="lastReconcile">—</span>
@@ -324,14 +331,12 @@
           <div class="manual-action">
             <p class="action-title">Match existing from export</p>
             <p class="hint action-help">
-              Power-user: download Raindrop <code>export.csv</code>, match by URL, record pairs only.
-              Import/Pull usually prompt automatically when the library looks like a bulk candidate.
-              Does not upload, pull, move, or delete bookmarks.
+              Power-user: download Raindrop <code>export.csv</code>, match by URL, record pairs
+              only. Import/Pull usually prompt automatically when the library looks like a bulk
+              candidate. Does not upload, pull, move, or delete bookmarks.
             </p>
             <div class="row">
-              <button id="matchExisting" type="button" class="secondary">
-                Match existing
-              </button>
+              <button id="matchExisting" type="button" class="secondary">Match existing</button>
               <span id="matchExistingStatus" class="hint" role="status"></span>
             </div>
           </div>
@@ -339,9 +344,9 @@
             <p class="action-title">Repair pairs</p>
             <p class="hint action-help">
               Rebuild the pair map from what exists now: drop pairs whose browser id or raindrop id
-              is gone, re-pair by URL, clear tombstones for raindrops that are alive, and drop queued
-              deletes. Use after the browser renumbered bookmark ids or after a duplicate storm.
-              Pair map only — does not upload, pull, move, or delete bookmarks.
+              is gone, re-pair by URL, clear tombstones for raindrops that are alive, and drop
+              queued deletes. Use after the browser renumbered bookmark ids or after a duplicate
+              storm. Pair map only — does not upload, pull, move, or delete bookmarks.
             </p>
             <div class="row">
               <button id="repairPairs" type="button" class="secondary">Repair pairs</button>
@@ -386,14 +391,15 @@
           <summary>Choose Raindrop-only collections to sync</summary>
           <div class="rd-body">
             <p class="hint intro">
-              All Raindrop collections that are not fully present in the browser (entire account, not only
-              under the sync root). Check to create the folder and pull items. Folders outside the
-              sync root land under Other bookmarks / Raindrop; bookmarks you add there upload back
-              to that Raindrop collection. New collections stay unchecked. Once any are checked,
-              only checked Raindrop-only paths sync. <strong>Select all</strong> checks every listed
-              collection; <strong>Clear selection</strong> exits selective mode (then apply).
-              Reconcile does not clear checked collections when folders appear — only when they
-              disappear from Raindrop. Takes effect with <strong>Apply folder policies</strong>.
+              All Raindrop collections that are not fully present in the browser (entire account,
+              not only under the sync root). Check to create the folder and pull items. Folders
+              outside the sync root land under Other bookmarks / Raindrop; bookmarks you add there
+              upload back to that Raindrop collection. New collections stay unchecked. Once any are
+              checked, only checked Raindrop-only paths sync. <strong>Select all</strong> checks
+              every listed collection; <strong>Clear selection</strong> exits selective mode (then
+              apply). Reconcile does not clear checked collections when folders appear — only when
+              they disappear from Raindrop. Takes effect with
+              <strong>Apply folder policies</strong>.
             </p>
             <div class="rd-toolbar">
               <button id="refreshRaindropOnly" type="button" class="secondary">Refresh</button>

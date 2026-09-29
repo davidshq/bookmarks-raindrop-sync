@@ -1,0 +1,71 @@
+/* Shared tokens and base rules for the Options page and the popup.
+   Linked before each page's stylesheet, which sets its own sizes and layout. */
+
+:root {
+  /* Palette is light-only. Stops Edge dark mode from painting selects and scrollbars dark. */
+  color-scheme: light;
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --ink: #1b1f24;
+  --muted: #6b7280;
+  --line: #e3e6ea;
+  --accent: #2563eb;
+  --secondary-bg: #eef1f5;
+  --warn-bg: #fef2f2;
+  --warn-ink: #991b1b;
+  --warn-line: #fca5a5;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  font:
+    14px/1.5 system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+}
+
+button {
+  padding: 8px 14px;
+  /* Transparent border keeps primary and secondary the same height. */
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+button.secondary {
+  background: var(--secondary-bg);
+  color: var(--ink);
+  border-color: var(--line);
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Padding, margin and weight are per page. */
+.banner {
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+  border: 1px solid var(--warn-line);
+  border-radius: 8px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+/* !important: this sheet loads first, and .hidden must beat page rules such as
+   .row or .manual-action that set display. */
+.hidden {
+  display: none !important;
+}

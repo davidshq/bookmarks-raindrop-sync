@@ -1,22 +1,9 @@
-:root {
-  color-scheme: light;
-}
-
-* {
-  box-sizing: border-box;
-}
+/* Tokens, reset, body font, buttons, .banner, .muted, .hidden: ../ui/base.css */
 
 body {
   width: 260px;
-  margin: 0;
   padding: 14px;
-  font:
-    13px/1.5 system-ui,
-    -apple-system,
-    "Segoe UI",
-    Roboto,
-    sans-serif;
-  color: #1b1f24;
+  font-size: 13px;
 }
 h1 {
   font-size: 15px;
@@ -25,9 +12,6 @@ h1 {
 .status {
   margin: 0 0 12px;
 }
-.muted {
-  color: #6b7280;
-}
 .actions {
   display: flex;
   flex-direction: column;
@@ -35,7 +19,7 @@ h1 {
 }
 .action-copy {
   margin: 0 0 6px;
-  color: #6b7280;
+  color: var(--muted);
   font-size: 12px;
 }
 .action-status {
@@ -46,28 +30,9 @@ h1 {
 button {
   width: 100%;
   padding: 8px 10px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: #2563eb;
-  color: #fff;
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
-}
-button.secondary {
-  background: #eef1f5;
-  color: #1b1f24;
-  border-color: #e3e6ea;
 }
 .banner {
-  background: #fef2f2;
-  color: #991b1b;
-  border: 1px solid #fca5a5;
-  border-radius: 8px;
   padding: 8px;
   margin-bottom: 10px;
   font-size: 12px;
-}
-.hidden {
-  display: none;
 }

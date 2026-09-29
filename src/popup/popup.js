@@ -2,8 +2,8 @@
 
 import { MSG, SYNC_MODE } from "../lib/constants.js";
 import { runPullNow } from "../lib/pull-now.js";
-import { formatPendingByDirection } from "../lib/queue.js";
-import { formatLastThrottleNotice } from "../lib/wake-budget.js";
+import { formatHaltBanner } from "../lib/status-format.js";
+import { fmtTime, renderPendingCounts, runAction, setLine } from "../ui/actions.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -16,53 +16,26 @@ async function refresh() {
   }
   if (!resp?.ok) return;
 
-  $("pending").textContent = resp.pending ?? 0;
-  const dirs = resp.pendingByDirection;
-  const dirEl = $("pendingByDirection");
-  if (dirs && (resp.pending ?? 0) > 0) {
-    dirEl.textContent = ` (${formatPendingByDirection(dirs)})`;
-  } else {
-    dirEl.textContent = "";
-  }
+  renderPendingCounts(resp, $("pending"), $("pendingByDirection"));
   const last = resp.status?.lastActivityAt;
-  $("lastActivity").textContent = last
-    ? `Last sync ${new Date(last).toLocaleTimeString()}`
-    : "No syncs yet";
+  $("lastActivity").textContent = last ? `Last sync ${fmtTime(last)}` : "No syncs yet";
 
   const bi = resp.syncMode === SYNC_MODE.BIDIRECTIONAL;
   $("title").textContent = bi ? "Bookmarks ↔ Raindrop" : "Bookmarks → Raindrop";
   $("modeLine").textContent = bi ? "Mode: bidirectional" : "Mode: one-way";
   $("pullAction").classList.toggle("hidden", !bi);
 
-  const halt = $("halt");
-  const rateUntil = resp.status?.rateLimitedUntil;
-  const selfCap = formatLastThrottleNotice(resp.status);
-  if (rateUntil && rateUntil > Date.now()) {
-    halt.classList.remove("hidden");
-    halt.textContent = `Raindrop rate-limit pause until ${new Date(rateUntil).toLocaleTimeString()}`;
-  } else if (resp.status?.deletionsHalted && resp.status?.lastError) {
-    halt.classList.remove("hidden");
-    halt.textContent = resp.status.lastError;
-  } else if (selfCap) {
-    halt.classList.remove("hidden");
-    halt.textContent = selfCap;
-  } else {
-    halt.textContent = "";
-    halt.classList.add("hidden");
-  }
+  setLine($("halt"), formatHaltBanner(resp.status, { compact: true }));
 }
 
 $("backfill").addEventListener("click", async () => {
-  const out = $("importStatus");
-  out.textContent = "Queuing browser bookmarks…";
-  try {
-    const resp = await chrome.runtime.sendMessage({ type: MSG.RUN_BACKFILL });
-    out.textContent = resp?.ok
-      ? `Queued ${resp.queued} bookmark(s).`
-      : `Failed: ${resp?.error}`;
-  } catch (err) {
-    out.textContent = `Failed: ${err.message}`;
-  }
+  await runAction({
+    statusEl: $("importStatus"),
+    button: $("backfill"),
+    pending: "Queuing browser bookmarks…",
+    send: () => chrome.runtime.sendMessage({ type: MSG.RUN_BACKFILL }),
+    ok: (resp) => `Queued ${resp.queued} bookmark(s).`,
+  });
   refresh();
 });
 

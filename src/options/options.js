@@ -27,7 +27,6 @@ import {
   formatReconcileSkipNotice,
 } from "../lib/store.js";
 import { formatLastThrottleNotice } from "../lib/wake-budget.js";
-import { formatTrashSafeNotice, trashSafeButtonLabel } from "../lib/trash-hygiene.js";
 import { formatPairHealth, pairHealthNeedsRepair } from "../lib/pair-health.js";
 import { countArchiveEntries, exportArchiveEntries, clearArchive } from "../lib/log-archive.js";
 import { getTree, mirrorPathExists, getTopRoots } from "../lib/bookmarks.js";
@@ -46,8 +45,15 @@ import {
   assessPullBulkCandidate,
   formatBulkCandidatePrompt,
 } from "../lib/bulk-candidate.js";
-import { formatBulkQueueNotice, BULK_PROMPT_NEEDS_CHOICE } from "../lib/queue-bulk-prompt.js";
-import { formatPendingByDirection } from "../lib/queue.js";
+import { BULK_PROMPT_NEEDS_CHOICE } from "../lib/queue-bulk-prompt.js";
+import {
+  formatHaltBanner,
+  formatMatchPlanSummary,
+  formatRepairPlanSummary,
+  rateLimitedMessage,
+  repairPlanIsNoop,
+} from "../lib/status-format.js";
+import { fmtDateTime, fmtTime, renderPendingCounts, runAction, setLine } from "../ui/actions.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -194,6 +200,8 @@ async function loadSettings() {
   $("defaultPolicy").value = config.defaultPolicy;
   $("pruneEmpty").checked = !!config.pruneEmpty;
   $("keepLongTermLog").checked = !!config.keepLongTermLog;
+  // Only this checkbox writes the flag, so set it once rather than every poll.
+  $("presenceDeletesEnabled").checked = config.presenceDeletesEnabled !== false;
   $("raindropFolderMode").value =
     config.raindropFolderMode || RAINDROP_FOLDER_MODE.CREATE_AS_NEEDED;
   $("reconcileIntervalMinutes").value = String(
@@ -278,19 +286,10 @@ async function refreshStatus() {
   }
   if (!resp?.ok) return;
 
-  $("pending").textContent = resp.pending ?? 0;
-  const dirs = resp.pendingByDirection;
-  const dirEl = $("pendingByDirection");
-  if (dirs && (resp.pending ?? 0) > 0) {
-    dirEl.textContent = ` (${formatPendingByDirection(dirs)})`;
-  } else {
-    dirEl.textContent = "";
-  }
+  renderPendingCounts(resp, $("pending"), $("pendingByDirection"));
   const deadCount = resp.deadLetter ?? 0;
   $("deadLetter").textContent = String(deadCount);
-  const dlRow = $("deadLetterRow");
-  if (deadCount > 0) dlRow.classList.remove("hidden");
-  else dlRow.classList.add("hidden");
+  $("deadLetterRow").classList.toggle("hidden", deadCount === 0);
 
   const storage = resp.storage;
   if (storage && typeof storage.bytesInUse === "number") {
@@ -305,82 +304,36 @@ async function refreshStatus() {
     $("storageUsage").textContent = "—";
   }
 
-  const last = resp.status?.lastActivityAt;
-  $("lastActivity").textContent = last ? new Date(last).toLocaleString() : "—";
-
-  const pushAt = resp.status?.lastPushAt;
-  $("lastPush").textContent = pushAt ? new Date(pushAt).toLocaleString() : "—";
-
-  const rec = resp.reconcile?.lastRunAt;
-  $("lastReconcile").textContent = rec ? new Date(rec).toLocaleString() : "—";
+  $("lastActivity").textContent = fmtDateTime(resp.status?.lastActivityAt);
+  $("lastPush").textContent = fmtDateTime(resp.status?.lastPushAt);
+  $("lastReconcile").textContent = fmtDateTime(resp.reconcile?.lastRunAt);
   if (resp.reconcile?.lastError) {
     $("lastReconcile").textContent += ` (error: ${resp.reconcile.lastError})`;
   }
 
-  const skipLine = $("reconcileSkipLine");
   // Guard: don't show bulk_pause after Continue/Match already cleared needs_choice.
   const skipStatus =
     resp.status?.reconcileSkipReason === "bulk_pause" &&
     resp.bulkPrompt?.status !== BULK_PROMPT_NEEDS_CHOICE
       ? { ...resp.status, reconcileSkipReason: null }
       : resp.status;
-  const skipText = formatReconcileSkipNotice(skipStatus, resp.pending);
-  if (skipText) {
-    skipLine.textContent = skipText;
-    skipLine.classList.remove("hidden");
-  } else {
-    skipLine.textContent = "";
-    skipLine.classList.add("hidden");
-  }
+  setLine($("reconcileSkipLine"), formatReconcileSkipNotice(skipStatus, resp.pending));
+  setLine($("wakeThrottleLine"), formatLastThrottleNotice(resp.status));
 
-  const throttleLine = $("wakeThrottleLine");
-  const throttleText = formatLastThrottleNotice(resp.status);
-  if (throttleText) {
-    throttleLine.textContent = throttleText;
-    throttleLine.classList.remove("hidden");
-  } else {
-    throttleLine.textContent = "";
-    throttleLine.classList.add("hidden");
-  }
-
-  const trashRow = $("trashSafeRow");
-  const trashLine = $("trashSafeLine");
+  // The worker always sends notice + buttonLabel with trashSafe (buildTrashSafePayload).
   const checkTrashBtn = $("checkTrash");
   const checkTrashStatus = $("checkTrashStatus");
-  if (resp.syncMode === SYNC_MODE.BIDIRECTIONAL && resp.trashSafe) {
-    trashRow.classList.remove("hidden");
-    trashLine.textContent =
-      resp.trashSafe.notice || formatTrashSafeNotice(resp.trashSafe, resp.trashSafe.state);
-    if (checkTrashBtn) {
-      checkTrashBtn.textContent =
-        resp.trashSafe.buttonLabel || trashSafeButtonLabel(resp.trashSafe.state);
-    }
-  } else {
-    trashRow.classList.add("hidden");
-    trashLine.textContent = "";
-    if (checkTrashStatus) checkTrashStatus.textContent = "";
-    if (checkTrashBtn) checkTrashBtn.textContent = "Check Trash";
-  }
+  const trashSafe = resp.syncMode === SYNC_MODE.BIDIRECTIONAL ? resp.trashSafe : null;
+  $("trashSafeRow").classList.toggle("hidden", !trashSafe);
+  $("trashSafeLine").textContent = trashSafe?.notice ?? "";
+  if (checkTrashBtn) checkTrashBtn.textContent = trashSafe?.buttonLabel ?? "Check Trash";
+  if (!trashSafe && checkTrashStatus) checkTrashStatus.textContent = "";
 
-  const banner = $("haltBanner");
-  const rateUntil = resp.status?.rateLimitedUntil;
-  if (rateUntil && rateUntil > Date.now()) {
-    banner.classList.remove("hidden");
-    banner.textContent = `Paused for Raindrop API rate limits until ${new Date(rateUntil).toLocaleTimeString()}. Sync resumes automatically.`;
-  } else if (resp.status?.lastError?.startsWith("Storage write failed")) {
-    banner.classList.remove("hidden");
-    banner.textContent = resp.status.lastError;
-  } else if (resp.status?.deletionsHalted && resp.status?.lastError) {
-    banner.classList.remove("hidden");
-    banner.textContent = `Deletions halted: ${resp.status.lastError}. Jobs are kept and will retry once resolved.`;
-  } else {
-    banner.textContent = "";
-    banner.classList.add("hidden");
-  }
+  setLine($("haltBanner"), formatHaltBanner(resp.status));
 
   renderBulkQueueBanner(resp);
   renderDeleteBreaker(resp);
-  await renderPairHealth(resp);
+  renderPairHealth(resp);
 
   const log = $("log");
   log.innerHTML = "";
@@ -388,7 +341,7 @@ async function refreshStatus() {
     const li = document.createElement("li");
     const ts = document.createElement("span");
     ts.className = "ts";
-    ts.textContent = new Date(entry.at).toLocaleTimeString();
+    ts.textContent = fmtTime(entry.at);
     const msg = document.createElement("span");
     msg.className = `msg lvl-${entry.level}`;
     msg.textContent = entry.message;
@@ -416,25 +369,19 @@ function renderBulkQueueBanner(resp) {
   const text = $("bulkQueueBannerText");
   if (!el || !text) return;
   const needs = resp.bulkPrompt?.status === BULK_PROMPT_NEEDS_CHOICE;
-  if (!needs) {
-    el.classList.add("hidden");
-    return;
-  }
-  text.textContent = resp.bulkNotice || formatBulkQueueNotice(resp.pending ?? 0);
-  el.classList.remove("hidden");
+  el.classList.toggle("hidden", !needs);
+  // GET_STATUS always carries bulkNotice (formatBulkQueueNotice in the worker).
+  if (needs) text.textContent = resp.bulkNotice ?? "";
 }
 
 async function continueBulkDripFromStatus() {
-  const out = $("bulkQueueStatus");
-  out.textContent = "Resuming drip…";
-  try {
-    const resp = await chrome.runtime.sendMessage({ type: MSG.CONTINUE_BULK_DRIP });
-    out.textContent = resp?.ok
-      ? "Continuing drip (prompt snoozed until the queue shrinks)."
-      : `Failed: ${resp?.error}`;
-  } catch (err) {
-    out.textContent = `Failed: ${err.message}`;
-  }
+  await runAction({
+    statusEl: $("bulkQueueStatus"),
+    button: $("bulkQueueContinue"),
+    pending: "Resuming drip…",
+    send: () => chrome.runtime.sendMessage({ type: MSG.CONTINUE_BULK_DRIP }),
+    ok: () => "Continuing drip (prompt snoozed until the queue shrinks).",
+  });
   refreshStatus();
 }
 
@@ -532,16 +479,6 @@ function promptBulkGate(assessment, opLabel, op) {
   return cont ? "continue" : "cancel";
 }
 
-function formatMatchPlanSummary(plan) {
-  const would = plan.matched?.length ?? 0;
-  return (
-    `Would pair ${would}; already paired ${plan.alreadyPaired}; ` +
-    `ambiguous ${plan.ambiguous}; conflicts ${plan.conflicts}; ` +
-    `Edge-only ${plan.edgeOnly}; Raindrop-only ${plan.raindropOnly} ` +
-    `(export ${plan.raindropCount}, Edge ${plan.edgeScanned}).`
-  );
-}
-
 /**
  * Run Match existing. Guided flows may skip the dry-run confirm.
  * @param {{ statusEl: HTMLElement, offerDryRun: boolean }} opts
@@ -552,7 +489,7 @@ async function runMatchExistingFlow({ statusEl, offerDryRun }) {
   try {
     const plan = await chrome.runtime.sendMessage({ type: MSG.MATCH_EXISTING_PLAN });
     if (plan?.reason === "rate_limited") {
-      statusEl.textContent = "Paused for Raindrop rate limits — wait a minute, then try again.";
+      statusEl.textContent = rateLimitedMessage();
       return "rate_limited";
     }
     if (!plan?.ok) {
@@ -566,26 +503,20 @@ async function runMatchExistingFlow({ statusEl, offerDryRun }) {
       return "nothing";
     }
 
-    let apply = true;
-    if (offerDryRun) {
-      const wantDry = window.confirm(
+    const confirmApply = () =>
+      window.confirm(
+        `Match existing — record ${would} pair(s)?\n\n${summary}\n\n` +
+          "This only updates the pair map. It does not upload, pull, move, or delete bookmarks."
+      );
+    // Guided flows may skip the review; the power-user button always confirms.
+    const wantReview =
+      !offerDryRun ||
+      window.confirm(
         `Show dry-run counts before recording ${would} pair(s)?\n\n` +
           "OK = review counts, then confirm Apply\n" +
           "Cancel = record pairs now (pairs only; no deletes/moves)"
       );
-      if (wantDry) {
-        apply = window.confirm(
-          `Match existing — record ${would} pair(s)?\n\n${summary}\n\n` +
-            "This only updates the pair map. It does not upload, pull, move, or delete bookmarks."
-        );
-      }
-    } else {
-      // Power-user button: always dry-run summary then confirm.
-      apply = window.confirm(
-        `Match existing — record ${would} pair(s)?\n\n${summary}\n\n` +
-          "This only updates the pair map. It does not upload, pull, move, or delete bookmarks."
-      );
-    }
+    const apply = wantReview ? confirmApply() : true;
     if (!apply) {
       statusEl.textContent = `${summary} (apply cancelled)`;
       return "cancelled";
@@ -610,16 +541,13 @@ async function runMatchExistingFlow({ statusEl, offerDryRun }) {
 }
 
 async function runBackfillCore() {
-  const out = $("importStatus");
-  out.textContent = "Queuing browser bookmarks…";
-  try {
-    const resp = await chrome.runtime.sendMessage({ type: MSG.RUN_BACKFILL });
-    out.textContent = resp?.ok
-      ? `Queued ${resp.queued} of ${resp.scanned} scanned.`
-      : `Failed: ${resp?.error}`;
-  } catch (err) {
-    out.textContent = `Failed: ${err.message}`;
-  }
+  await runAction({
+    statusEl: $("importStatus"),
+    button: $("backfill"),
+    pending: "Queuing browser bookmarks…",
+    send: () => chrome.runtime.sendMessage({ type: MSG.RUN_BACKFILL }),
+    ok: (resp) => `Queued ${resp.queued} of ${resp.scanned} scanned.`,
+  });
   refreshStatus();
 }
 
@@ -715,31 +643,16 @@ async function runRepairPairsUi() {
   try {
     const plan = await chrome.runtime.sendMessage({ type: MSG.REPAIR_PAIRS_PLAN });
     if (plan?.reason === "rate_limited") {
-      out.textContent = "Paused for Raindrop rate limits — wait a minute, then try again.";
+      out.textContent = rateLimitedMessage();
       return;
     }
     if (!plan?.ok) {
       out.textContent = `Repair failed: ${plan?.error ?? "unknown error"}`;
       return;
     }
-    const pruned = plan.pruneBothDead + plan.pruneEdgeDead + plan.pruneRaindropDead;
-    const rebinds = (plan.edgeRebinds || 0) + (plan.raindropRebinds || 0);
-    const summary =
-      `Pairs now ${plan.pairsBefore}: keep ${plan.keptLive} live, ` +
-      `rebind ${plan.edgeRebinds || 0} Edge id(s) and ${plan.raindropRebinds || 0} Raindrop id(s), ` +
-      `match ${plan.matched.length} by URL, ` +
-      `prune ${pruned} dead (${plan.pruneEdgeDead} Edge id gone, ${plan.pruneRaindropDead} raindrop gone, ` +
-      `${plan.pruneBothDead} both). Ambiguous ${plan.ambiguous}, conflicts ${plan.conflicts}, ` +
-      `Edge-only ${plan.edgeOnly}, Raindrop-only ${plan.raindropOnly}. ` +
-      `Clear ${plan.tombstonesAlive.length} of ${plan.tombstonesTotal} tombstone(s) (raindrop alive), ` +
-      `drop ${plan.queuedDeletes} queued delete(s).`;
+    const summary = formatRepairPlanSummary(plan);
     out.textContent = summary;
-    const nothing =
-      plan.matched.length === 0 &&
-      rebinds === 0 &&
-      pruned === 0 &&
-      plan.tombstonesAlive.length === 0;
-    if (nothing) {
+    if (repairPlanIsNoop(plan)) {
       out.textContent = `${summary} Nothing to repair.`;
       return;
     }
@@ -767,20 +680,16 @@ async function runRepairPairsUi() {
  * Pair health from the worker's last completed check (never fetches the
  * export here). Repair shortcut appears when any stale-id count is non-zero.
  */
-async function renderPairHealth(resp) {
+function renderPairHealth(resp) {
   const row = $("pairHealthRow");
   if (!row) return;
-  if (resp.syncMode !== SYNC_MODE.BIDIRECTIONAL) {
-    row.classList.add("hidden");
-    return;
-  }
-  row.classList.remove("hidden");
+  const bi = resp.syncMode === SYNC_MODE.BIDIRECTIONAL;
+  row.classList.toggle("hidden", !bi);
+  if (!bi) return;
   $("pairHealthLine").textContent =
     formatPairHealth(resp.pairHealth) ??
     "Pair health appears after the next completed Raindrop check.";
   $("pairHealthRepair").classList.toggle("hidden", !pairHealthNeedsRepair(resp.pairHealth));
-  const config = await getConfig();
-  $("presenceDeletesEnabled").checked = config.presenceDeletesEnabled !== false;
 }
 
 function renderDeleteBreaker(resp) {
@@ -788,15 +697,11 @@ function renderDeleteBreaker(resp) {
   const text = $("deleteBreakerText");
   const b = resp.deleteBreaker;
   if (!row || !b) return;
-  if (!b.tripped) {
-    row.classList.add("hidden");
-    text.textContent = "";
-    return;
-  }
-  row.classList.remove("hidden");
-  text.textContent =
-    `Delete circuit breaker: ${b.count} delete(s) ran in the last 24h (limit ${b.limit ?? "?"}). ` +
-    `${b.queuedDeletes} delete job(s) are held. Allow runs them; Discard drops them and keeps the pairs.`;
+  row.classList.toggle("hidden", !b.tripped);
+  text.textContent = b.tripped
+    ? `Delete circuit breaker: ${b.count} delete(s) ran in the last 24h (limit ${b.limit ?? "?"}). ` +
+      `${b.queuedDeletes} delete job(s) are held. Allow runs them; Discard drops them and keeps the pairs.`
+    : "";
 }
 
 /* ---- folder policy editor (draft until Apply) ---- */
@@ -1262,7 +1167,7 @@ async function refreshRaindropOnlyList() {
     return;
   }
   if (await isRateLimited()) {
-    status.textContent = "Paused for Raindrop rate limits — try Refresh shortly.";
+    status.textContent = rateLimitedMessage(null, "try Refresh shortly.");
     return;
   }
   status.textContent = "Loading…";
@@ -1434,81 +1339,66 @@ $("presenceDeletesEnabled").addEventListener("change", async (e) => {
     : "Absence-based deletes off; Trash-listed deletes still run.";
 });
 $("allowDeletes").addEventListener("click", async () => {
-  const out = $("deleteBreakerStatus");
-  out.textContent = "Allowing…";
-  try {
-    const resp = await chrome.runtime.sendMessage({ type: MSG.ALLOW_DELETES });
-    out.textContent = resp?.ok ? "Deletes allowed; draining." : `Failed: ${resp?.error}`;
-  } catch (err) {
-    out.textContent = `Failed: ${err.message}`;
-  }
+  await runAction({
+    statusEl: $("deleteBreakerStatus"),
+    button: $("allowDeletes"),
+    pending: "Allowing…",
+    send: () => chrome.runtime.sendMessage({ type: MSG.ALLOW_DELETES }),
+    ok: () => "Deletes allowed; draining.",
+  });
   refreshStatus();
 });
 $("discardDeletes").addEventListener("click", async () => {
   if (!window.confirm("Drop every queued delete job? Pairs are kept; nothing is deleted.")) return;
-  const out = $("deleteBreakerStatus");
-  out.textContent = "Discarding…";
-  try {
-    const resp = await chrome.runtime.sendMessage({ type: MSG.DISCARD_DELETES });
-    out.textContent = resp?.ok
-      ? `Dropped ${resp.dropped} delete job(s).`
-      : `Failed: ${resp?.error}`;
-  } catch (err) {
-    out.textContent = `Failed: ${err.message}`;
-  }
+  await runAction({
+    statusEl: $("deleteBreakerStatus"),
+    button: $("discardDeletes"),
+    pending: "Discarding…",
+    send: () => chrome.runtime.sendMessage({ type: MSG.DISCARD_DELETES }),
+    ok: (resp) => `Dropped ${resp.dropped} delete job(s).`,
+  });
   refreshStatus();
 });
 $("bulkQueueMatch").addEventListener("click", () => void matchFromBulkQueueBanner());
 $("bulkQueueContinue").addEventListener("click", () => void continueBulkDripFromStatus());
+/** Check Trash reply when `ok` is false (the worker sets `reason` for known cases). */
+function checkTrashFailText(resp) {
+  if (resp?.reason === "rate_limited") return rateLimitedMessage(resp.rateLimitedUntil);
+  if (resp?.reason === "one_way") return "Check Trash is only for bidirectional mode.";
+  if (resp?.reason === "no_token") return "Save a Raindrop token first.";
+  return resp?.error || "Check Trash failed.";
+}
 $("checkTrash").addEventListener("click", async () => {
-  const out = $("checkTrashStatus");
-  out.textContent = "Checking Trash…";
-  try {
-    const resp = await chrome.runtime.sendMessage({ type: MSG.CHECK_TRASH });
-    if (resp?.reason === "rate_limited") {
-      const until = resp.rateLimitedUntil
-        ? new Date(resp.rateLimitedUntil).toLocaleTimeString()
-        : "later";
-      out.textContent = `Paused for Raindrop rate limits until ${until}.`;
-    } else if (resp?.reason === "one_way") {
-      out.textContent = "Check Trash is only for bidirectional mode.";
-    } else if (resp?.reason === "no_token") {
-      out.textContent = "Save a Raindrop token first.";
-    } else if (!resp?.ok) {
-      out.textContent = resp?.error || "Check Trash failed.";
-    } else {
-      // Full notice lives on #trashSafeLine after refreshStatus — keep this short.
-      out.textContent =
-        resp.trashSafe?.state === "partial" ? "Scan incomplete; check again." : "Done.";
-    }
-    await refreshStatus();
-  } catch (err) {
-    out.textContent = err?.message || String(err);
-  }
+  await runAction({
+    statusEl: $("checkTrashStatus"),
+    button: $("checkTrash"),
+    pending: "Checking Trash…",
+    send: () => chrome.runtime.sendMessage({ type: MSG.CHECK_TRASH }),
+    // Full notice lives on #trashSafeLine after refreshStatus — keep this short.
+    ok: (resp) => (resp.trashSafe?.state === "partial" ? "Scan incomplete; check again." : "Done."),
+    fail: checkTrashFailText,
+  });
+  refreshStatus();
 });
 $("retryDeadLetter").addEventListener("click", async () => {
-  const out = $("deadLetterStatus");
-  out.textContent = "Retrying…";
-  try {
-    const resp = await chrome.runtime.sendMessage({ type: MSG.RETRY_DEAD_LETTER });
-    out.textContent = resp?.ok
-      ? `Re-queued ${resp.retried ?? 0} job(s).`
-      : `Failed: ${resp?.error || "unknown"}`;
-  } catch (err) {
-    out.textContent = `Failed: ${err.message}`;
-  }
+  await runAction({
+    statusEl: $("deadLetterStatus"),
+    button: $("retryDeadLetter"),
+    pending: "Retrying…",
+    send: () => chrome.runtime.sendMessage({ type: MSG.RETRY_DEAD_LETTER }),
+    ok: (resp) => `Re-queued ${resp.retried ?? 0} job(s).`,
+  });
   refreshStatus();
 });
 $("clearDeadLetter").addEventListener("click", async () => {
   if (!confirm("Clear all dead-lettered jobs? They will not be retried.")) return;
-  const out = $("deadLetterStatus");
-  out.textContent = "Clearing…";
-  try {
-    const resp = await chrome.runtime.sendMessage({ type: MSG.CLEAR_DEAD_LETTER });
-    out.textContent = resp?.ok ? "Cleared." : `Failed: ${resp?.error || "unknown"}`;
-  } catch (err) {
-    out.textContent = `Failed: ${err.message}`;
-  }
+  await runAction({
+    statusEl: $("deadLetterStatus"),
+    button: $("clearDeadLetter"),
+    pending: "Clearing…",
+    send: () => chrome.runtime.sendMessage({ type: MSG.CLEAR_DEAD_LETTER }),
+    ok: () => "Cleared.",
+  });
   refreshStatus();
 });
 $("exportArchive").addEventListener("click", exportArchive);
