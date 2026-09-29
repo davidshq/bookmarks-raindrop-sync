@@ -919,24 +919,25 @@ async function processDeleteRaindrop(job, ctx) {
     (e) => e.id !== removedBid
   );
   if (survivor) {
-    if (record) {
-      await applyPairChanges([
-        {
-          type: "edge",
-          raindropId: rid,
-          fromBookmarkId: record.bookmarkId,
-          record: {
-            ...record,
-            ...placementFromEntry(survivor),
-            lastSeenEdgeAt: Date.now(),
+    const applied = record
+      ? await applyPairChanges([
+          {
+            type: "edge",
+            raindropId: rid,
+            fromBookmarkId: record.bookmarkId,
+            record: {
+              ...record,
+              ...placementFromEntry(survivor),
+              lastSeenEdgeAt: Date.now(),
+            },
           },
-        },
-      ]);
-    }
+        ])
+      : [];
     if (removedBid) await removeEdgeRemoved(removedBid);
     await appendLog(
       "info",
-      `Kept raindrop for ${label}: another copy is still in the browser (pair rebound).`
+      `Kept raindrop for ${label}: another copy is still in the browser ` +
+        (applied.length ? "(pair rebound)." : "(pair left unchanged).")
     );
     await queue.remove(job.id);
     return;
@@ -1010,12 +1011,17 @@ async function processDeleteEdge(job, ctx) {
   const pairs = await getPairs();
   const liveIds = new Set(treeIndex.byId.keys());
   const survivor = rebindStaleRaindropId({ ...record, url }, snapshot, pairs, liveIds);
-  if (survivor && !pairs.records[survivor.raindropId]) {
-    await applyPairChanges([
+  // Same occupant rule as rebindPass: a survivor already paired may be taken
+  // over only when that pair's bookmark is dead.
+  const occupant = survivor ? pairs.records[survivor.raindropId] : null;
+  const occupantLive = occupant?.bookmarkId != null && liveIds.has(String(occupant.bookmarkId));
+  if (survivor && !occupantLive) {
+    const applied = await applyPairChanges([
       {
         type: "raindrop",
         fromRaindropId: rid,
         toRaindropId: survivor.raindropId,
+        replacesBookmarkId: occupant ? occupant.bookmarkId : null,
         record: {
           ...record,
           url,
@@ -1024,7 +1030,12 @@ async function processDeleteEdge(job, ctx) {
         },
       },
     ]);
-    await appendLog("info", `Rebound: ${label} (Raindrop id changed); local bookmark kept.`);
+    await appendLog(
+      "info",
+      applied.length
+        ? `Rebound: ${label} (Raindrop id changed); local bookmark kept.`
+        : `Kept local bookmark ${label}: its URL is live in Raindrop (pair left unchanged).`
+    );
     await queue.remove(job.id);
     return;
   }

@@ -111,6 +111,24 @@ test("execution-time survival check: URL reappears under another id → rebind, 
   assert.equal((await jobsOfKind(eng, "delete-edge")).length, 0, "job dropped");
 });
 
+test("execution-time survival check: survivor paired to a dead bookmark → rebind, bookmark kept", async () => {
+  const { eng, mock, root } = await setupEngine();
+  const url = "https://e.example/occupied";
+  const { item, bm } = await pairedBookmark(eng, mock, root, "1", url);
+  mock._raindrops.delete(item._id);
+  await eng.reconcile.reconcile({ force: true });
+  assert.equal((await jobsOfKind(eng, "delete-edge")).length, 1);
+
+  // The URL is live under another id whose pair points at a renumbered-away bookmark.
+  const survivor = mock._seedRich(root._id, { link: url, title: "occupied" });
+  await eng.store.recordSynced("999999", String(survivor._id), { url, title: "occupied" });
+  await eng.sync.drain();
+  assert.ok(bookmarks.has(bm.id), "Edge bookmark kept");
+  assert.equal(await eng.store.getRaindropId(bm.id), String(survivor._id));
+  assert.equal(await eng.store.getRaindropId("999999"), null, "dead occupant replaced");
+  assert.equal((await jobsOfKind(eng, "delete-edge")).length, 0, "job dropped");
+});
+
 test("execution-time check: raindrop restored from Trash → delete dropped", async () => {
   const { eng, mock, root } = await setupEngine();
   const { item, bm, rid } = await pairedBookmark(eng, mock, root, "1", "https://e.example/undo");
