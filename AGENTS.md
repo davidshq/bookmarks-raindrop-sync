@@ -27,7 +27,8 @@ Every live API run (integration, smoke, spike, ad-hoc scripts) uses the test
 account token in `.tmp/raindrop_token`; its Raindrop user id is in
 `.tmp/raindrop_test_account_id` (never commit either). Never write to the main
 account; its token in `.tmp/raindrop_main_token` is only a read source for
-`scripts/seed-test-account.mjs`. New live scripts must call
+`scripts/seed-test-account.mjs` and for the pre-change backup exports below
+(`GET …/export.csv`). New live scripts must call
 `assertTestAccount(token)` before their first write.
 
 ## Before any destructive sync change
