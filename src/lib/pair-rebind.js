@@ -15,7 +15,7 @@
 // over (records, tree index, snapshot) so engine, migration, Match and Repair
 // share one implementation.
 
-import { primaryUrlKey } from "./url-match.js";
+import { primaryUrlKey, urlMatchKeys } from "./url-match.js";
 import { makePairRecord, pairsView } from "./store.js";
 import { pickMoveRebindCandidate } from "./move-rebind.js";
 import { treeEntriesForUrl, compareIds } from "./tree-index.js";
@@ -32,6 +32,44 @@ import { idsForUrl } from "./presence.js";
 /** Record URL, falling back to its stored key (legacy records may lack url). */
 function recordUrl(record) {
   return record?.url || record?.urlKey || null;
+}
+
+/**
+ * Whether `entry` (tree entry or bookmark node at the record's bookmark id) is
+ * still the bookmark `record` is paired with. An id alone is not identity:
+ * Chromium renumbers from 1, so an old id can come back on an unrelated
+ * bookmark. The id counts only when the URLs share a match key, or when an
+ * upload for it is queued (the record's URL lags a local edit until that job
+ * lands). A record without a URL falls back to the id.
+ * @param {PairRecord|null|undefined} record
+ * @param {{ id: string, url?: string }|null|undefined} entry
+ * @param {Set<string>|null} [pendingBookmarkIds] ids with a queued upload
+ */
+export function isPairBookmarkLive(record, entry, pendingBookmarkIds = null) {
+  if (!entry?.url) return false;
+  if (pendingBookmarkIds?.has(String(entry.id))) return true;
+  const url = recordUrl(record);
+  if (!url) return true;
+  const keys = new Set(urlMatchKeys(url));
+  return urlMatchKeys(entry.url).some((k) => keys.has(k));
+}
+
+/**
+ * Bookmark ids that are live for the record paired to them
+ * ({@link isPairBookmarkLive}).
+ * @param {Record<string, PairRecord>} records
+ * @param {TreeIndex} treeIndex
+ * @param {Set<string>|null} [pendingBookmarkIds]
+ * @returns {Set<string>}
+ */
+export function livePairBookmarkIds(records, treeIndex, pendingBookmarkIds = null) {
+  const ids = new Set();
+  for (const rec of Object.values(records || {})) {
+    if (rec?.bookmarkId == null) continue;
+    const bid = String(rec.bookmarkId);
+    if (isPairBookmarkLive(rec, treeIndex.byId.get(bid), pendingBookmarkIds)) ids.add(bid);
+  }
+  return ids;
 }
 
 /** Same folder path (titles, top root down). */
@@ -116,10 +154,12 @@ export function placementFromEntry(entry) {
  *   treeIndex: TreeIndex,
  *   snapshot?: PresenceSnapshot|null,
  *   urlHints?: Map<string, string>|null,
+ *   pendingBookmarkIds?: Set<string>|null,
  *   now?: number,
  * }} input
  *   `urlHints` maps raindrop id → link from another listing (Trash) for
- *   id-only records the tree and export cannot fill.
+ *   id-only records the tree and export cannot fill. `pendingBookmarkIds`
+ *   are bookmark ids with a queued upload ({@link isPairBookmarkLive}).
  * @returns {{
  *   records: Record<string, PairRecord>,
  *   changes: PairChange[],
@@ -135,6 +175,7 @@ export function rebindPass({
   treeIndex,
   snapshot = null,
   urlHints = null,
+  pendingBookmarkIds = null,
   now = Date.now(),
 }) {
   /** @type {Record<string, PairRecord>} */
@@ -153,32 +194,45 @@ export function rebindPass({
   const { byBookmark, byRaindrop } = pairsView({ records });
   const view = { byBookmark, byRaindrop };
 
-  // Fill URL for id-only records (v1 migration, old callers): from the live
-  // node when the bookmark exists, else from the export when the raindrop does.
+  // Fill URL for id-only records (v1 migration, old callers). The raindrop's
+  // own link wins: after a renumber the node at the old id may be another
+  // bookmark. The node fills only when the export has no link for the id, and
+  // lends its placement only when its URL agrees.
   for (const [rid, rec] of Object.entries(records)) {
     if (rec.url) continue;
     const entry = rec.bookmarkId != null ? treeIndex.byId.get(String(rec.bookmarkId)) : null;
-    const exportUrl = !entry ? (snapshot?.urlById?.get(rid) ?? urlHints?.get(rid) ?? null) : null;
-    if (!entry && !exportUrl) continue;
-    const url = entry ? entry.url : exportUrl;
+    const url = snapshot?.urlById?.get(rid) ?? urlHints?.get(rid) ?? entry?.url ?? null;
+    if (!url) continue;
+    const placed = entry && isPairBookmarkLive({ url }, entry) ? entry : null;
     const next = makePairRecord(rid, {
       ...rec,
-      ...(entry ? placementFromEntry(entry) : {}),
+      ...(placed ? placementFromEntry(placed) : {}),
       url,
       urlKey: primaryUrlKey(url),
-      title: rec.title ?? entry?.title ?? null,
-      ...(entry ? { lastSeenEdgeAt: now } : {}),
+      title: rec.title ?? placed?.title ?? null,
+      ...(placed ? { lastSeenEdgeAt: now } : {}),
     });
     changes.push({ type: "fill", raindropId: rid, bookmarkId: rec.bookmarkId, record: next });
     records[rid] = next;
   }
 
-  // Edge side: bookmark id missing from the tree.
+  // Edge side: bookmark id gone from the tree, or reused by another bookmark.
+  const edgeLive = (rec) =>
+    rec.bookmarkId != null &&
+    isPairBookmarkLive(rec, treeIndex.byId.get(String(rec.bookmarkId)), pendingBookmarkIds);
+  // A reused id is free for the pair whose bookmark it now is (renumbers can
+  // swap or chain ids between pairs).
+  for (const [bid, rid] of Object.entries(byBookmark)) {
+    if (treeIndex.byId.has(bid) && !edgeLive(records[rid])) {
+      delete byBookmark[bid];
+      delete byRaindrop[rid];
+    }
+  }
   for (const rid of Object.keys(records).sort(compareIds)) {
     const rec = records[rid];
     if (!rec) continue;
     const bid = rec.bookmarkId != null ? String(rec.bookmarkId) : null;
-    if (bid != null && treeIndex.byId.has(bid)) continue;
+    if (edgeLive(rec)) continue;
     const hit = rebindStaleEdgeId(rec, treeIndex, view);
     if (!hit) {
       staleEdge.push(rid);
@@ -204,7 +258,7 @@ export function rebindPass({
   }
 
   if (snapshot) {
-    const liveBookmarkIds = new Set(treeIndex.byId.keys());
+    const liveBookmarkIds = livePairBookmarkIds(records, treeIndex, pendingBookmarkIds);
     for (const rid of Object.keys(records).sort(compareIds)) {
       const rec = records[rid];
       if (!rec || snapshot.ids.has(rid)) continue;
@@ -218,7 +272,12 @@ export function rebindPass({
       // bookmark id is dead (the renumber + fork shape: merge into one pair).
       const occupant = hit ? records[hit.raindropId] : null;
       const occupantLive =
-        occupant?.bookmarkId != null && liveBookmarkIds.has(String(occupant.bookmarkId));
+        occupant?.bookmarkId != null &&
+        isPairBookmarkLive(
+          occupant,
+          treeIndex.byId.get(String(occupant.bookmarkId)),
+          pendingBookmarkIds
+        );
       if (!hit || occupantLive) {
         raindropCandidates.push(rid);
         continue;

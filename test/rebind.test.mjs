@@ -53,6 +53,56 @@ test("stale Edge id with the URL moved elsewhere in the mirror rebinds there", (
   );
 });
 
+test("Edge id reused by another bookmark after a renumber is stale, not live", () => {
+  // Overlapping renumber: id 500 now holds an unrelated bookmark; the pair's
+  // bookmark came back as 1234.
+  const tree = treeIndexFromList([
+    { id: "500", url: "https://unrelated.example/", path: [] },
+    { id: "1234", url: URL_A, path: [] },
+  ]);
+  const records = { 7: record("7", "500", URL_A) };
+  const pass = rebindPass({ records, treeIndex: tree });
+  assert.equal(pass.records["7"].bookmarkId, "1234");
+  assert.deepEqual(
+    pass.edgeRebinds.map((r) => [r.from, r.to]),
+    [["500", "1234"]]
+  );
+});
+
+test("renumber that swaps two pairs' ids rebinds both", () => {
+  const URL_B = "https://b.example/doc";
+  const tree = treeIndexFromList([
+    { id: "500", url: URL_B, path: [] },
+    { id: "600", url: URL_A, path: [] },
+  ]);
+  const records = { 7: record("7", "500", URL_A), 8: record("8", "600", URL_B) };
+  const pass = rebindPass({ records, treeIndex: tree });
+  assert.equal(pass.records["7"].bookmarkId, "600");
+  assert.equal(pass.records["8"].bookmarkId, "500");
+  assert.deepEqual(pass.staleEdge, []);
+});
+
+test("a bookmark with a queued upload stays live while its pair URL lags the edit", () => {
+  // The user edited 500's URL; the upload that updates the record is queued.
+  const tree = treeIndexFromList([
+    { id: "500", url: "https://a.example/edited", path: [] },
+    { id: "501", url: URL_A, path: [] },
+  ]);
+  const records = { 7: record("7", "500", URL_A) };
+  const pass = rebindPass({ records, treeIndex: tree, pendingBookmarkIds: new Set(["500"]) });
+  assert.equal(pass.records["7"].bookmarkId, "500", "not moved onto the other copy");
+  assert.deepEqual(pass.edgeRebinds, []);
+});
+
+test("id-only record takes the raindrop's URL, not the reused id's", () => {
+  const tree = treeIndexFromList([{ id: "500", url: "https://unrelated.example/", path: [] }]);
+  const snapshot = buildSnapshot(`id,url\n7,${URL_A}\n`, { at: 1000 });
+  const records = { 7: makePairRecord("7", { bookmarkId: "500", lastSeenRaindropAt: 1 }) };
+  const pass = rebindPass({ records, treeIndex: tree, snapshot });
+  assert.equal(pass.records["7"].url, URL_A);
+  assert.deepEqual(pass.staleEdge, ["7"], "reused id is not the pair's bookmark");
+});
+
 test("bound elsewhere is not claimed; stale record stays stale (no delete)", () => {
   const tree = treeIndexFromList([{ id: "901", url: URL_A, path: [] }]);
   const records = {

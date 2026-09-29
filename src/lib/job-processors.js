@@ -88,6 +88,8 @@ import { ensurePresence, isUsableForUrls, resolveIdsForUrl } from "./presence.js
 import { loadTreeIndex } from "./tree-index.js";
 import {
   edgeSurvivorCandidates,
+  isPairBookmarkLive,
+  livePairBookmarkIds,
   placementFromEntry,
   rebindStaleEdgeId,
   rebindStaleRaindropId,
@@ -145,12 +147,15 @@ export async function processJob(job, ctx) {
 async function pickClaimable(bookmarkId, rids, liveRaindropIds) {
   if (!rids.length) return { kind: "none", extras: 0 };
   const pairs = await getPairs();
+  const pending = await queue.pendingUploadIds();
   const liveIds = new Set([String(bookmarkId)]);
   for (const rid of rids) {
     const otherBid = pairs.byRaindrop?.[String(rid)];
     if (otherBid == null) continue;
     const other = await getNodeOrNull(String(otherBid));
-    if (other?.url) liveIds.add(String(otherBid));
+    if (isPairBookmarkLive(pairs.records[String(rid)], other, pending)) {
+      liveIds.add(String(otherBid));
+    }
   }
   const items = rids.map((rid) => ({ _id: rid }));
   const pick = pickMoveRebindCandidate(bookmarkId, items, pairs, liveIds, liveRaindropIds);
@@ -1009,12 +1014,15 @@ async function processDeleteEdge(job, ctx) {
 
   const treeIndex = await loadTreeIndex();
   const pairs = await getPairs();
-  const liveIds = new Set(treeIndex.byId.keys());
+  const pending = await queue.pendingUploadIds();
+  const liveIds = livePairBookmarkIds(pairs.records, treeIndex, pending);
   const survivor = rebindStaleRaindropId({ ...record, url }, snapshot, pairs, liveIds);
   // Same occupant rule as rebindPass: a survivor already paired may be taken
   // over only when that pair's bookmark is dead.
   const occupant = survivor ? pairs.records[survivor.raindropId] : null;
-  const occupantLive = occupant?.bookmarkId != null && liveIds.has(String(occupant.bookmarkId));
+  const occupantLive =
+    occupant?.bookmarkId != null &&
+    isPairBookmarkLive(occupant, treeIndex.byId.get(String(occupant.bookmarkId)), pending);
   if (survivor && !occupantLive) {
     const applied = await applyPairChanges([
       {
@@ -1040,9 +1048,12 @@ async function processDeleteEdge(job, ctx) {
     return;
   }
 
-  // Current bookmark for this pair; a stale id resolves by URL first.
+  // Current bookmark for this pair; a stale or reused id resolves by URL first.
   let bookmarkId = record.bookmarkId != null ? String(record.bookmarkId) : null;
-  if (bookmarkId && !treeIndex.byId.has(bookmarkId)) {
+  if (
+    bookmarkId &&
+    !isPairBookmarkLive({ ...record, url }, treeIndex.byId.get(bookmarkId), pending)
+  ) {
     bookmarkId = rebindStaleEdgeId({ ...record, url }, treeIndex, pairs)?.entry.id ?? null;
   }
 

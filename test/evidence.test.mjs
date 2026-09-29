@@ -3,7 +3,14 @@
 
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { setupEngine, edgeBookmark, edgeFolder, jobsOfKind, bookmarks } from "./helpers/engine.mjs";
+import {
+  setupEngine,
+  edgeBookmark,
+  edgeFolder,
+  jobsOfKind,
+  bookmarks,
+  warmPresence,
+} from "./helpers/engine.mjs";
 
 /** Pair a fresh Edge bookmark to a fresh raindrop with the same URL. */
 async function pairedBookmark(eng, mock, root, parentId, url, title = url) {
@@ -127,6 +134,40 @@ test("execution-time survival check: survivor paired to a dead bookmark → rebi
   assert.equal(await eng.store.getRaindropId(bm.id), String(survivor._id));
   assert.equal(await eng.store.getRaindropId("999999"), null, "dead occupant replaced");
   assert.equal((await jobsOfKind(eng, "delete-edge")).length, 0, "job dropped");
+});
+
+test("delete-edge never removes an unrelated bookmark that now holds the pair's id", async () => {
+  const { eng, mock, root } = await setupEngine();
+  const { item, bm, rid } = await pairedBookmark(eng, mock, root, "1", "https://e.example/reused");
+  // Renumber: the pair's id now belongs to a different bookmark.
+  bookmarks.get(String(bm.id)).url = "https://unrelated.example/";
+  mock._raindrops.delete(item._id);
+  await eng.reconcile.reconcile({ force: true });
+  await eng.sync.drain();
+  assert.ok(bookmarks.has(String(bm.id)), "unrelated bookmark kept");
+  assert.equal((await jobsOfKind(eng, "delete-edge")).length, 0);
+  assert.equal(await eng.store.getRaindropId(bm.id), null, "stale pair cleared");
+  assert.equal(await eng.store.hasTombstone(rid), true);
+});
+
+test("upload claims a raindrop whose pair id was reused by another bookmark (no duplicate)", async () => {
+  const { eng, mock, root } = await setupEngine();
+  const url = "https://e.example/claim";
+  const item = mock._seedRich(root._id, { link: url, title: "claim" });
+  // Old pair points at id `other`, which now holds an unrelated bookmark.
+  const other = await edgeBookmark("1", "unrelated", "https://unrelated.example/");
+  await eng.store.recordSynced(other.id, String(item._id), { url, title: "claim" });
+  await warmPresence(eng);
+
+  const bm = await edgeBookmark("1", "claim", url);
+  await eng.sync.handleBookmarkCreated(bm.id, bookmarks.get(String(bm.id)));
+  await eng.sync.drain();
+  assert.equal(await eng.store.getRaindropId(bm.id), String(item._id), "claimed, not duplicated");
+  assert.equal(
+    [...mock._raindrops.values()].filter((r) => r.link === url).length,
+    1,
+    "one raindrop for the URL"
+  );
 });
 
 test("execution-time check: raindrop restored from Trash → delete dropped", async () => {

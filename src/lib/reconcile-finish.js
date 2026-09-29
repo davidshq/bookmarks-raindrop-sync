@@ -275,6 +275,7 @@ async function applyDeleteEvidence({ snapshot, trash, treeIndex, config, source 
     treeIndex,
     snapshot: urlSnap,
     urlHints: trash.links,
+    pendingBookmarkIds: await queue.pendingUploadIds(),
     now,
   });
   const applied = await applyPairChanges(pass.changes);

@@ -122,6 +122,13 @@ export async function sizeByDirection() {
   return countByDirection(await readQueue());
 }
 
+/** Bookmark ids with a queued upload (their pair URL may lag a local edit). */
+export async function pendingUploadIds() {
+  return new Set(
+    (await readQueue()).filter((j) => jobKind(j) === JOB.UPLOAD).map((j) => String(j.id))
+  );
+}
+
 export async function listDeadLetter() {
   return readDeadLetter();
 }

@@ -61,6 +61,21 @@ test("indexes rebuild after add, rebind and remove without a separate index writ
   ]);
   assert.equal(stale.length, 0, "concurrent change wins");
 
+  // A renumber can swap ids between two pairs; one batch applies both moves.
+  const { r9, r2 } = (await eng.store.getPairs()).records;
+  const swapped = await eng.store.applyPairChanges([
+    { type: "edge", raindropId: "r9", fromBookmarkId: "b1", record: { ...r9, bookmarkId: "b7" } },
+    { type: "edge", raindropId: "r2", fromBookmarkId: "b7", record: { ...r2, bookmarkId: "b1" } },
+  ]);
+  assert.equal(swapped.length, 2, "swap applies");
+  assert.equal(await eng.store.getRaindropId("b7"), "r9");
+  assert.equal(await eng.store.getRaindropId("b1"), "r2");
+  // Swap back so the rest of the test sees its original state.
+  await eng.store.applyPairChanges([
+    { type: "edge", raindropId: "r9", fromBookmarkId: "b7", record: { ...r9, bookmarkId: "b1" } },
+    { type: "edge", raindropId: "r2", fromBookmarkId: "b1", record: { ...r2, bookmarkId: "b7" } },
+  ]);
+
   await eng.store.forgetPairByRaindrop("r2");
   await eng.store.forgetSynced("b1");
   assert.deepEqual((await eng.store.getPairs()).byBookmark, {});

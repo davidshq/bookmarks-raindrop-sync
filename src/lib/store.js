@@ -537,6 +537,47 @@ export async function forgetPairByRaindrop(raindropId) {
  */
 
 /**
+ * Raindrop ids whose edge change in `changes` will move them off their current
+ * bookmark. A renumber can swap or chain ids between pairs, so a target still
+ * held by one of these is free. Kept only while every move in the set lands:
+ * a move whose target is held by a record that stays put (or that another move
+ * also targets) is dropped, until nothing changes.
+ * @param {Record<string, PairRecord>} records
+ * @param {PairChange[]} changes
+ * @param {(bid: string) => PairRecord|undefined} boundTo
+ * @returns {Set<string>}
+ */
+function edgeMovesAway(records, changes, boundTo) {
+  const moves = new Map();
+  const targeted = new Map();
+  for (const c of changes) {
+    if (c.type !== "edge" || c.record.bookmarkId == null) continue;
+    const cur = records[c.raindropId];
+    const to = String(c.record.bookmarkId);
+    if (
+      !cur ||
+      String(cur.bookmarkId) !== String(c.fromBookmarkId) ||
+      to === String(cur.bookmarkId)
+    )
+      continue;
+    moves.set(c.raindropId, to);
+    targeted.set(to, (targeted.get(to) || 0) + 1);
+  }
+  for (const [rid, to] of moves) if (targeted.get(to) > 1) moves.delete(rid);
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const [rid, to] of moves) {
+      const holder = boundTo(to);
+      if (holder && holder.raindropId !== rid && !moves.has(holder.raindropId)) {
+        moves.delete(rid);
+        changed = true;
+      }
+    }
+  }
+  return new Set(moves.keys());
+}
+
+/**
  * Apply rebind / fill / drop changes computed outside the lock (rebind pass,
  * survival checks). Each change applies only if the stored record still has
  * the ids the change was computed from, so a concurrent upload or delete wins.
@@ -548,6 +589,7 @@ export async function applyPairChanges(changes) {
   return mutatePairs((records) => {
     const applied = [];
     const boundTo = (bid) => Object.values(records).find((r) => isBoundTo(r, bid));
+    const vacating = edgeMovesAway(records, changes, boundTo);
     for (const c of changes) {
       if (c.type === "edge" || c.type === "fill") {
         const cur = records[c.raindropId];
@@ -555,8 +597,9 @@ export async function applyPairChanges(changes) {
         if (!cur || String(cur.bookmarkId) !== String(from)) continue;
         const newBid = c.record.bookmarkId != null ? String(c.record.bookmarkId) : null;
         const other = newBid != null ? boundTo(newBid) : null;
-        if (other && other.raindropId !== c.raindropId) continue;
+        if (other && other.raindropId !== c.raindropId && !vacating.has(other.raindropId)) continue;
         records[c.raindropId] = makePairRecord(c.raindropId, c.record);
+        vacating.delete(c.raindropId);
         applied.push(c);
       } else if (c.type === "raindrop") {
         const cur = records[c.fromRaindropId];
