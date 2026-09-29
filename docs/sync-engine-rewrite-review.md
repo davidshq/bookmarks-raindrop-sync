@@ -122,7 +122,7 @@ In `repair-pairs.js:323-327` with `store.js:458-470`, rebound `keptPairs` are no
 - The circuit breaker is applied to every `delete-edge` and `delete-raindrop` drain job.
 - The v1 → v2 write is atomic, and absence deletes are gated during a partial migration.
 - Trash paging stop condition is correct; a renumbered Edge id is resolved by URL before `removeNode`.
-- **P0/P1 closed since review:** query-string URL identity (1); Edge id live only when URL matches (2); shrink/empty second-look cannot promote to complete (3); tombstone prune respects `at > snapshot.at` (4); delete rebinds when survivor’s paired bookmark is dead (5); heartbeat lists again after three presence-only wakes (10); Check Trash sweeps across clicks with a head rescan (11); `verify-integration` passes removed-node payload (14); smoke Repair button selector fixed; circuit breaker gating evidence-based Edge deletes is tested.
+- **P0/P1 closed since review:** query-string URL identity (1); Edge id live only when URL matches (2); shrink/empty second-look cannot promote to complete (3); tombstone prune respects `at > snapshot.at` (4); delete rebinds when survivor’s paired bookmark is dead (5); heartbeat lists again after three presence-only wakes (10); Check Trash sweeps across clicks with a head rescan (11); `verify-integration` passes removed-node payload (14); smoke Repair button selector fixed; circuit breaker gating evidence-based Edge deletes is tested; pull-update refreshes the pair record (drifted records heal from the export) and never rewrites a bookmark whose URL no longer matches its pair.
 
 ## Recurring patterns
 
