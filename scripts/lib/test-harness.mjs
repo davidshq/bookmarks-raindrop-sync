@@ -24,6 +24,8 @@ export const bookmarks = new Map();
 export const TEST_EDGE_CONTAINER_ID = "10";
 
 let bmSeq = 100;
+/** dateAdded clock: unique, increasing ms like real creation times. */
+let dateSeq = 1_700_000_000_000;
 
 export function bmNode(partial) {
   const id = String(partial.id ?? ++bmSeq);
@@ -33,9 +35,42 @@ export function bmNode(partial) {
     url: partial.url,
     parentId: partial.parentId,
     children: partial.children,
+    dateAdded: partial.dateAdded ?? ++dateSeq,
   };
   bookmarks.set(id, node);
   return node;
+}
+
+/**
+ * Reassign every non-root bookmark id the way Chromium does on a load that
+ * needs recovery: depth-first from the root, dateAdded kept. Ids are handed
+ * out from `start`; `reverse` walks children last-first so old and new ids
+ * overlap on different bookmarks.
+ * @param {{ start?: number, reverse?: boolean }} [opts]
+ * @returns {Map<string, string>} old id → new id
+ */
+export function renumberBookmarks({ start = 101, reverse = false } = {}) {
+  const fixed = new Set(["0", "1", "2"]);
+  const order = [];
+  const walk = (id) => {
+    const kids = [...bookmarks.values()].filter((n) => n.parentId === id);
+    if (reverse) kids.reverse();
+    for (const k of kids) {
+      if (!fixed.has(k.id)) order.push(k.id);
+      walk(k.id);
+    }
+  };
+  walk("0");
+  const map = new Map(order.map((old, i) => [old, String(start + i)]));
+  const nodes = [...bookmarks.values()];
+  bookmarks.clear();
+  for (const n of nodes) {
+    const id = map.get(n.id) ?? n.id;
+    const parentId = n.parentId != null ? (map.get(n.parentId) ?? n.parentId) : n.parentId;
+    bookmarks.set(id, { ...n, id, parentId });
+  }
+  bmSeq = Math.max(bmSeq, start + order.length);
+  return map;
 }
 
 /** Reset the tree to the invisible root "0" plus the two top-level folders. */

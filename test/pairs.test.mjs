@@ -25,6 +25,7 @@ test("record written on sync carries url, placement and timestamps", async () =>
   assert.equal(rec.bookmarkId, bm.id);
   assert.equal(rec.url, "https://docs.example/a");
   assert.equal(rec.urlKey, "https://docs.example/a");
+  assert.equal(rec.dateAdded, bm.dateAdded, "bookmark dateAdded recorded");
   assert.equal(rec.title, "Docs");
   assert.equal(rec.edgeParentId, folder.id);
   assert.deepEqual(rec.edgePathAtSync, ["Favorites bar", "Dev"]);
@@ -293,4 +294,13 @@ test("Repair apply accepts a shrunk export as the new presence baseline", async 
   const snap = await eng.presence.loadPresence();
   assert.equal(snap.complete, true, "apply accepts the export the user reviewed");
   assert.equal(snap.lastCompleteCount, 10);
+});
+
+test("upload jobs carry the node's dateAdded; a later event at the id replaces it", async () => {
+  const { eng } = await setupEngine({ config: { syncMode: "one-way" } });
+  const bm = await edgeBookmark("1", "d", "https://d.example/");
+  await eng.queue.enqueue(bm.id, { reason: "change", dateAdded: bm.dateAdded });
+  assert.equal((await eng.queue.list())[0].dateAdded, bm.dateAdded);
+  await eng.queue.enqueue(bm.id, { reason: "change", dateAdded: bm.dateAdded + 5 });
+  assert.equal((await eng.queue.list())[0].dateAdded, bm.dateAdded + 5);
 });

@@ -140,10 +140,17 @@ export async function deadLetterSize() {
 /**
  * Enqueue an upload job for a bookmark id (backward-compatible).
  * @param {string} id bookmark id
- * @param {{ reason?: "move"|"change" }} [opts] activity hint for paired drain
+ * @param {{ reason?: "move"|"change", dateAdded?: number|null }} [opts]
+ *   activity hint for paired drain; the node's dateAdded when the event had it
+ *   (ties the job to that bookmark, not just the id)
  */
-export async function enqueue(id, { reason } = {}) {
-  return enqueueJob({ id, kind: JOB.UPLOAD, ...(reason ? { reason } : {}) });
+export async function enqueue(id, { reason, dateAdded } = {}) {
+  return enqueueJob({
+    id,
+    kind: JOB.UPLOAD,
+    ...(reason ? { reason } : {}),
+    ...(typeof dateAdded === "number" ? { dateAdded } : {}),
+  });
 }
 
 async function noteBulkPromptAfterMutation() {
@@ -175,6 +182,8 @@ export async function enqueueJob(job) {
     if (existing) {
       // Promote activity hint when a move coalesces with an earlier change.
       mergeReason(existing, job.reason);
+      // The latest event names the bookmark now at this id (ids can be reassigned).
+      if (typeof job.dateAdded === "number") existing.dateAdded = job.dateAdded;
       await writeQueue(jobs);
       return false;
     }
@@ -188,20 +197,27 @@ export async function enqueueJob(job) {
 
 /**
  * @param {string[]} ids
- * @param {{ reason?: "move"|"change" }} [opts]
+ * @param {{ reason?: "move"|"change", dateAddedById?: Map<string, number> }} [opts]
+ *   dateAddedById: each node's dateAdded, as for {@link enqueue}
  */
-export async function enqueueMany(ids, { reason } = {}) {
+export async function enqueueMany(ids, { reason, dateAddedById } = {}) {
   const added = await withLock(async () => {
     const jobs = await readQueue();
     const byId = new Map(jobs.map((j) => [j.id, j]));
     let count = 0;
     for (const id of ids) {
       const existing = byId.get(id);
+      const dateAdded = dateAddedById?.get(String(id));
       if (existing) {
         mergeReason(existing, reason);
+        if (typeof dateAdded === "number") existing.dateAdded = dateAdded;
         continue;
       }
-      const job = newJob({ id, ...(reason ? { reason } : {}) });
+      const job = newJob({
+        id,
+        ...(reason ? { reason } : {}),
+        ...(typeof dateAdded === "number" ? { dateAdded } : {}),
+      });
       jobs.push(job);
       byId.set(id, job);
       count++;

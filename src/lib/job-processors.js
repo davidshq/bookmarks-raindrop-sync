@@ -229,6 +229,7 @@ function edgeMeta(node, segments, collectionId) {
     collectionId: collectionId ?? null,
     edgeParentId: node.parentId ?? null,
     edgePathAtSync: segments ?? null,
+    dateAdded: node.dateAdded ?? null,
   };
 }
 

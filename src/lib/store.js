@@ -272,9 +272,14 @@ export async function clearOverride(folderId) {
  *   edgeParentId: string|null,
  *   edgePathAtSync: string[]|null,
  *   title: string|null,
+ *   dateAdded: number|null,
  *   lastSeenEdgeAt: number|null,
  *   lastSeenRaindropAt: number|null,
  * }} PairRecord
+ *
+ * `dateAdded` is the paired bookmark's chrome.bookmarks dateAdded. Unlike the
+ * id it survives a renumber and cannot be edited, so a node whose dateAdded
+ * differs is a different bookmark (pair-rebind isPairBookmarkLive).
  *
  * @typedef {{ v: 2, records: Record<string, PairRecord>, migrationPartial?: boolean, migrationLogged?: boolean }} StoredPairs
  *
@@ -308,6 +313,7 @@ export function makePairRecord(raindropId, fields = {}) {
     edgeParentId: fields.edgeParentId != null ? String(fields.edgeParentId) : null,
     edgePathAtSync: Array.isArray(fields.edgePathAtSync) ? [...fields.edgePathAtSync] : null,
     title: fields.title ?? null,
+    dateAdded: typeof fields.dateAdded === "number" ? fields.dateAdded : null,
     lastSeenEdgeAt: fields.lastSeenEdgeAt ?? null,
     lastSeenRaindropAt: fields.lastSeenRaindropAt ?? null,
   };
@@ -476,6 +482,7 @@ export async function recordSynced(bookmarkId, raindropId, meta = {}) {
       collectionId: pick("collectionId"),
       edgeParentId: pick("edgeParentId"),
       edgePathAtSync: pick("edgePathAtSync"),
+      dateAdded: pick("dateAdded"),
       lastSeenEdgeAt: now,
       lastSeenRaindropAt: now,
     });

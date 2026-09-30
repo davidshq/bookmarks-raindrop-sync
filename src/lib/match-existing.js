@@ -291,6 +291,7 @@ export async function applyMatchExisting(matched, { liveRaindropIds } = {}) {
       title: node.title ?? null,
       edgeParentId: node.parentId ?? null,
       edgePathAtSync: segments,
+      dateAdded: node.dateAdded ?? null,
     });
     paired++;
   }

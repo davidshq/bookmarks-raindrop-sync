@@ -138,6 +138,7 @@ export function placementFromEntry(entry) {
     bookmarkId: entry.id,
     edgeParentId: entry.parentId,
     edgePathAtSync: entry.path,
+    dateAdded: entry.dateAdded ?? null,
   };
 }
 
@@ -249,11 +250,20 @@ export function rebindPass({
     const bid = rec.bookmarkId != null ? String(rec.bookmarkId) : null;
     if (edgeLive(rid, rec)) {
       const healed = driftedUrl(rid, rec);
-      if (healed) {
+      // Backfill dateAdded (records from before it was stored) only from a
+      // node whose URL already vouches for it, never on a pending-job pass.
+      const entry = entryOf(rec);
+      const backfill =
+        rec.dateAdded == null &&
+        typeof entry?.dateAdded === "number" &&
+        (healed || isPairBookmarkLive(rec, entry))
+          ? entry.dateAdded
+          : null;
+      if (healed || backfill != null) {
         const next = makePairRecord(rid, {
           ...rec,
-          url: healed,
-          urlKey: primaryUrlKey(healed),
+          ...(healed ? { url: healed, urlKey: primaryUrlKey(healed) } : {}),
+          ...(backfill != null ? { dateAdded: backfill } : {}),
           lastSeenEdgeAt: now,
         });
         changes.push({ type: "fill", raindropId: rid, bookmarkId: rec.bookmarkId, record: next });

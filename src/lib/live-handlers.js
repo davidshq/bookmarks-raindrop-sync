@@ -21,7 +21,7 @@ import {
   getNodeOrNull,
   ancestorIdsFromFolder,
   isFolderExcluded,
-  collectUrlDescendantIds,
+  collectUrlDescendants,
 } from "./bookmarks.js";
 import { isExcluded } from "./policy.js";
 import { drain } from "./drain.js";
@@ -165,7 +165,7 @@ export async function handleBookmarkCreated(id, node) {
   if (claimExtensionCreate(id, node.url)) return;
   if (await consumeCreateSuppression(String(id))) return;
   if (await hasSynced(id)) return;
-  await queue.enqueue(id);
+  await queue.enqueue(id, { dateAdded: node.dateAdded });
   await drain();
 }
 
@@ -192,8 +192,10 @@ export async function handleBookmarkMoved(id, moveInfo) {
   const node = await getNodeOrNull(id);
   if (!node) return;
 
-  const ids = node.url ? [String(id)] : await collectUrlDescendantIds(id);
+  const nodes = node.url ? [node] : await collectUrlDescendants(id);
+  const ids = nodes.map((n) => String(n.id));
   if (!ids.length) return;
+  const dateAddedById = new Map(nodes.map((n) => [String(n.id), n.dateAdded]));
 
   // Folder fan-out: skip children that are themselves change-suppressed.
   const toEnqueue = [];
@@ -203,7 +205,7 @@ export async function handleBookmarkMoved(id, moveInfo) {
   }
   if (!toEnqueue.length) return;
 
-  await queue.enqueueMany(toEnqueue, { reason: "move" });
+  await queue.enqueueMany(toEnqueue, { reason: "move", dateAddedById });
   await drain();
 }
 
@@ -225,7 +227,7 @@ export async function handleBookmarkChanged(id, changeInfo) {
   if (!node) return;
 
   if (node.url) {
-    await queue.enqueue(String(id), { reason: "change" });
+    await queue.enqueue(String(id), { reason: "change", dateAdded: node.dateAdded });
     await drain();
     return;
   }

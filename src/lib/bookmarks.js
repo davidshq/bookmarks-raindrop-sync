@@ -321,15 +321,15 @@ export async function resolveLocation(node) {
 }
 
 /**
- * Collect URL bookmark ids under `folderId` (depth-first, not including the
- * folder itself). Used when Chromium fires a single onMoved for a folder move.
+ * URL bookmark nodes under `folderId` (depth-first, not including the folder
+ * itself). Used when Chromium fires a single onMoved for a folder move.
  */
-export async function collectUrlDescendantIds(folderId) {
+export async function collectUrlDescendants(folderId) {
   const out = [];
   const walk = async (id) => {
     const children = await getChildren(id);
     for (const child of children) {
-      if (child.url) out.push(String(child.id));
+      if (child.url) out.push(child);
       else await walk(child.id);
     }
   };

@@ -313,3 +313,14 @@ test("record left on the raindrop's old URL heals when the bookmark has its new 
     ["fill"]
   );
 });
+
+test("dateAdded backfills from a node whose URL matches, never from a reused id", () => {
+  const tree = treeIndexFromList([
+    { id: "500", url: URL_A, dateAdded: 111, path: [] },
+    { id: "600", url: "https://unrelated.example/", dateAdded: 222, path: [] },
+  ]);
+  const records = { 7: record("7", "500", URL_A), 8: record("8", "600", "https://b.example/x") };
+  const pass = rebindPass({ records, treeIndex: tree, pendingBookmarkIds: new Set(["600"]) });
+  assert.equal(pass.records["7"].dateAdded, 111);
+  assert.equal(pass.records["8"].dateAdded, null, "a pending job alone does not vouch");
+});
