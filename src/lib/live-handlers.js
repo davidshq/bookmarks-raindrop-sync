@@ -6,7 +6,7 @@ import {
   getConfig,
   getOverrides,
   getRaindropId,
-  hasSynced,
+  getPairRecord,
   getFolderCollectionId,
   consumeRemoveSuppression,
   consumeCreateSuppression,
@@ -24,6 +24,7 @@ import {
   collectUrlDescendants,
 } from "./bookmarks.js";
 import { isExcluded } from "./policy.js";
+import { isDifferentBookmark } from "./pair-rebind.js";
 import { drain } from "./drain.js";
 
 /**
@@ -156,7 +157,10 @@ export async function handleBookmarkRemoved(bookmarkId, removeInfo) {
 }
 
 /**
- * Handle Edge bookmark create — skip enqueue when pull/extension-authored or already paired.
+ * Handle Edge bookmark create — skip enqueue when pull/extension-authored or
+ * already paired. A pair bound to this id but recorded from another bookmark
+ * (dateAdded differs: the id was reassigned) does not count; the upload then
+ * rehomes that pair and syncs this bookmark.
  */
 export async function handleBookmarkCreated(id, node) {
   if (!node?.url) return;
@@ -164,7 +168,8 @@ export async function handleBookmarkCreated(id, node) {
   // so a second copy of the same link is still queued.
   if (claimExtensionCreate(id, node.url)) return;
   if (await consumeCreateSuppression(String(id))) return;
-  if (await hasSynced(id)) return;
+  const rid = await getRaindropId(id);
+  if (rid && !isDifferentBookmark(await getPairRecord(rid), node)) return;
   await queue.enqueue(id, { dateAdded: node.dateAdded });
   await drain();
 }
@@ -237,7 +242,9 @@ export async function handleBookmarkChanged(id, changeInfo) {
   // titles stay canonical (Bookmarks bar / Other bookmarks).
   if (node.parentId === ABSOLUTE_ROOT_ID) return;
 
-  const collectionId = await getFolderCollectionId(id);
+  // Only when the entry was recorded from this folder (dateAdded): after a
+  // renumber the id may belong to a folder mapped to some other collection.
+  const collectionId = await getFolderCollectionId(id, node);
   if (collectionId == null) return;
 
   const config = await getConfig();

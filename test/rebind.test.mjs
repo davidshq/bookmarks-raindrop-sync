@@ -3,7 +3,13 @@
 
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { rebindPass, rebindStaleEdgeId, rebindLogLines } from "../src/lib/pair-rebind.js";
+import {
+  rebindPass,
+  rebindStaleEdgeId,
+  rebindLogLines,
+  isPairBookmarkLive,
+  isDifferentBookmark,
+} from "../src/lib/pair-rebind.js";
 import {
   treeIndexFromList,
   buildTreeIndex,
@@ -323,4 +329,56 @@ test("dateAdded backfills from a node whose URL matches, never from a reused id"
   const pass = rebindPass({ records, treeIndex: tree, pendingBookmarkIds: new Set(["600"]) });
   assert.equal(pass.records["7"].dateAdded, 111);
   assert.equal(pass.records["8"].dateAdded, null, "a pending job alone does not vouch");
+});
+
+test("dateAdded decides identity when both sides have it", () => {
+  const rec = record("7", "500", URL_A, { dateAdded: 111 });
+  const same = { id: "500", url: "https://a.example/edited", dateAdded: 111 };
+  const other = { id: "500", url: URL_A, dateAdded: 222 };
+  assert.equal(isPairBookmarkLive(rec, same), true, "URL edit, same bookmark");
+  assert.equal(isPairBookmarkLive(rec, other), false, "same URL, other bookmark");
+  // Record without dateAdded, node's URL edited: only a queued upload vouches.
+  const edited = { id: "500", url: "https://a.example/edited", dateAdded: 222 };
+  const legacy = record("7", "500", URL_A);
+  assert.equal(
+    isPairBookmarkLive(legacy, edited, new Map([["500", 111]])),
+    false,
+    "a job queued for another bookmark does not vouch"
+  );
+  assert.equal(
+    isPairBookmarkLive(legacy, edited, new Map([["500", 222]])),
+    true,
+    "a job queued for this bookmark does"
+  );
+});
+
+test("rebind finds a renumbered bookmark by dateAdded even after its URL changed", () => {
+  const tree = treeIndexFromList([
+    { id: "500", url: URL_A, dateAdded: 999, path: [] }, // unrelated, same URL
+    { id: "900", url: "https://a.example/moved-on", dateAdded: 111, path: [] },
+  ]);
+  const rec = record("7", "12", URL_A, { dateAdded: 111 });
+  const view = pairsView({ records: { 7: rec } });
+  assert.equal(rebindStaleEdgeId(rec, tree, view).entry.id, "900");
+  const gone = record("7", "12", URL_A, { dateAdded: 333 });
+  assert.equal(rebindStaleEdgeId(gone, tree, view).entry.id, "500", "rebind: URL copy");
+  assert.equal(rebindStaleEdgeId(gone, tree, view, { strict: true }), null, "delete: none");
+});
+
+test("without dateAdded, only a change of URL, title and folder counts as another bookmark", () => {
+  const rec = record("7", "500", URL_A, { title: "A", edgeParentId: "1" });
+  const node = (patch) => ({ id: "500", url: URL_A, title: "A", parentId: "1", ...patch });
+  assert.equal(isDifferentBookmark(rec, node({ url: "https://x.example/" })), false);
+  assert.equal(
+    isDifferentBookmark(rec, node({ url: "https://x.example/", title: "X", parentId: "2" })),
+    true
+  );
+  assert.equal(
+    isDifferentBookmark(
+      { ...rec, dateAdded: 1 },
+      node({ dateAdded: 1, url: "https://x/", title: "X", parentId: "2" })
+    ),
+    false,
+    "dateAdded match wins over everything else"
+  );
 });

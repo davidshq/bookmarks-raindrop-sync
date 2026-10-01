@@ -85,9 +85,10 @@ import { filterUrlMatchingItems, pickMoveRebindCandidate } from "./move-rebind.j
 import { pickUrlMatches, primaryUrlKey, urlMatchKind } from "./url-match.js";
 import { PRESENCE_STALE_MS } from "./constants.js";
 import { ensurePresence, isUsableForUrls, resolveIdsForUrl } from "./presence.js";
-import { loadTreeIndex } from "./tree-index.js";
+import { loadTreeIndex, treeEntriesByDateAdded } from "./tree-index.js";
 import {
   edgeSurvivorCandidates,
+  isDifferentBookmark,
   isPairBookmarkLive,
   livePairBookmarkIds,
   placementFromEntry,
@@ -275,6 +276,72 @@ async function applyReclaimedRaindrop(
   }
 }
 
+/**
+ * Re-queue an upload under the id its bookmark (job.dateAdded) holds now.
+ * Crash-safety markers (offloadRaindropId, createAttemptedAt) travel with it
+ * so a restarted offload still finishes on the right bookmark.
+ * @returns {Promise<boolean>} false when that bookmark is gone or ambiguous
+ *   (the job is left in place for the caller to finish or drop)
+ */
+async function retargetUpload(job) {
+  const matches = treeEntriesByDateAdded(await loadTreeIndex(), job.dateAdded);
+  if (matches.length !== 1) return false;
+  const to = matches[0].id;
+  await queue.remove(job.id);
+  await queue.enqueue(to, {
+    ...(job.reason ? { reason: job.reason } : {}),
+    dateAdded: job.dateAdded,
+  });
+  const markers = {};
+  if (job.offloadRaindropId != null) markers.offloadRaindropId = job.offloadRaindropId;
+  if (job.createAttemptedAt != null) markers.createAttemptedAt = job.createAttemptedAt;
+  if (Object.keys(markers).length) await queue.patchJob(to, markers);
+  await appendLog("info", `Queued upload moved from id ${job.id} to ${to} (bookmark ids changed).`);
+  return true;
+}
+
+/**
+ * The pair `rid` is bound to `node.id` but `node` is another bookmark. Rebind
+ * the pair to its own bookmark by dateAdded (strict: never a URL copy). When
+ * that bookmark's id is held by a pair that is itself on the wrong bookmark
+ * (ids swapped), move both in one batch. Longer chains are left to
+ * reconcile's rebind pass.
+ * @returns {Promise<boolean>} whether the pair moved off `node.id`
+ */
+async function rehomePair(rid, node) {
+  const treeIndex = await loadTreeIndex();
+  const pairs = await getPairs();
+  const now = Date.now();
+  const changes = [];
+  const plan = (r) => {
+    const rec = pairs.records[r];
+    const hit = rec ? rebindStaleEdgeId(rec, treeIndex, pairs, { strict: true }) : null;
+    if (!hit || hit.entry.id === String(rec.bookmarkId)) return null;
+    changes.push({
+      type: "edge",
+      raindropId: r,
+      fromBookmarkId: rec.bookmarkId,
+      record: { ...rec, ...placementFromEntry(hit.entry), lastSeenEdgeAt: now },
+    });
+    return hit.entry.id;
+  };
+  const to = plan(rid);
+  const holder = to != null ? pairs.byBookmark[to] : null;
+  if (holder != null && holder !== rid) plan(holder);
+  const applied = changes.length ? await applyPairChanges(changes) : [];
+  const record = pairs.records[rid];
+  const label = record?.title || record?.url || rid;
+  if (applied.some((c) => c.raindropId === rid)) {
+    await appendLog("info", `Rebound: ${label} (Edge id changed from ${node.id} to ${to}).`);
+    return true;
+  }
+  await appendLog(
+    "warn",
+    `Bookmark ${node.id} is no longer ${label} (ids changed); not writing it onto that raindrop.`
+  );
+  return false;
+}
+
 async function processUpload(job, ctx) {
   const { client, config, overrides, cache, getIndex } = ctx;
 
@@ -282,12 +349,23 @@ async function processUpload(job, ctx) {
   try {
     node = await getNode(job.id);
   } catch {
-    // Bookmark already gone: if offload had stashed a raindrop id, finish the
-    // tombstone. Otherwise the upload target disappeared (user delete) and the
-    // job has nothing left to do.
+    // Nothing at this id. The bookmark may hold another id now (renumber);
+    // otherwise it is gone: finish a stashed offload's tombstone, else the
+    // upload target disappeared (user delete) and the job has nothing to do.
+    if (typeof job.dateAdded === "number" && (await retargetUpload(job))) return;
     await finishInterruptedOffload(job);
     return;
   }
+
+  // Queued for another bookmark: ids were reassigned since. Send the job to
+  // where that bookmark is now; the one at this id did not change. This runs
+  // before the offload branch so a restarted offload never deletes whatever
+  // bookmark holds the old id now.
+  if (typeof job.dateAdded === "number" && job.dateAdded !== node.dateAdded) {
+    if (!(await retargetUpload(job))) await finishInterruptedOffload(job);
+    return;
+  }
+
   if (!node.url) {
     await queue.remove(job.id);
     return;
@@ -330,6 +408,17 @@ async function processUpload(job, ctx) {
   const pathLabel = fullSegments.join("/");
 
   let rid = await getRaindropId(job.id);
+
+  // The pair at this id belongs to another bookmark (ids reassigned): never
+  // write this bookmark onto its raindrop. Move that pair to its bookmark if
+  // it can be found; this one then uploads unpaired (reclaim by URL first).
+  if (rid && isDifferentBookmark(await getPairRecord(rid), node)) {
+    const moved = await rehomePair(rid, node);
+    // Moved: whatever pair is at this id now (a swap brings this bookmark's
+    // own). Not moved: upload unpaired rather than onto the wrong raindrop.
+    rid = moved ? ((await getRaindropId(job.id)) ?? null) : null;
+    if (rid && isDifferentBookmark(await getPairRecord(rid), node)) rid = null;
+  }
 
   if (rid) {
     try {
@@ -459,7 +548,9 @@ async function processRenameCollection(job, ctx) {
   }
   const { node } = gate;
 
-  const collectionId = await getFolderCollectionId(folderId);
+  // Entry must have been recorded from this folder (dateAdded), not from
+  // whatever folder held the id before a renumber.
+  const collectionId = await getFolderCollectionId(folderId, node);
   if (collectionId == null) {
     await queue.remove(job.id);
     return;
@@ -868,8 +959,8 @@ async function processPullRenameFolder(job, ctx) {
   }
   const { node } = gate;
 
-  // Mapping must still point at this collection.
-  const mapped = await getFolderCollectionId(folderId);
+  // Mapping must still point at this collection, from this folder (dateAdded).
+  const mapped = await getFolderCollectionId(folderId, node);
   if (mapped == null || String(mapped) !== String(collectionId)) {
     await queue.remove(job.id);
     return;
@@ -1074,7 +1165,8 @@ async function processDeleteEdge(job, ctx) {
     bookmarkId &&
     !isPairBookmarkLive({ ...record, url }, treeIndex.byId.get(bookmarkId), pending)
   ) {
-    bookmarkId = rebindStaleEdgeId({ ...record, url }, treeIndex, pairs)?.entry.id ?? null;
+    bookmarkId =
+      rebindStaleEdgeId({ ...record, url }, treeIndex, pairs, { strict: true })?.entry.id ?? null;
   }
 
   if (bookmarkId) {

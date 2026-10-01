@@ -18,7 +18,8 @@
 import { getConfig, getOverrides, getPairs, appendLog, setStatus, isRateLimited } from "./store.js";
 import { loadTreeIndex } from "./tree-index.js";
 import { isExcluded } from "./policy.js";
-import { enqueueMany, size } from "./queue.js";
+import { enqueueMany, size, pendingUploadIds } from "./queue.js";
+import { livePairBookmarkIds } from "./pair-rebind.js";
 import { RaindropClient } from "./raindrop.js";
 import { ensurePresence } from "./presence.js";
 import { handleClientError } from "./client-errors.js";
@@ -38,21 +39,28 @@ export async function scanImportScope() {
   const config = await getConfig();
   const overrides = await getOverrides();
   const pairs = await getPairs();
-  const synced = pairs.byBookmark || {};
-  const all = [...(await loadTreeIndex()).byId.values()];
+  const treeIndex = await loadTreeIndex();
+  // A pair counts only while its bookmark is the one it was recorded from
+  // (dateAdded / URL): after a renumber the id may hold an unsynced bookmark.
+  const synced = livePairBookmarkIds(pairs.records, treeIndex, await pendingUploadIds());
+  const all = [...treeIndex.byId.values()];
 
   const unpairedIds = [];
+  /** @type {Map<string, number>} */
+  const dateAddedById = new Map();
   let paired = 0;
-  for (const { id, ancestorIds } of all) {
+  for (const { id, ancestorIds, dateAdded } of all) {
     if (isExcluded(ancestorIds, overrides, config.defaultPolicy)) continue;
-    if (Object.prototype.hasOwnProperty.call(synced, id)) {
+    if (synced.has(id)) {
       paired++;
     } else {
       unpairedIds.push(id);
+      if (typeof dateAdded === "number") dateAddedById.set(id, dateAdded);
     }
   }
   return {
     unpairedIds,
+    dateAddedById,
     unpaired: unpairedIds.length,
     paired,
     edgeScanned: all.length,
@@ -87,9 +95,11 @@ async function refreshPresenceForImport() {
 
 export async function startBackfill() {
   await refreshPresenceForImport();
-  const { unpairedIds, edgeScanned } = await scanImportScope();
+  const { unpairedIds, dateAddedById, edgeScanned } = await scanImportScope();
 
-  const added = await enqueueMany(unpairedIds);
+  // Each job is tied to its bookmark's dateAdded so a renumber between
+  // Import and drain retargets the job instead of uploading whatever holds the id.
+  const added = await enqueueMany(unpairedIds, { dateAddedById });
   await appendLog("info", `Import queued ${added} bookmark(s) (${edgeScanned} scanned).`);
   await setStatus({ pending: await size(), lastPushAt: Date.now() });
   return { scanned: edgeScanned, queued: added };

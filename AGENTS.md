@@ -21,6 +21,12 @@ be recoverable from the URL (plus path) and must rebind by URL when an id is
 gone, instead of concluding that the user deleted the bookmark. A missing
 counterpart on either side is not evidence of intent to delete.
 
+The same applies to folder ids. Any stored map keyed by a Chromium id
+(bookmark or folder: pairs, `folderCollections`, upload jobs) must also carry
+that node's `dateAdded` and compare it against the live node before acting on
+the id. `dateAdded` survives a renumber and cannot be edited; an id alone
+never proves the node is the one the entry was recorded from.
+
 ## Live Raindrop tests use the test account only
 
 Every live API run (integration, smoke, spike, ad-hoc scripts) uses the test

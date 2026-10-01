@@ -25,7 +25,12 @@ test("concurrent folder-collection and cache writes all survive", async () => {
     ...[1, 2, 3].map((n) => store.recordFolderCollection(`f${n}`, n)),
     ...[1, 2, 3].map((n) => store.cacheCollection(`Root/P${n}`, n)),
   ]);
-  assert.deepEqual(await store.getFolderCollections(), { f1: 1, f2: 2, f3: 3 });
+  // No such folders in the fake tree, so entries carry no dateAdded.
+  assert.deepEqual(await store.getFolderCollections(), {
+    f1: { collectionId: 1, dateAdded: null },
+    f2: { collectionId: 2, dateAdded: null },
+    f3: { collectionId: 3, dateAdded: null },
+  });
   assert.deepEqual(await store.getCollectionCache(), { "Root/P1": 1, "Root/P2": 2, "Root/P3": 3 });
 });
 

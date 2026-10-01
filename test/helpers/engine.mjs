@@ -8,10 +8,11 @@ import {
   patchClient,
   bookmarks,
   storage,
+  renumberBookmarks,
 } from "../../scripts/lib/test-harness.mjs";
 import { makeMockRaindrop } from "./fake-raindrop.mjs";
 
-export { bookmarks, storage };
+export { bookmarks, storage, renumberBookmarks };
 
 /** Stable test root; Raindrop sync-root collection has the same title. */
 export const ROOT_NAME = "ERS-Test";

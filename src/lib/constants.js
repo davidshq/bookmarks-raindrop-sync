@@ -129,7 +129,8 @@ export const KEY = {
   RECONCILE: "reconcile",
   COLLECTION_CACHE: "collectionCache", // { [collectionPath]: collectionId }
   /** Edge folder id → Raindrop collection id (for in-place folder renames). */
-  FOLDER_COLLECTIONS: "folderCollections", // { [folderId]: collectionId }
+  /** { [folderId]: { collectionId, dateAdded } }; legacy entries are a bare collectionId. */
+  FOLDER_COLLECTIONS: "folderCollections",
   // { pending, lastError, deletionsHalted, lastActivityAt, lastPushAt, rateLimitedUntil,
   //   rateRemaining, rateResetAt, rateObservedAt, lastThrottle }
   STATUS: "status",

@@ -38,6 +38,7 @@ import {
   pruneTombstones,
   getFolderCollections,
   getFolderCollectionId,
+  folderCollectionMatches,
   clearFolderCollection,
   recordFolderCollection,
   getCollectionCache,
@@ -503,15 +504,38 @@ async function finishFolderRenamePull(index, config, overrides, rootId, topRoots
   }
 
   const map = await getFolderCollections();
-  for (const [folderId, collectionId] of Object.entries(map)) {
+  for (const [folderId, entry] of Object.entries(map)) {
+    const { collectionId } = entry;
     const col = getById(index, collectionId);
     if (!col) {
       // Collection gone from Raindrop — drop stale mapping (titles handled elsewhere).
       await clearFolderCollection(folderId);
       continue;
     }
-
     const wantTitle = col.title || "";
+
+    // Identity before anything else: the folder at this id must be the one
+    // the entry was recorded from. A dated mismatch is a reused id (renumber);
+    // a legacy entry is confirmed by a matching title and gains its dateAdded,
+    // or is dropped so the path-based heal above re-derives it next finish.
+    const node = await getNodeOrNull(folderId);
+    if (!node) {
+      await clearFolderCollection(folderId);
+      continue;
+    }
+    if (!folderCollectionMatches(entry, node)) {
+      await clearFolderCollection(folderId);
+      continue;
+    }
+    if (entry.dateAdded == null && typeof node.dateAdded === "number") {
+      if (rootTitlesEqual(node.title, wantTitle)) {
+        await recordFolderCollection(folderId, collectionId, node.dateAdded);
+      } else {
+        await clearFolderCollection(folderId);
+      }
+      continue;
+    }
+
     // Title match (incl. canonical bar/other vs local Favorites/Other) skips.
     const gate = await renamableFolder(folderId, overrides, config.defaultPolicy, { wantTitle });
     if (gate.gone) await clearFolderCollection(folderId);
@@ -531,7 +555,7 @@ async function finishFolderRenamePull(index, config, overrides, rootId, topRoots
  */
 async function healUnmappedFolderCollections(index, rootId, config, overrides, topRoots) {
   const map = await getFolderCollections();
-  const mappedColIds = new Set(Object.values(map).map(String));
+  const mappedColIds = new Set(Object.values(map).map((e) => String(e.collectionId)));
   let enqueued = 0;
 
   for (const { collectionId, relativeSegments } of collectionsUnderRoot(index, rootId)) {
@@ -576,8 +600,9 @@ async function healUnmappedFolderCollections(index, rootId, config, overrides, t
     for (const f of folders) {
       if (f.parentId === ABSOLUTE_ROOT_ID) continue;
       if (rootTitlesEqual(f.title, wantTitle)) continue;
-      const existing = map[String(f.id)] ?? (await getFolderCollectionId(f.id));
-      if (existing != null) continue;
+      // Fresh read (heal above may have recorded); a dated entry from another
+      // folder does not count as mapped.
+      if ((await getFolderCollectionId(f.id, f)) != null) continue;
       if (await isFolderExcluded(f.id, f.parentId, overrides, config.defaultPolicy)) {
         continue;
       }

@@ -122,10 +122,16 @@ export async function sizeByDirection() {
   return countByDirection(await readQueue());
 }
 
-/** Bookmark ids with a queued upload (their pair URL may lag a local edit). */
+/**
+ * Bookmark ids with a queued upload (their pair URL may lag a local edit),
+ * each mapped to the dateAdded of the bookmark it was queued for (or null).
+ * @returns {Promise<Map<string, number|null>>}
+ */
 export async function pendingUploadIds() {
-  return new Set(
-    (await readQueue()).filter((j) => jobKind(j) === JOB.UPLOAD).map((j) => String(j.id))
+  return new Map(
+    (await readQueue())
+      .filter((j) => jobKind(j) === JOB.UPLOAD)
+      .map((j) => [String(j.id), typeof j.dateAdded === "number" ? j.dateAdded : null])
   );
 }
 

@@ -1,9 +1,10 @@
-// Popup: compact status and quick actions. Delegates to the service worker.
+// Popup: compact status and Pull now. Import lives in Options only, behind the
+// bulk Match gate (a thinly paired library must not be re-uploaded wholesale).
 
 import { MSG, SYNC_MODE } from "../lib/constants.js";
 import { runPullNow } from "../lib/pull-now.js";
 import { formatHaltBanner } from "../lib/status-format.js";
-import { fmtTime, renderPendingCounts, runAction, setLine } from "../ui/actions.js";
+import { fmtTime, renderPendingCounts, setLine } from "../ui/actions.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -27,17 +28,6 @@ async function refresh() {
 
   setLine($("halt"), formatHaltBanner(resp.status, { compact: true }));
 }
-
-$("backfill").addEventListener("click", async () => {
-  await runAction({
-    statusEl: $("importStatus"),
-    button: $("backfill"),
-    pending: "Queuing browser bookmarks…",
-    send: () => chrome.runtime.sendMessage({ type: MSG.RUN_BACKFILL }),
-    ok: (resp) => `Queued ${resp.queued} bookmark(s).`,
-  });
-  refresh();
-});
 
 $("reconcile").addEventListener("click", async () => {
   const out = $("pullStatus");

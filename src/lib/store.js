@@ -1024,22 +1024,85 @@ function renameCachePaths(cache, target, newTitle) {
 }
 
 /* ---- Edge folder id → Raindrop collection id (folder renames) ---- */
+//
+// Folder ids are as disposable as bookmark ids (AGENTS.md), so each entry
+// also carries the folder's dateAdded and a rename in either direction checks
+// it against the live node first. Legacy entries (a bare collection id) have
+// no dateAdded; they are trusted until the next record along an upload or
+// pull path fills it in, or until a reconcile finish confirms them by title
+// (reconcile-finish.js).
 
+/** @typedef {{ collectionId: string|number, dateAdded: number|null }} FolderCollectionEntry */
+
+/** @returns {FolderCollectionEntry|null} */
+function normalizeFolderCollection(raw) {
+  if (raw == null) return null;
+  if (typeof raw === "object") {
+    if (raw.collectionId == null) return null;
+    return {
+      collectionId: raw.collectionId,
+      dateAdded: typeof raw.dateAdded === "number" ? raw.dateAdded : null,
+    };
+  }
+  return { collectionId: raw, dateAdded: null };
+}
+
+/**
+ * True when `entry` may act on `node`: a dated entry only for the folder it
+ * was recorded from; a legacy entry, or no node to compare, for any.
+ * @param {FolderCollectionEntry|null|undefined} entry
+ * @param {{ dateAdded?: number|null }|null|undefined} node
+ */
+export function folderCollectionMatches(entry, node) {
+  if (!entry) return false;
+  if (entry.dateAdded == null || typeof node?.dateAdded !== "number") return true;
+  return entry.dateAdded === node.dateAdded;
+}
+
+/** @returns {Promise<Record<string, FolderCollectionEntry>>} */
 export async function getFolderCollections() {
-  return read(KEY.FOLDER_COLLECTIONS, {});
+  const raw = await read(KEY.FOLDER_COLLECTIONS, {});
+  const out = {};
+  for (const [folderId, value] of Object.entries(raw)) {
+    const entry = normalizeFolderCollection(value);
+    if (entry) out[folderId] = entry;
+  }
+  return out;
 }
 
-export async function getFolderCollectionId(folderId) {
+/**
+ * Collection id mapped to `folderId`, or null. With `node` (the live folder),
+ * a dated entry recorded from a different folder reads as unmapped.
+ * @param {string|number} folderId
+ * @param {{ dateAdded?: number|null }|null} [node]
+ */
+export async function getFolderCollectionId(folderId, node = null) {
   if (!hasId(folderId)) return null;
-  const map = await getFolderCollections();
-  const id = map[String(folderId)];
-  return id != null ? id : null;
+  const entry = (await getFolderCollections())[String(folderId)];
+  return folderCollectionMatches(entry, node) ? entry.collectionId : null;
 }
 
-export async function recordFolderCollection(folderId, collectionId) {
+/**
+ * Record folder → collection. `dateAdded` is the folder's; when omitted it is
+ * read from the live node so entries recorded along upload / pull paths
+ * (which only know the id) still carry identity.
+ * @param {string|number} folderId
+ * @param {string|number} collectionId
+ * @param {number|null} [dateAdded]
+ */
+export async function recordFolderCollection(folderId, collectionId, dateAdded) {
   if (!hasId(folderId) || collectionId == null) return;
+  let when = typeof dateAdded === "number" ? dateAdded : null;
+  if (dateAdded === undefined) {
+    try {
+      const [node] = await chrome.bookmarks.get(String(folderId));
+      if (typeof node?.dateAdded === "number") when = node.dateAdded;
+    } catch {
+      // Folder gone or API unavailable: record without identity (legacy shape).
+    }
+  }
   await mutateKey(KEY.FOLDER_COLLECTIONS, {}, (map) => {
-    map[String(folderId)] = collectionId;
+    map[String(folderId)] = { collectionId, dateAdded: when };
   });
 }
 

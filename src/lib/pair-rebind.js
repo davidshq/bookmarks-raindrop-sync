@@ -18,7 +18,7 @@
 import { primaryUrlKey, urlMatchKeys } from "./url-match.js";
 import { makePairRecord, pairsView } from "./store.js";
 import { pickMoveRebindCandidate } from "./move-rebind.js";
-import { treeEntriesForUrl, compareIds } from "./tree-index.js";
+import { treeEntriesForUrl, treeEntriesByDateAdded, compareIds } from "./tree-index.js";
 import { idsForUrl } from "./presence.js";
 
 /**
@@ -34,24 +34,75 @@ function recordUrl(record) {
   return record?.url || record?.urlKey || null;
 }
 
+/** Two URLs share a match key (same link up to normalization / tracking params). */
+function urlsShareKey(a, b) {
+  if (!a || !b) return false;
+  const keys = new Set(urlMatchKeys(a));
+  return urlMatchKeys(b).some((k) => keys.has(k));
+}
+
+/** Both sides carry dateAdded, so it alone decides identity. */
+function bothDated(record, entry) {
+  return typeof record?.dateAdded === "number" && typeof entry?.dateAdded === "number";
+}
+
+/**
+ * A queued upload vouches for the node at its id (the record's URL lags a
+ * local edit until the upload lands) — unless the job was queued for another
+ * bookmark (its dateAdded differs from the node's).
+ * @param {Set<string>|Map<string, number|null>|null} pending
+ */
+function pendingVouches(pending, entry) {
+  const id = String(entry.id);
+  if (!pending?.has(id)) return false;
+  const jobDate = pending instanceof Map ? pending.get(id) : null;
+  return (
+    typeof jobDate !== "number" ||
+    typeof entry.dateAdded !== "number" ||
+    jobDate === entry.dateAdded
+  );
+}
+
 /**
  * Whether `entry` (tree entry or bookmark node at the record's bookmark id) is
- * still the bookmark `record` is paired with. An id alone is not identity:
- * Chromium renumbers from 1, so an old id can come back on an unrelated
- * bookmark. The id counts only when the URLs share a match key, or when an
- * upload for it is queued (the record's URL lags a local edit until that job
- * lands). A record without a URL falls back to the id.
+ * still the bookmark `record` is paired with. An id alone is not identity: a
+ * browser can reassign every id (Edge, older Chrome) and sync, restore or
+ * import can replace nodes. dateAdded survives all of that and cannot be
+ * edited, so when both sides have it, it decides. Otherwise (records from
+ * before it was stored) the id counts when the URLs share a match key or a
+ * queued upload vouches for it; a record without a URL falls back to the id.
  * @param {PairRecord|null|undefined} record
- * @param {{ id: string, url?: string }|null|undefined} entry
- * @param {Set<string>|null} [pendingBookmarkIds] ids with a queued upload
+ * @param {{ id: string, url?: string, dateAdded?: number|null }|null|undefined} entry
+ * @param {Set<string>|Map<string, number|null>|null} [pendingBookmarkIds]
+ *   ids with a queued upload (a Map carries each job's dateAdded)
  */
 export function isPairBookmarkLive(record, entry, pendingBookmarkIds = null) {
   if (!entry?.url) return false;
-  if (pendingBookmarkIds?.has(String(entry.id))) return true;
+  if (bothDated(record, entry)) return record.dateAdded === entry.dateAdded;
+  if (pendingVouches(pendingBookmarkIds, entry)) return true;
   const url = recordUrl(record);
   if (!url) return true;
-  const keys = new Set(urlMatchKeys(url));
-  return urlMatchKeys(entry.url).some((k) => keys.has(k));
+  return urlsShareKey(url, entry.url);
+}
+
+/**
+ * Whether the node at a pair's bookmark id is certainly another bookmark, for
+ * an upload deciding whether to write onto the pair's raindrop. dateAdded
+ * decides when both sides have it. A record without it (from before it was
+ * stored) counts as another bookmark only when URL, title and folder all
+ * differ: a real edit rarely changes all three before the upload runs.
+ * @param {PairRecord|null|undefined} record
+ * @param {{ url?: string, title?: string, parentId?: string, dateAdded?: number }} node
+ */
+export function isDifferentBookmark(record, node) {
+  if (!record) return false;
+  if (bothDated(record, node)) return record.dateAdded !== node.dateAdded;
+  return (
+    !urlsShareKey(recordUrl(record), node.url) &&
+    (record.title ?? "") !== (node.title ?? "") &&
+    record.edgeParentId != null &&
+    String(record.edgeParentId) !== String(node.parentId)
+  );
 }
 
 /**
@@ -92,16 +143,41 @@ export function edgeSurvivorCandidates(treeIndex, url, rid, pairs) {
 }
 
 /**
- * Find a live bookmark for a record whose bookmark id is gone from the tree.
+ * Find a live bookmark for a record whose bookmark id is gone from the tree
+ * or now holds another bookmark: by dateAdded first, then by URL.
  * @param {PairRecord} record
  * @param {TreeIndex} treeIndex
- * @param {{ byBookmark: Record<string, string> }} pairs current forward links
+ * @param {{ byBookmark: Record<string, string>, records?: Record<string, PairRecord> }} pairs
+ *   current forward links (with records, a binding to the wrong bookmark is free)
+ * @param {{ strict?: boolean }} [opts] strict: no URL fallback for a record
+ *   with dateAdded (a delete must reach the paired bookmark or nothing)
  * @returns {{ entry: TreeEntry, samePath: boolean }|null}
  */
-export function rebindStaleEdgeId(record, treeIndex, pairs) {
+export function rebindStaleEdgeId(record, treeIndex, pairs, { strict = false } = {}) {
+  const rid = String(record.raindropId);
+  // The same bookmark under a new id: dateAdded finds it whatever its URL is
+  // now; URL and path only break a tie (imports can share a millisecond).
+  // A binding whose record names another bookmark (dateAdded) is stale.
+  const free = (entry) => {
+    const bound = pairs.byBookmark?.[entry.id];
+    if (!entry.inScope) return false;
+    if (bound == null || String(bound) === rid) return true;
+    const holder = pairs.records?.[bound];
+    return bothDated(holder, entry) && holder.dateAdded !== entry.dateAdded;
+  };
+  let dated = treeEntriesByDateAdded(treeIndex, record.dateAdded).filter(free);
+  if (dated.length > 1) dated = dated.filter((e) => urlsShareKey(recordUrl(record), e.url));
+  if (dated.length > 1) {
+    dated = dated.filter((e) => samePath(e.path, record.edgePathAtSync));
+  }
+  if (dated.length === 1) {
+    return { entry: dated[0], samePath: samePath(dated[0].path, record.edgePathAtSync) };
+  }
+  // strict (deletes): a dated record's bookmark is that one or none, never a
+  // URL copy the user may never have synced.
+  if (strict && typeof record.dateAdded === "number") return null;
   const url = recordUrl(record);
   if (!url) return null;
-  const rid = String(record.raindropId);
   const candidates = edgeSurvivorCandidates(treeIndex, url, rid, pairs);
   if (!candidates.length) return null;
   const underPath = candidates.filter((e) => samePath(e.path, record.edgePathAtSync));
@@ -226,11 +302,9 @@ export function rebindPass({
   const driftedUrl = (rid, rec) => {
     const current = snapshot?.urlById?.get(rid);
     const entry = entryOf(rec);
-    return current && entry && !isPairBookmarkLive(rec, entry, pendingBookmarkIds)
-      ? isPairBookmarkLive({ url: current }, entry)
-        ? current
-        : null
-      : null;
+    if (!current || !entry?.url || urlsShareKey(recordUrl(rec), entry.url)) return null;
+    if (!urlsShareKey(current, entry.url)) return null;
+    return bothDated(rec, entry) && rec.dateAdded !== entry.dateAdded ? null : current;
   };
   const edgeLive = (rid, rec) =>
     !!rec &&

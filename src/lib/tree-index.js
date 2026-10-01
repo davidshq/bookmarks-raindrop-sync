@@ -29,8 +29,31 @@ import { getConfig, getOverrides } from "./store.js";
  * @typedef {{
  *   byId: Map<string, TreeEntry>,
  *   byUrlKey: Map<string, string[]>,
+ *   byDateAdded?: Map<number, string[]>,
  * }} TreeIndex
  */
+
+/** File `entry` under its dateAdded (the id-independent identity). */
+function indexDateAdded(byDateAdded, entry) {
+  if (typeof entry.dateAdded !== "number") return;
+  const list = byDateAdded.get(entry.dateAdded);
+  if (list) list.push(entry.id);
+  else byDateAdded.set(entry.dateAdded, [entry.id]);
+}
+
+/**
+ * Entries whose dateAdded equals `dateAdded` (normally one; imports and burst
+ * creates can share a millisecond).
+ * @param {TreeIndex} treeIndex
+ * @param {number|null|undefined} dateAdded
+ * @returns {TreeEntry[]}
+ */
+export function treeEntriesByDateAdded(treeIndex, dateAdded) {
+  if (typeof dateAdded !== "number") return [];
+  return (treeIndex.byDateAdded?.get(dateAdded) || [])
+    .map((id) => treeIndex.byId.get(id))
+    .filter(Boolean);
+}
 
 /**
  * Scope predicate over a tree entry's folder path and ancestor ids.
@@ -58,6 +81,8 @@ export function buildTreeIndex(roots, { isInScope = () => true } = {}) {
   const byId = new Map();
   /** @type {Map<string, string[]>} */
   const byUrlKey = new Map();
+  /** @type {Map<number, string[]>} */
+  const byDateAdded = new Map();
   const walk = (node, path, ancestorIds) => {
     for (const child of node.children ?? []) {
       if (child.url) {
@@ -74,13 +99,14 @@ export function buildTreeIndex(roots, { isInScope = () => true } = {}) {
         entry.inScope = !!isInScope(entry);
         byId.set(entry.id, entry);
         indexUrlKeys(byUrlKey, entry.url, entry.id);
+        indexDateAdded(byDateAdded, entry);
       } else {
         walk(child, [...path, child.title || ""], [String(child.id), ...ancestorIds]);
       }
     }
   };
   for (const root of roots || []) walk(root, [], []);
-  return { byId, byUrlKey };
+  return { byId, byUrlKey, byDateAdded };
 }
 
 /**
@@ -91,6 +117,8 @@ export function buildTreeIndex(roots, { isInScope = () => true } = {}) {
 export function treeIndexFromList(list) {
   const byId = new Map();
   const byUrlKey = new Map();
+  /** @type {Map<number, string[]>} */
+  const byDateAdded = new Map();
   for (const b of list || []) {
     if (!b?.url) continue;
     const entry = {
@@ -105,8 +133,9 @@ export function treeIndexFromList(list) {
     };
     byId.set(entry.id, entry);
     indexUrlKeys(byUrlKey, entry.url, entry.id);
+    indexDateAdded(byDateAdded, entry);
   }
-  return { byId, byUrlKey };
+  return { byId, byUrlKey, byDateAdded };
 }
 
 /**
